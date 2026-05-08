@@ -1,0 +1,26 @@
+[package]
+name = "am-fs-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure-Rust block-device framework — BlockRead/BlockDevice traits + FileDevice + CallbackDevice + LRU cache. Foundation crate for fs-* drivers and img-* containers."
+repository = "https://github.com/antimatter-studios/rust-fs-core"
+
+[lib]
+# Published as `am-fs-core` on crates.io; consumers `use fs_core::...`.
+name = "fs_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+
+[dev-dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "unwind"
+
+[profile.dev]
+opt-level = 1
+panic = "unwind"
