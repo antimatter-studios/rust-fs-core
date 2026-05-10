@@ -22,4 +22,4 @@ pub use callback_device::{CallbackDevice, FlushCb, ReadCb, WriteCb};
 pub use error::{Error, Result};
 pub use file_device::FileDevice;
 pub use readonly::ReadOnlyDevice;
-pub use slice::{OwnedSlice, SliceReader};
+pub use slice::{OwnedRwSlice, OwnedSlice, SliceReader};
