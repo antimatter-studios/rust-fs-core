@@ -334,7 +334,7 @@ pub struct FsCoreCallbackCfg {
 // the callback contract already puts the host on the hook for thread-safe
 // `ctx` use.
 fn cb_io_err(rc: c_int, op: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, format!("callback {op} returned {rc}"))
+    io::Error::other(format!("callback {op} returned {rc}"))
 }
 
 /// Build an [`FsCoreDevice`] backed by host-provided callbacks. Returns NULL
