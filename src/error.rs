@@ -9,7 +9,11 @@ pub enum Error {
     /// Underlying I/O failure (open, seek, read, write).
     Io(io::Error),
     /// Device returned fewer bytes than requested before EOF.
-    ShortRead { offset: u64, want: usize, got: usize },
+    ShortRead {
+        offset: u64,
+        want: usize,
+        got: usize,
+    },
     /// `write_at` invoked on a device opened read-only.
     ReadOnly,
     /// Read or write past the end of the device.

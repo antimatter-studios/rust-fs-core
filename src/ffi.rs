@@ -25,9 +25,11 @@
 #![allow(clippy::missing_safety_doc)]
 
 use crate::block::BlockDevice;
+use crate::callback_device::CallbackDevice;
 use crate::error::Error;
 use std::cell::RefCell;
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_int, c_void, CString};
+use std::io;
 use std::panic::AssertUnwindSafe;
 use std::ptr;
 use std::slice;
@@ -197,8 +199,10 @@ pub unsafe extern "C" fn fs_core_device_is_writable(handle: *const FsCoreDevice)
     if handle.is_null() {
         return false;
     }
-    std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*handle).inner.is_writable() }))
-        .unwrap_or(false)
+    std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+        (*handle).inner.is_writable()
+    }))
+    .unwrap_or(false)
 }
 
 /// Read exactly `len` bytes from `offset` into `buf`. `buf` must be at
@@ -295,6 +299,127 @@ pub unsafe extern "C" fn fs_core_file_open(
 }
 
 // ---------------------------------------------------------------------------
+// Callback-backed device. Used when the caller already owns the underlying
+// resource (FSKit FSBlockDeviceResource, Go file handle, C-side fd) and
+// wants to expose it as an `FsCoreDevice` so it can be stacked under a
+// container reader (qcow2, vhd, ...) before reaching a filesystem driver.
+// ---------------------------------------------------------------------------
+
+/// Read callback. Returns 0 on success, non-zero (errno-like) on failure.
+/// Must fully fill `len` bytes — short reads are treated as I/O errors.
+pub type FsCoreReadCb = Option<
+    unsafe extern "C" fn(ctx: *mut c_void, offset: u64, buf: *mut u8, len: usize) -> c_int,
+>;
+
+/// Write callback. NULL → device is read-only.
+pub type FsCoreWriteCb = Option<
+    unsafe extern "C" fn(ctx: *mut c_void, offset: u64, buf: *const u8, len: usize) -> c_int,
+>;
+
+/// Flush/fsync callback. NULL → flush is a no-op.
+pub type FsCoreFlushCb = Option<unsafe extern "C" fn(ctx: *mut c_void) -> c_int>;
+
+/// Configuration passed to [`fs_core_device_from_callbacks`].
+#[repr(C)]
+pub struct FsCoreCallbackCfg {
+    pub read: FsCoreReadCb,
+    pub write: FsCoreWriteCb,
+    pub flush: FsCoreFlushCb,
+    pub ctx: *mut c_void,
+    pub size: u64,
+}
+
+// `*mut c_void` is `!Send + !Sync` by default and `unsafe impl Send` on a
+// NewType doesn't propagate cleanly through closure auto-traits. Round-trip
+// the pointer through `usize` instead — that's `Copy + Send + Sync`, and
+// the callback contract already puts the host on the hook for thread-safe
+// `ctx` use.
+fn cb_io_err(rc: c_int, op: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Other,
+        format!("callback {op} returned {rc}"),
+    )
+}
+
+/// Build an [`FsCoreDevice`] backed by host-provided callbacks. Returns NULL
+/// on failure (config null, read callback null, etc.) and stashes detail in
+/// the thread-local last-error.
+///
+/// `cfg.ctx` is opaque to fs-core; it is passed back verbatim to every
+/// callback invocation. The caller is responsible for ensuring it remains
+/// valid until [`fs_core_device_close`] is called on the returned handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fs_core_device_from_callbacks(
+    cfg: *const FsCoreCallbackCfg,
+) -> *mut FsCoreDevice {
+    if cfg.is_null() {
+        set_last_error("cfg is null");
+        return ptr::null_mut();
+    }
+    let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+        let cfg = &*cfg;
+        let read_fn = match cfg.read {
+            Some(f) => f,
+            None => {
+                set_last_error("cfg.read is null");
+                return ptr::null_mut();
+            }
+        };
+        let write_fn = cfg.write;
+        let flush_fn = cfg.flush;
+        let ctx_addr = cfg.ctx as usize;
+        let size = cfg.size;
+
+        let read_cb: crate::callback_device::ReadCb = Box::new(move |off, buf| {
+            let ctx = ctx_addr as *mut c_void;
+            let rc = read_fn(ctx, off, buf.as_mut_ptr(), buf.len());
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(cb_io_err(rc, "read"))
+            }
+        });
+        let write_cb: Option<crate::callback_device::WriteCb> = write_fn.map(|f| {
+            Box::new(move |off, buf: &[u8]| {
+                let ctx = ctx_addr as *mut c_void;
+                let rc = f(ctx, off, buf.as_ptr(), buf.len());
+                if rc == 0 {
+                    Ok(())
+                } else {
+                    Err(cb_io_err(rc, "write"))
+                }
+            }) as crate::callback_device::WriteCb
+        });
+        let flush_cb: Option<crate::callback_device::FlushCb> = flush_fn.map(|f| {
+            Box::new(move || {
+                let ctx = ctx_addr as *mut c_void;
+                let rc = f(ctx);
+                if rc == 0 {
+                    Ok(())
+                } else {
+                    Err(cb_io_err(rc, "flush"))
+                }
+            }) as crate::callback_device::FlushCb
+        });
+
+        let dev = CallbackDevice {
+            size,
+            read: read_cb,
+            write: write_cb,
+            flush: flush_cb,
+        };
+        FsCoreDevice::into_handle(Arc::new(dev))
+    }));
+    match res {
+        Ok(p) => p,
+        Err(panic) => {
+            set_last_error(panic_message(&panic));
+            ptr::null_mut()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — exercise the FFI surface from Rust. The C side is verified by
 // the consumer crates that use these functions through their own headers.
 // ---------------------------------------------------------------------------
@@ -357,5 +482,137 @@ mod tests {
         assert!(!msg.is_null());
         let s = unsafe { std::ffi::CStr::from_ptr(msg).to_string_lossy().into_owned() };
         assert!(!s.is_empty(), "expected an error message");
+    }
+
+    // ---- callback-backed device tests --------------------------------
+
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    struct CbState {
+        data: Vec<u8>,
+        flushed: u32,
+    }
+
+    /// Trampoline that pulls a `*mut CbState` out of the opaque ctx.
+    unsafe extern "C" fn t_read(
+        ctx: *mut c_void,
+        offset: u64,
+        buf: *mut u8,
+        len: usize,
+    ) -> c_int {
+        let st = unsafe { &mut *(ctx as *mut CbState) };
+        let off = offset as usize;
+        if off + len > st.data.len() {
+            return 5; // out of bounds
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(st.data.as_ptr().add(off), buf, len);
+        }
+        0
+    }
+    unsafe extern "C" fn t_write(
+        ctx: *mut c_void,
+        offset: u64,
+        buf: *const u8,
+        len: usize,
+    ) -> c_int {
+        let st = unsafe { &mut *(ctx as *mut CbState) };
+        let off = offset as usize;
+        if off + len > st.data.len() {
+            return 5;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(buf, st.data.as_mut_ptr().add(off), len);
+        }
+        0
+    }
+    unsafe extern "C" fn t_flush(ctx: *mut c_void) -> c_int {
+        let st = unsafe { &mut *(ctx as *mut CbState) };
+        st.flushed += 1;
+        0
+    }
+
+    #[test]
+    fn callback_device_round_trip_rw() {
+        let mut st = Box::new(CbState {
+            data: vec![0u8; 32],
+            flushed: 0,
+        });
+        for (i, b) in st.data.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let ctx = &mut *st as *mut CbState as *mut c_void;
+
+        let cfg = FsCoreCallbackCfg {
+            read: Some(t_read),
+            write: Some(t_write),
+            flush: Some(t_flush),
+            ctx,
+            size: 32,
+        };
+        let h = unsafe { fs_core_device_from_callbacks(&cfg) };
+        assert!(!h.is_null(), "device_from_callbacks returned NULL");
+
+        unsafe {
+            assert_eq!(fs_core_device_size_bytes(h), 32);
+            assert!(fs_core_device_is_writable(h));
+
+            let mut buf = [0u8; 4];
+            let rc = fs_core_device_read_at(h, 4, buf.as_mut_ptr(), buf.len());
+            assert_eq!(rc, FsCoreErrorCode::Ok);
+            assert_eq!(buf, [4, 5, 6, 7]);
+
+            let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+            let rc = fs_core_device_write_at(h, 8, payload.as_ptr(), payload.len());
+            assert_eq!(rc, FsCoreErrorCode::Ok);
+
+            let rc = fs_core_device_flush(h);
+            assert_eq!(rc, FsCoreErrorCode::Ok);
+
+            let mut readback = [0u8; 4];
+            let rc = fs_core_device_read_at(h, 8, readback.as_mut_ptr(), readback.len());
+            assert_eq!(rc, FsCoreErrorCode::Ok);
+            assert_eq!(readback, payload);
+
+            fs_core_device_close(h);
+        }
+        assert_eq!(st.flushed, 1);
+        assert_eq!(&st.data[8..12], &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn callback_device_readonly_when_write_null() {
+        let mut st = Box::new(CbState {
+            data: vec![0xAAu8; 16],
+            flushed: 0,
+        });
+        let ctx = &mut *st as *mut CbState as *mut c_void;
+        let cfg = FsCoreCallbackCfg {
+            read: Some(t_read),
+            write: None,
+            flush: None,
+            ctx,
+            size: 16,
+        };
+        let h = unsafe { fs_core_device_from_callbacks(&cfg) };
+        assert!(!h.is_null());
+        unsafe {
+            assert!(!fs_core_device_is_writable(h));
+            let rc = fs_core_device_write_at(h, 0, [1u8].as_ptr(), 1);
+            assert_eq!(rc, FsCoreErrorCode::ReadOnly);
+            // Flush is a no-op when callback is NULL.
+            assert_eq!(fs_core_device_flush(h), FsCoreErrorCode::Ok);
+            fs_core_device_close(h);
+        }
+        // suppress unused warning
+        let _ = StdArc::new(StdMutex::new(0u8));
+    }
+
+    #[test]
+    fn callback_device_null_cfg_returns_null() {
+        let h = unsafe { fs_core_device_from_callbacks(ptr::null()) };
+        assert!(h.is_null());
+        let msg = fs_core_last_error_message();
+        assert!(!msg.is_null());
     }
 }

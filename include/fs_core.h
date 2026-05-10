@@ -79,6 +79,36 @@ FsCoreErrorCode   fs_core_device_flush(const FsCoreDevice *handle);
 
 FsCoreDevice *fs_core_file_open(const char *path, bool writable);
 
+/* -------------------------------------------------------------------------
+ * Callback-backed device. Use when the caller already owns the underlying
+ * resource (an FSKit FSBlockDeviceResource, a Go file handle, a C-side fd)
+ * and wants to expose it as an `FsCoreDevice` so it can be stacked under a
+ * container reader (qcow2, vhd, ...) before reaching a filesystem driver.
+ *
+ * Callback contract: return 0 on success, non-zero (errno-like) on failure.
+ * Read callbacks must fully fill `len` bytes — short reads count as I/O
+ * errors. `write` may be NULL for read-only devices. `flush` may be NULL
+ * (treated as a no-op).
+ *
+ * `ctx` is opaque to fs-core and passed back verbatim to every callback.
+ * The caller owns `ctx` and must keep it valid until `fs_core_device_close`
+ * is called on the returned handle.
+ * ------------------------------------------------------------------------- */
+
+typedef int (*FsCoreReadCb)(void *ctx, uint64_t offset, uint8_t *buf, size_t len);
+typedef int (*FsCoreWriteCb)(void *ctx, uint64_t offset, const uint8_t *buf, size_t len);
+typedef int (*FsCoreFlushCb)(void *ctx);
+
+typedef struct {
+    FsCoreReadCb  read;
+    FsCoreWriteCb write;   /* NULL → device is read-only */
+    FsCoreFlushCb flush;   /* NULL → flush is a no-op */
+    void         *ctx;
+    uint64_t      size;
+} FsCoreCallbackCfg;
+
+FsCoreDevice *fs_core_device_from_callbacks(const FsCoreCallbackCfg *cfg);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
