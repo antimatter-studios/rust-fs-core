@@ -128,6 +128,85 @@ impl BlockRead for OwnedSlice {
 /// Same rationale as `SliceReader`: read-only by default.
 impl BlockDevice for OwnedSlice {}
 
+/// Owned, read-WRITE slice over an `Arc<dyn BlockDevice>`. Use when the
+/// parent is writable and the slice should propagate writes (e.g. an
+/// individual partition handed to a filesystem driver). Reads + writes
+/// outside `[0, length)` return [`Error::ShortRead`] / [`Error::OutOfBounds`].
+pub struct OwnedRwSlice {
+    parent: Arc<dyn BlockDevice>,
+    start: u64,
+    length: u64,
+}
+
+impl OwnedRwSlice {
+    pub fn new(parent: Arc<dyn BlockDevice>, start: u64, length: u64) -> Self {
+        Self {
+            parent,
+            start,
+            length,
+        }
+    }
+
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+}
+
+impl BlockRead for OwnedRwSlice {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let want = buf.len() as u64;
+        if offset
+            .checked_add(want)
+            .map(|e| e > self.length)
+            .unwrap_or(true)
+        {
+            return Err(Error::ShortRead {
+                offset,
+                want: buf.len(),
+                got: 0,
+            });
+        }
+        self.parent.read_at(self.start + offset, buf)
+    }
+
+    fn size_bytes(&self) -> u64 {
+        self.length
+    }
+}
+
+impl BlockDevice for OwnedRwSlice {
+    fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
+        let want = buf.len() as u64;
+        if offset
+            .checked_add(want)
+            .map(|e| e > self.length)
+            .unwrap_or(true)
+        {
+            return Err(Error::OutOfBounds {
+                offset,
+                len: want,
+                size: self.length,
+            });
+        }
+        if !self.parent.is_writable() {
+            return Err(Error::ReadOnly);
+        }
+        self.parent.write_at(self.start + offset, buf)
+    }
+
+    fn flush(&self) -> Result<()> {
+        self.parent.flush()
+    }
+
+    fn is_writable(&self) -> bool {
+        self.parent.is_writable()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

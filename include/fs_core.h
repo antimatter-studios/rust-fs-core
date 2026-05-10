@@ -109,6 +109,29 @@ typedef struct {
 
 FsCoreDevice *fs_core_device_from_callbacks(const FsCoreCallbackCfg *cfg);
 
+/* -------------------------------------------------------------------------
+ * Slice constructors. Return a child device whose byte 0 maps to
+ * `start` of `parent` and whose addressable range is `length` bytes.
+ *
+ * Used by partition-table walkers + container readers that want to
+ * hand a sub-range to a downstream consumer (filesystem driver, fsck,
+ * etc) without copying.
+ *
+ * The slice keeps an Arc reference to the parent — closing the parent
+ * before the slice is fine. Free the slice with `fs_core_device_close`.
+ *
+ * `_ro` always rejects writes (FS_CORE_READ_ONLY) regardless of the
+ * parent's writability. `_rw` forwards writes to the parent at
+ * (start + offset); writes outside [0, length) return
+ * FS_CORE_OUT_OF_BOUNDS, and a non-writable parent surfaces
+ * FS_CORE_READ_ONLY.
+ * ------------------------------------------------------------------------- */
+
+FsCoreDevice *fs_core_device_slice_ro(const FsCoreDevice *parent,
+                                       uint64_t start, uint64_t length);
+FsCoreDevice *fs_core_device_slice_rw(const FsCoreDevice *parent,
+                                       uint64_t start, uint64_t length);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

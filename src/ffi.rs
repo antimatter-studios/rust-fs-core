@@ -307,9 +307,8 @@ pub unsafe extern "C" fn fs_core_file_open(
 
 /// Read callback. Returns 0 on success, non-zero (errno-like) on failure.
 /// Must fully fill `len` bytes — short reads are treated as I/O errors.
-pub type FsCoreReadCb = Option<
-    unsafe extern "C" fn(ctx: *mut c_void, offset: u64, buf: *mut u8, len: usize) -> c_int,
->;
+pub type FsCoreReadCb =
+    Option<unsafe extern "C" fn(ctx: *mut c_void, offset: u64, buf: *mut u8, len: usize) -> c_int>;
 
 /// Write callback. NULL → device is read-only.
 pub type FsCoreWriteCb = Option<
@@ -335,10 +334,7 @@ pub struct FsCoreCallbackCfg {
 // the callback contract already puts the host on the hook for thread-safe
 // `ctx` use.
 fn cb_io_err(rc: c_int, op: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Other,
-        format!("callback {op} returned {rc}"),
-    )
+    io::Error::new(io::ErrorKind::Other, format!("callback {op} returned {rc}"))
 }
 
 /// Build an [`FsCoreDevice`] backed by host-provided callbacks. Returns NULL
@@ -409,6 +405,71 @@ pub unsafe extern "C" fn fs_core_device_from_callbacks(
             flush: flush_cb,
         };
         FsCoreDevice::into_handle(Arc::new(dev))
+    }));
+    match res {
+        Ok(p) => p,
+        Err(panic) => {
+            set_last_error(panic_message(&panic));
+            ptr::null_mut()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slice constructor. Returns a child `FsCoreDevice` whose byte 0 maps to
+// `start` of the parent and whose addressable range is `length` bytes.
+// Useful for partition-table walkers that want to hand one partition to
+// a filesystem driver without copying. The slice keeps an `Arc` to the
+// parent, so closing the parent before the slice is fine.
+// ---------------------------------------------------------------------------
+
+/// Read-only slice. Writes via the returned handle return
+/// `FS_CORE_READ_ONLY` regardless of the parent's writability.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fs_core_device_slice_ro(
+    parent: *const FsCoreDevice,
+    start: u64,
+    length: u64,
+) -> *mut FsCoreDevice {
+    if parent.is_null() {
+        set_last_error("parent is null");
+        return ptr::null_mut();
+    }
+    let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+        let parent_arc = (*parent).inner().clone();
+        // OwnedSlice takes Arc<dyn BlockRead>; trait upcast from
+        // BlockDevice -> BlockRead is supported in the pinned toolchain.
+        let parent_read: Arc<dyn crate::block::BlockRead> = parent_arc;
+        let slice = crate::slice::OwnedSlice::new(parent_read, start, length);
+        FsCoreDevice::into_handle(Arc::new(slice))
+    }));
+    match res {
+        Ok(p) => p,
+        Err(panic) => {
+            set_last_error(panic_message(&panic));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Read-write slice. Writes are forwarded to the parent at `start +
+/// offset`; writes outside `[0, length)` return `FS_CORE_OUT_OF_BOUNDS`.
+/// If the parent reports `is_writable() == false`, write attempts return
+/// `FS_CORE_READ_ONLY`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fs_core_device_slice_rw(
+    parent: *const FsCoreDevice,
+    start: u64,
+    length: u64,
+) -> *mut FsCoreDevice {
+    if parent.is_null() {
+        set_last_error("parent is null");
+        return ptr::null_mut();
+    }
+    let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+        let parent_arc = (*parent).inner().clone();
+        let slice = crate::slice::OwnedRwSlice::new(parent_arc, start, length);
+        FsCoreDevice::into_handle(Arc::new(slice))
     }));
     match res {
         Ok(p) => p,
@@ -494,12 +555,7 @@ mod tests {
     }
 
     /// Trampoline that pulls a `*mut CbState` out of the opaque ctx.
-    unsafe extern "C" fn t_read(
-        ctx: *mut c_void,
-        offset: u64,
-        buf: *mut u8,
-        len: usize,
-    ) -> c_int {
+    unsafe extern "C" fn t_read(ctx: *mut c_void, offset: u64, buf: *mut u8, len: usize) -> c_int {
         let st = unsafe { &mut *(ctx as *mut CbState) };
         let off = offset as usize;
         if off + len > st.data.len() {
