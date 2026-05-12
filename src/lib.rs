@@ -15,6 +15,7 @@ pub mod ffi;
 pub mod file_device;
 pub mod readonly;
 pub mod slice;
+pub mod stream;
 
 pub use block::{BlockDevice, BlockRead};
 pub use caching_device::CachingDevice;
@@ -23,3 +24,4 @@ pub use error::{Error, Result};
 pub use file_device::FileDevice;
 pub use readonly::ReadOnlyDevice;
 pub use slice::{OwnedRwSlice, OwnedSlice, SliceReader};
+pub use stream::BlockReadStreamer;
