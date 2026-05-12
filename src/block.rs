@@ -79,6 +79,15 @@ impl<T: BlockRead + ?Sized> BlockRead for Box<T> {
     }
 }
 
+impl<T: BlockRead + ?Sized> BlockRead for &T {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        (**self).read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        (**self).size_bytes()
+    }
+}
+
 impl<T: BlockDevice + ?Sized> BlockDevice for Box<T> {
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         (**self).write_at(offset, buf)
