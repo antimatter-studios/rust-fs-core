@@ -13,7 +13,10 @@ use std::sync::Arc;
 fn tmp_image(bytes: &[u8]) -> String {
     static C: AtomicU32 = AtomicU32::new(0);
     let n = C.fetch_add(1, Ordering::Relaxed);
-    let p = format!("/tmp/fs_core_compo_{}_{n}.img", std::process::id());
+    let p = std::env::temp_dir()
+        .join(format!("fs_core_compo_{}_{n}.img", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
     File::create(&p).unwrap().write_all(bytes).unwrap();
     p
 }

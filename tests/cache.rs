@@ -9,7 +9,10 @@ use std::sync::{Arc, Mutex};
 fn tmp_image(bytes: &[u8]) -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = format!("/tmp/fs_core_block_test_{}_{n}.img", std::process::id());
+    let path = std::env::temp_dir()
+        .join(format!("fs_core_block_test_{}_{n}.img", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
     let mut f = File::create(&path).unwrap();
     f.write_all(bytes).unwrap();
     path
