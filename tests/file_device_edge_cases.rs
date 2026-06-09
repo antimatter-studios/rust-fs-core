@@ -9,7 +9,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 fn tmp_image(bytes: &[u8]) -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = format!("/tmp/fs_core_fd_edge_{}_{n}.img", std::process::id());
+    let path = std::env::temp_dir()
+        .join(format!("fs_core_fd_edge_{}_{n}.img", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
     let mut f = File::create(&path).unwrap();
     f.write_all(bytes).unwrap();
     path
@@ -17,14 +20,17 @@ fn tmp_image(bytes: &[u8]) -> String {
 
 #[test]
 fn open_nonexistent_returns_io_error() {
-    let path = format!(
-        "/tmp/fs_core_does_not_exist_{}_{}.img",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let path = std::env::temp_dir()
+        .join(format!(
+            "fs_core_does_not_exist_{}_{}.img",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+        .to_string_lossy()
+        .into_owned();
     match FileDevice::open(&path) {
         Err(Error::Io(_)) => {}
         Err(e) => panic!("expected Error::Io, got {e:?}"),
@@ -34,7 +40,10 @@ fn open_nonexistent_returns_io_error() {
 
 #[test]
 fn open_rw_nonexistent_returns_io_error() {
-    let path = format!("/tmp/fs_core_rw_missing_{}.img", std::process::id());
+    let path = std::env::temp_dir()
+        .join(format!("fs_core_rw_missing_{}.img", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
     let _ = std::fs::remove_file(&path);
     match FileDevice::open_rw(&path) {
         Err(Error::Io(_)) => {}

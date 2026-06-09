@@ -332,4 +332,51 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::Other);
         assert!(err.to_string().contains("simulated failure"));
     }
+
+    #[test]
+    fn offset_from_handles_add_sub_and_overflow() {
+        assert_eq!(offset_from(10, 5).unwrap(), 15);
+        assert_eq!(offset_from(10, -4).unwrap(), 6);
+        assert_eq!(offset_from(10, 0).unwrap(), 10);
+
+        // Positive delta that overflows u64.
+        let err = offset_from(u64::MAX, 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // Negative delta past zero.
+        let err = offset_from(3, -4).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn error_mapping_covers_every_variant() {
+        // Io is forwarded with its original kind preserved.
+        let io_err = fs_core_error_to_io(Error::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "missing",
+        )));
+        assert_eq!(io_err.kind(), io::ErrorKind::NotFound);
+
+        let sr = fs_core_error_to_io(Error::ShortRead {
+            offset: 4,
+            want: 8,
+            got: 2,
+        });
+        assert_eq!(sr.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(sr.to_string().contains("short read"));
+
+        let oob = fs_core_error_to_io(Error::OutOfBounds {
+            offset: 16,
+            len: 4,
+            size: 8,
+        });
+        assert_eq!(oob.kind(), io::ErrorKind::UnexpectedEof);
+
+        let ro = fs_core_error_to_io(Error::ReadOnly);
+        assert_eq!(ro.kind(), io::ErrorKind::PermissionDenied);
+
+        let custom = fs_core_error_to_io(Error::Custom("boom".into()));
+        assert_eq!(custom.kind(), io::ErrorKind::Other);
+        assert!(custom.to_string().contains("boom"));
+    }
 }
