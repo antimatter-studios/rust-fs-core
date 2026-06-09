@@ -110,5 +110,27 @@ mod tests {
         let back = wrapped.into_inner();
         // Inner should still be writable when accessed directly.
         assert!(BlockDevice::is_writable(&back));
+        // The recovered inner still accepts a direct write + read-back.
+        back.write_at(0, &[0x42; 4]).unwrap();
+        let mut buf = [0u8; 4];
+        back.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, [0x42; 4]);
+    }
+
+    #[test]
+    fn inner_borrows_without_consuming() {
+        let mut v = vec![0u8; 8];
+        v[0..2].copy_from_slice(&[0x9A, 0xBC]);
+        let wrapped = ReadOnlyDevice::new(WritableBytes(Mutex::new(v)));
+
+        // `inner()` exposes the underlying device by reference; the inner
+        // type's own (writable) behaviour is visible through it.
+        assert!(BlockDevice::is_writable(wrapped.inner()));
+        assert_eq!(wrapped.inner().size_bytes(), 8);
+
+        // Wrapper still usable after borrowing the inner.
+        let mut buf = [0u8; 2];
+        wrapped.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, [0x9A, 0xBC]);
     }
 }

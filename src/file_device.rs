@@ -97,3 +97,82 @@ impl BlockDevice for FileDevice {
         self.writable
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Unique temp path under the system temp dir (no extra dev-deps).
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        std::env::temp_dir().join(format!("fs_core_{tag}_{pid}_{n}.bin"))
+    }
+
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn open_rw_round_trips_write_then_read() {
+        let path = temp_path("rw");
+        let _g = Cleanup(path.clone());
+        std::fs::write(&path, vec![0u8; 32]).unwrap();
+
+        let dev = FileDevice::open_rw(&path).unwrap();
+        assert!(dev.is_writable());
+        assert_eq!(dev.size_bytes(), 32);
+
+        dev.write_at(8, &[0xAA, 0xBB, 0xCC, 0xDD]).unwrap();
+        dev.flush().unwrap();
+
+        let mut buf = [0u8; 4];
+        dev.read_at(8, &mut buf).unwrap();
+        assert_eq!(buf, [0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn open_rw_errors_on_missing_path() {
+        let path = temp_path("missing");
+        assert!(FileDevice::open_rw(&path).is_err());
+    }
+
+    #[test]
+    fn open_best_effort_uses_rw_when_writable() {
+        let path = temp_path("best_rw");
+        let _g = Cleanup(path.clone());
+        std::fs::write(&path, vec![0u8; 16]).unwrap();
+
+        let dev = FileDevice::open_best_effort(&path).unwrap();
+        assert!(dev.is_writable());
+        dev.write_at(0, &[0x11; 4]).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn open_best_effort_falls_back_to_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_path("best_ro");
+        let _g = Cleanup(path.clone());
+        std::fs::write(&path, vec![0xEFu8; 16]).unwrap();
+        // Read-only permissions force `open_rw` to fail; fall back to `open`.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let dev = FileDevice::open_best_effort(&path).unwrap();
+        assert!(!dev.is_writable());
+        // Writes are rejected at the read-only layer.
+        assert!(matches!(dev.write_at(0, &[0u8; 4]), Err(Error::ReadOnly)));
+        // Read still works.
+        let mut buf = [0u8; 4];
+        dev.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, [0xEF; 4]);
+        // Flush on a read-only device is a no-op success.
+        dev.flush().unwrap();
+    }
+}

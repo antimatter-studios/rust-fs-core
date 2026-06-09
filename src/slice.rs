@@ -280,4 +280,91 @@ mod tests {
         let err = BlockDevice::write_at(&slice, 0, &[1u8; 4]).unwrap_err();
         assert!(matches!(err, Error::ReadOnly));
     }
+
+    #[test]
+    fn owned_slice_accessors_report_geometry() {
+        let dev: Arc<dyn BlockRead> = Arc::new(Bytes(Mutex::new(vec![0u8; 4096])));
+        let slice = OwnedSlice::new(dev, 512, 256);
+        assert_eq!(slice.start(), 512);
+        assert_eq!(slice.length(), 256);
+        assert_eq!(slice.size_bytes(), 256);
+    }
+
+    /// Writable in-memory device for exercising `OwnedRwSlice`.
+    struct RwBytes(Mutex<Vec<u8>>);
+    impl BlockRead for RwBytes {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+            let b = self.0.lock().unwrap();
+            let start = offset as usize;
+            let end = start + buf.len();
+            if end > b.len() {
+                return Err(Error::ShortRead {
+                    offset,
+                    want: buf.len(),
+                    got: b.len().saturating_sub(start),
+                });
+            }
+            buf.copy_from_slice(&b[start..end]);
+            Ok(())
+        }
+        fn size_bytes(&self) -> u64 {
+            self.0.lock().unwrap().len() as u64
+        }
+    }
+    impl BlockDevice for RwBytes {
+        fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
+            let mut b = self.0.lock().unwrap();
+            let s = offset as usize;
+            b[s..s + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn is_writable(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn owned_rw_slice_accessors_report_geometry() {
+        let dev: Arc<dyn BlockDevice> = Arc::new(RwBytes(Mutex::new(vec![0u8; 64])));
+        let slice = OwnedRwSlice::new(dev, 16, 32);
+        assert_eq!(slice.start(), 16);
+        assert_eq!(slice.length(), 32);
+        assert_eq!(slice.size_bytes(), 32);
+        assert!(slice.is_writable());
+    }
+
+    #[test]
+    fn owned_rw_slice_rebases_reads_and_writes() {
+        let dev: Arc<dyn BlockDevice> = Arc::new(RwBytes(Mutex::new(vec![0u8; 64])));
+        let slice = OwnedRwSlice::new(dev.clone(), 16, 32);
+
+        // Write through the slice lands at parent offset 16.
+        slice.write_at(0, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+        let mut buf = [0u8; 4];
+        slice.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, [0xDE, 0xAD, 0xBE, 0xEF]);
+
+        // Confirm rebasing against the parent directly.
+        let mut pbuf = [0u8; 4];
+        dev.read_at(16, &mut pbuf).unwrap();
+        assert_eq!(pbuf, [0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn owned_rw_slice_rejects_out_of_bounds_write() {
+        let dev: Arc<dyn BlockDevice> = Arc::new(RwBytes(Mutex::new(vec![0u8; 64])));
+        let slice = OwnedRwSlice::new(dev, 0, 8);
+        match slice.write_at(6, &[0u8; 4]) {
+            Err(Error::OutOfBounds { .. }) => {}
+            other => panic!("expected OutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn owned_rw_slice_flush_delegates_to_parent() {
+        let dev: Arc<dyn BlockDevice> = Arc::new(RwBytes(Mutex::new(vec![0u8; 8])));
+        let slice = OwnedRwSlice::new(dev, 0, 8);
+        // Default `flush` on RwBytes is a no-op success; the slice forwards it.
+        slice.flush().unwrap();
+    }
 }
