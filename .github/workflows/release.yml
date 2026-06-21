@@ -34,8 +34,8 @@ jobs:
             exit 1
           fi
 
-      - run: cargo test --all-targets
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   publish:
     name: publish to crates.io
