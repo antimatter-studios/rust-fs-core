@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# chore writes its fingerprint cache here
+.chore/
