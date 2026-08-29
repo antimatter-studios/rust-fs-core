@@ -22,6 +22,24 @@ extern "C" {
 
 /* -------------------------------------------------------------------------
  * Error codes. Stable: do not renumber.
+ *
+ * On over-run, which code you get depends on the direction of the request
+ * and on which crate owns the bytes under the handle:
+ *
+ *   - a read off the end of a file-backed handle (fs_core_file_open), or
+ *     past the end of a slice's own range, returns FS_CORE_SHORT_READ;
+ *   - a write refused for the same reason returns FS_CORE_OUT_OF_BOUNDS;
+ *   - handles from a sister crate whose container declares a virtual size
+ *     (the img-* readers) return FS_CORE_OUT_OF_BOUNDS for over-reads, and
+ *     the caching / read-only / slice wrappers pass that through unchanged;
+ *   - a callback-backed handle returns FS_CORE_IO whenever the host
+ *     callback fails, whatever the reason.
+ *
+ * A caller that just wants to know "the read overran the device" and does
+ * not control which crate opened the handle should accept both
+ * FS_CORE_SHORT_READ and FS_CORE_OUT_OF_BOUNDS, and should not assume
+ * those two are exhaustive: over a callback-backed handle the same
+ * overrun arrives as FS_CORE_IO.
  * ------------------------------------------------------------------------- */
 
 typedef enum {
