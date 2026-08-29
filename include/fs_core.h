@@ -51,6 +51,8 @@ typedef enum {
     FS_CORE_CUSTOM        = 5,
     FS_CORE_NULL_ARG      = 6,
     FS_CORE_PANIC         = 7,
+    /* Reserved; never returned. See FsCoreErrorCode::BadString in ffi.rs:
+       the only path-taking entry point returns a pointer, not a code. */
     FS_CORE_BAD_STRING    = 8,
 } FsCoreErrorCode;
 
