@@ -49,11 +49,25 @@ pub enum FsCoreErrorCode {
     Ok = 0,
     /// Underlying I/O failed.
     Io = 1,
-    /// EOF before the requested range was satisfied.
+    /// A read the source could not satisfy in full — it ran out of data.
+    /// What a file-backed handle returns for a read off the end of the
+    /// file, and what a slice returns for a read past its own end.
     ShortRead = 2,
     /// Write attempted on a read-only device.
     ReadOnly = 3,
-    /// Read or write past the end of the device.
+    /// A request refused up front because its range lies outside the
+    /// device's declared size; nothing was transferred.
+    ///
+    /// This crate returns it only for a **write** past the end of an RW
+    /// slice. It reaches **reads** from sister crates whose container
+    /// declares a virtual size (the `img-*` readers), and from this
+    /// crate's caching / read-only / slice wrappers when they forward
+    /// such a parent's error. A C consumer that only wants to know "the
+    /// read overran the device", and does not control which crate opened
+    /// the handle, should accept this and `FS_CORE_SHORT_READ` alike —
+    /// and should not treat the pair as exhaustive, since a
+    /// callback-backed handle reports its host's refusal as
+    /// `FS_CORE_IO`.
     OutOfBounds = 4,
     /// Driver-specific error — message in the thread-local last-error.
     Custom = 5,
