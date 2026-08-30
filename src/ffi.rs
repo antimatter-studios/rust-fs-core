@@ -398,6 +398,24 @@ fn cb_io_err(rc: c_int, op: &str) -> io::Error {
     io::Error::other(format!("callback {op} returned {rc}"))
 }
 
+/// The host callback contract, in one place: **zero is success**.
+///
+/// All three adapters below wrapped a call in the same four lines —
+/// invoke, compare against zero, `Ok(())` or `cb_io_err`. Three copies
+/// of a convention is three chances to write `rc != 0` where the others
+/// write `rc == 0`, and a caller would see reads succeed while writes
+/// reported failure on the very same device.
+///
+/// `op` names the operation in the error, which is the only thing the
+/// three genuinely differ in.
+fn cb_result(rc: c_int, op: &'static str) -> io::Result<()> {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(cb_io_err(rc, op))
+    }
+}
+
 /// Build an [`FsCoreDevice`] backed by host-provided callbacks. Returns NULL
 /// on failure (config null, read callback null, etc.) and stashes detail in
 /// the thread-local last-error.
@@ -435,33 +453,18 @@ pub unsafe extern "C" fn fs_core_device_from_callbacks(
 
         let read_cb: crate::callback_device::ReadCb = Box::new(move |off, buf| {
             let ctx = ctx_addr as *mut c_void;
-            let rc = read_fn(ctx, off, buf.as_mut_ptr(), buf.len());
-            if rc == 0 {
-                Ok(())
-            } else {
-                Err(cb_io_err(rc, "read"))
-            }
+            cb_result(read_fn(ctx, off, buf.as_mut_ptr(), buf.len()), "read")
         });
         let write_cb: Option<crate::callback_device::WriteCb> = write_fn.map(|f| {
             Box::new(move |off, buf: &[u8]| {
                 let ctx = ctx_addr as *mut c_void;
-                let rc = f(ctx, off, buf.as_ptr(), buf.len());
-                if rc == 0 {
-                    Ok(())
-                } else {
-                    Err(cb_io_err(rc, "write"))
-                }
+                cb_result(f(ctx, off, buf.as_ptr(), buf.len()), "write")
             }) as crate::callback_device::WriteCb
         });
         let flush_cb: Option<crate::callback_device::FlushCb> = flush_fn.map(|f| {
             Box::new(move || {
                 let ctx = ctx_addr as *mut c_void;
-                let rc = f(ctx);
-                if rc == 0 {
-                    Ok(())
-                } else {
-                    Err(cb_io_err(rc, "flush"))
-                }
+                cb_result(f(ctx), "flush")
             }) as crate::callback_device::FlushCb
         });
 

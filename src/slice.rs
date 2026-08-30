@@ -272,28 +272,8 @@ impl BlockDevice for OwnedRwSlice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_device::{Bytes, RwBytes};
     use std::sync::Mutex;
-
-    struct Bytes(Mutex<Vec<u8>>);
-    impl BlockRead for Bytes {
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            let b = self.0.lock().unwrap();
-            let start = offset as usize;
-            let end = start + buf.len();
-            if end > b.len() {
-                return Err(Error::ShortRead {
-                    offset,
-                    want: buf.len(),
-                    got: b.len().saturating_sub(start),
-                });
-            }
-            buf.copy_from_slice(&b[start..end]);
-            Ok(())
-        }
-        fn size_bytes(&self) -> u64 {
-            self.0.lock().unwrap().len() as u64
-        }
-    }
 
     #[test]
     fn slice_reader_rebases_offsets() {
@@ -350,39 +330,6 @@ mod tests {
         assert_eq!(slice.start(), 512);
         assert_eq!(slice.length(), 256);
         assert_eq!(slice.size_bytes(), 256);
-    }
-
-    /// Writable in-memory device for exercising `OwnedRwSlice`.
-    struct RwBytes(Mutex<Vec<u8>>);
-    impl BlockRead for RwBytes {
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            let b = self.0.lock().unwrap();
-            let start = offset as usize;
-            let end = start + buf.len();
-            if end > b.len() {
-                return Err(Error::ShortRead {
-                    offset,
-                    want: buf.len(),
-                    got: b.len().saturating_sub(start),
-                });
-            }
-            buf.copy_from_slice(&b[start..end]);
-            Ok(())
-        }
-        fn size_bytes(&self) -> u64 {
-            self.0.lock().unwrap().len() as u64
-        }
-    }
-    impl BlockDevice for RwBytes {
-        fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
-            let mut b = self.0.lock().unwrap();
-            let s = offset as usize;
-            b[s..s + buf.len()].copy_from_slice(buf);
-            Ok(())
-        }
-        fn is_writable(&self) -> bool {
-            true
-        }
     }
 
     #[test]

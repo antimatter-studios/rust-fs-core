@@ -54,32 +54,8 @@ impl<T: BlockRead> BlockDevice for ReadOnlyDevice<T> {}
 mod tests {
     use super::*;
     use crate::error::Error;
+    use crate::test_device::RwBytes as WritableBytes;
     use std::sync::Mutex;
-
-    /// Pretend-writable inner for testing the read-only wrapper.
-    struct WritableBytes(Mutex<Vec<u8>>);
-    impl BlockRead for WritableBytes {
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            let b = self.0.lock().unwrap();
-            let s = offset as usize;
-            buf.copy_from_slice(&b[s..s + buf.len()]);
-            Ok(())
-        }
-        fn size_bytes(&self) -> u64 {
-            self.0.lock().unwrap().len() as u64
-        }
-    }
-    impl BlockDevice for WritableBytes {
-        fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
-            let mut b = self.0.lock().unwrap();
-            let s = offset as usize;
-            b[s..s + buf.len()].copy_from_slice(buf);
-            Ok(())
-        }
-        fn is_writable(&self) -> bool {
-            true
-        }
-    }
 
     #[test]
     fn read_through_works() {
