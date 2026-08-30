@@ -75,7 +75,19 @@ pub enum FsCoreErrorCode {
     NullArg = 6,
     /// `catch_unwind` caught a panic crossing the FFI boundary.
     Panic = 7,
-    /// Path string was not valid UTF-8 (or NUL-terminated).
+    /// Reserved. Never returned.
+    ///
+    /// It was meant for a path that is not valid UTF-8, but the one
+    /// function that meets that case — `fs_core_open_file` — returns a
+    /// POINTER, not a code, so it reports the failure as NULL plus a
+    /// message and cannot return this. No other entry point takes a
+    /// path.
+    ///
+    /// Kept rather than removed because the numbering is published in
+    /// `include/fs_core.h` and a consumer may already switch on 8;
+    /// renumbering the codes after it would be an ABI break for a
+    /// tidiness gain. A future path-taking function that returns a code
+    /// should use this rather than invent another.
     BadString = 8,
 }
 
@@ -342,11 +354,7 @@ pub struct FsCoreCallbackCfg {
     pub size: u64,
 }
 
-// `*mut c_void` is `!Send + !Sync` by default and `unsafe impl Send` on a
-// NewType doesn't propagate cleanly through closure auto-traits. Round-trip
-// the pointer through `usize` instead — that's `Copy + Send + Sync`, and
-// the callback contract already puts the host on the hook for thread-safe
-// `ctx` use.
+/// Turn a callback's non-zero return into an `io::Error`.
 fn cb_io_err(rc: c_int, op: &str) -> io::Error {
     io::Error::other(format!("callback {op} returned {rc}"))
 }
@@ -377,6 +385,12 @@ pub unsafe extern "C" fn fs_core_device_from_callbacks(
         };
         let write_fn = cfg.write;
         let flush_fn = cfg.flush;
+        // `*mut c_void` is `!Send + !Sync` by default, and `unsafe impl
+        // Send` on a newtype does not propagate cleanly through closure
+        // auto-traits. Round-tripping the pointer through `usize` gives
+        // something that is `Copy + Send + Sync`, and the callback
+        // contract already puts the host on the hook for using `ctx`
+        // safely across threads.
         let ctx_addr = cfg.ctx as usize;
         let size = cfg.size;
 

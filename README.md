@@ -39,6 +39,10 @@ src/
   file_device.rs      FileDevice (backed by std::fs::File)
   callback_device.rs  CallbackDevice (FFI-friendly)
   caching_device.rs   CachingDevice (LRU decorator)
+  slice.rs            SliceReader / OwnedSlice / OwnedRwSlice
+  readonly.rs         ReadOnlyDevice (rejects writes whatever the inner type allows)
+  stream.rs           BlockReadStreamer (std::io::Read + Seek over a BlockRead)
+  ffi.rs              the C ABI — FsCoreDevice, FsCoreCallbackCfg
 tests/
   cache.rs            CachingDevice + interop tests
 ```
@@ -47,13 +51,6 @@ tests/
 
 Planned additions (not yet implemented):
 
-- `SliceReader` — currently lives in `am-partitions`, but slicing is a
-  generic block-layer concern. Will move here so any `BlockRead` consumer
-  (not just partition users) can grab it. `am-partitions` will keep a
-  re-export for backwards compatibility.
-- `ReadOnlyDevice<T>` — wrapper that takes any `BlockRead` / `BlockDevice`
-  and rejects writes regardless of the inner type's capabilities. Useful
-  for type-level "give me this image strictly read-only" guarantees.
 - `Logger` hook — pluggable `set_logger(callback)` so consuming crates
   can route diagnostics to a host-provided sink without each crate
   hard-coding a logging dependency.
