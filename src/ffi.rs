@@ -161,6 +161,56 @@ where
     }
 }
 
+/// Run `body`, catching a panic and returning `fail` instead — and
+/// recording the panic's message where a caller can read it.
+///
+/// # Why the message matters more than the fallback
+///
+/// Every fallback value here is also a legitimate answer. Zero is what
+/// an empty device reports for its size; `false` is what a read-only
+/// device reports for writability; a null pointer is what a failed open
+/// returns. So a caller that only sees the fallback cannot tell an
+/// ordinary answer from a driver that exploded computing it.
+///
+/// [`fs_core_last_error_message`] is what separates them, and a guard
+/// that returns the fallback without setting it throws away the only
+/// evidence there was.
+///
+/// # Why this is separate from [`ffi_guard`]
+///
+/// `ffi_guard` returns an [`FsCoreErrorCode`] and takes a body that
+/// returns `Result<(), Error>`. That fits an entry point whose whole
+/// answer is a status code, and fits nothing else — which is why the
+/// eight entry points in this file that return a size, a flag or a
+/// pointer each wrote `catch_unwind(AssertUnwindSafe(…)).unwrap_or(…)`
+/// by hand instead, sixty lines below the helper.
+///
+/// Sister crates did the same: eleven of them re-roll one of these two
+/// shapes rather than share either.
+///
+/// The error slot is cleared on entry, like [`ffi_guard`]: a call that
+/// succeeds must not leave the previous call's message in place for a
+/// caller to read and attribute to this one.
+///
+/// `AssertUnwindSafe` is used deliberately. The bodies here touch a
+/// handle the caller owns and a thread-local error slot; a panic can
+/// leave neither in a state another call can observe as inconsistent,
+/// because the handle is not read again on this path and the slot is
+/// overwritten whole.
+pub fn ffi_guard_or<T, F>(fail: T, body: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    clear_last_error();
+    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(panic) => {
+            set_last_error(panic_message(&panic));
+            fail
+        }
+    }
+}
+
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = panic.downcast_ref::<&'static str>() {
         return (*s).to_string();
@@ -204,9 +254,9 @@ pub unsafe extern "C" fn fs_core_device_close(handle: *mut FsCoreDevice) {
     if handle.is_null() {
         return;
     }
-    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+    ffi_guard_or((), || unsafe {
         drop(Box::from_raw(handle));
-    }));
+    });
 }
 
 /// Total device size in bytes. Returns 0 if `handle` is NULL.
@@ -215,8 +265,7 @@ pub unsafe extern "C" fn fs_core_device_size_bytes(handle: *const FsCoreDevice) 
     if handle.is_null() {
         return 0;
     }
-    std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*handle).inner.size_bytes() }))
-        .unwrap_or(0)
+    ffi_guard_or(0, || unsafe { (*handle).inner.size_bytes() })
 }
 
 /// True if `write_at` is likely to succeed. Returns false on NULL.
@@ -225,10 +274,7 @@ pub unsafe extern "C" fn fs_core_device_is_writable(handle: *const FsCoreDevice)
     if handle.is_null() {
         return false;
     }
-    std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
-        (*handle).inner.is_writable()
-    }))
-    .unwrap_or(false)
+    ffi_guard_or(false, || unsafe { (*handle).inner.is_writable() })
 }
 
 /// Read exactly `len` bytes from `offset` into `buf`. `buf` must be at
@@ -293,7 +339,7 @@ pub unsafe extern "C" fn fs_core_file_open(
         set_last_error("path is null");
         return ptr::null_mut();
     }
-    let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+    ffi_guard_or(ptr::null_mut(), || {
         let cstr = unsafe { std::ffi::CStr::from_ptr(path) };
         let s = match cstr.to_str() {
             Ok(s) => s,
@@ -314,14 +360,7 @@ pub unsafe extern "C" fn fs_core_file_open(
                 ptr::null_mut()
             }
         }
-    }));
-    match res {
-        Ok(p) => p,
-        Err(panic) => {
-            set_last_error(panic_message(&panic));
-            ptr::null_mut()
-        }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +413,7 @@ pub unsafe extern "C" fn fs_core_device_from_callbacks(
         set_last_error("cfg is null");
         return ptr::null_mut();
     }
-    let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+    ffi_guard_or(ptr::null_mut(), || unsafe {
         let cfg = &*cfg;
         let read_fn = match cfg.read {
             Some(f) => f,
@@ -433,14 +472,7 @@ pub unsafe extern "C" fn fs_core_device_from_callbacks(
             flush: flush_cb,
         };
         FsCoreDevice::into_handle(Arc::new(dev))
-    }));
-    match res {
-        Ok(p) => p,
-        Err(panic) => {
-            set_last_error(panic_message(&panic));
-            ptr::null_mut()
-        }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -463,21 +495,14 @@ pub unsafe extern "C" fn fs_core_device_slice_ro(
         set_last_error("parent is null");
         return ptr::null_mut();
     }
-    let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+    ffi_guard_or(ptr::null_mut(), || unsafe {
         let parent_arc = (*parent).inner().clone();
         // OwnedSlice takes Arc<dyn BlockRead>; trait upcast from
         // BlockDevice -> BlockRead is supported in the pinned toolchain.
         let parent_read: Arc<dyn crate::block::BlockRead> = parent_arc;
         let slice = crate::slice::OwnedSlice::new(parent_read, start, length);
         FsCoreDevice::into_handle(Arc::new(slice))
-    }));
-    match res {
-        Ok(p) => p,
-        Err(panic) => {
-            set_last_error(panic_message(&panic));
-            ptr::null_mut()
-        }
-    }
+    })
 }
 
 /// Read-write slice. Writes are forwarded to the parent at `start +
@@ -494,18 +519,11 @@ pub unsafe extern "C" fn fs_core_device_slice_rw(
         set_last_error("parent is null");
         return ptr::null_mut();
     }
-    let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+    ffi_guard_or(ptr::null_mut(), || unsafe {
         let parent_arc = (*parent).inner().clone();
         let slice = crate::slice::OwnedRwSlice::new(parent_arc, start, length);
         FsCoreDevice::into_handle(Arc::new(slice))
-    }));
-    match res {
-        Ok(p) => p,
-        Err(panic) => {
-            set_last_error(panic_message(&panic));
-            ptr::null_mut()
-        }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -701,5 +719,113 @@ mod tests {
         assert!(h.is_null());
         let msg = fs_core_last_error_message();
         assert!(!msg.is_null());
+    }
+}
+
+#[cfg(test)]
+mod panic_message_tests {
+    use super::*;
+    use crate::block::{BlockDevice, BlockRead};
+
+    /// A device whose every method panics.
+    ///
+    /// Not a hypothetical: a driver's `size_bytes` computes a geometry
+    /// from on-disk fields, and an arithmetic overflow there panics.
+    /// The FFI boundary is where that has to stop being a panic and
+    /// start being a reportable error.
+    struct Panicking;
+
+    impl BlockRead for Panicking {
+        fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), Error> {
+            panic!("read_at exploded")
+        }
+        fn size_bytes(&self) -> u64 {
+            panic!("size_bytes exploded")
+        }
+    }
+    impl BlockDevice for Panicking {
+        fn is_writable(&self) -> bool {
+            panic!("is_writable exploded")
+        }
+    }
+
+    fn handle() -> *mut FsCoreDevice {
+        FsCoreDevice::into_handle(std::sync::Arc::new(Panicking))
+    }
+
+    fn last_error() -> Option<String> {
+        let p = fs_core_last_error_message();
+        if p.is_null() {
+            return None;
+        }
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    /// A panic caught at the boundary must leave a message behind.
+    ///
+    /// `fs_core_device_size_bytes` returns 0 on panic — and 0 is also
+    /// what a legitimately empty device returns. Without a message the
+    /// caller cannot tell "this device is empty" from "the driver
+    /// exploded computing its size", which is the whole reason the
+    /// thread-local error slot exists.
+    #[test]
+    fn a_panic_computing_the_size_is_reported_not_just_swallowed() {
+        clear_last_error();
+        let h = handle();
+        let size = unsafe { fs_core_device_size_bytes(h) };
+        assert_eq!(size, 0, "the fallback value is still returned");
+        let msg = last_error().expect("a caught panic must leave a message");
+        assert!(
+            msg.contains("size_bytes exploded"),
+            "the message should carry the panic's own text, got: {msg}"
+        );
+        unsafe { fs_core_device_close(h) };
+    }
+
+    /// Same for the writability probe, whose fallback is `false` — the
+    /// answer a perfectly good read-only device gives.
+    #[test]
+    fn a_panic_probing_writability_is_reported() {
+        clear_last_error();
+        let h = handle();
+        let writable = unsafe { fs_core_device_is_writable(h) };
+        assert!(!writable, "the fallback value is still returned");
+        assert!(
+            last_error().is_some(),
+            "a caught panic must leave a message"
+        );
+        unsafe { fs_core_device_close(h) };
+    }
+
+    /// A call that succeeds must not leave a stale message behind for
+    /// the next one to pick up.
+    #[test]
+    fn a_successful_call_clears_the_previous_error() {
+        let h = handle();
+        let _ = unsafe { fs_core_device_size_bytes(h) };
+        assert!(last_error().is_some(), "setup: an error is recorded");
+        unsafe { fs_core_device_close(h) };
+
+        struct Sixteen;
+        impl BlockRead for Sixteen {
+            fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), Error> {
+                Ok(())
+            }
+            fn size_bytes(&self) -> u64 {
+                16
+            }
+        }
+        impl BlockDevice for Sixteen {}
+        let h2 = FsCoreDevice::into_handle(std::sync::Arc::new(Sixteen));
+        assert_eq!(unsafe { fs_core_device_size_bytes(h2) }, 16);
+        assert!(
+            last_error().is_none(),
+            "a call that worked must not leave the previous panic's message in place"
+        );
+        unsafe { fs_core_device_close(h2) };
     }
 }

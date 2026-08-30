@@ -68,16 +68,44 @@ public surface, not a defect to correct.
 
 ## Medium
 
-### M1 — the pointer-returning half of the C ABI hand-rolls `ffi_guard` four times — **fixable, not yet done**
+### M1 — the C ABI hand-rolls `ffi_guard` — **fixed, and it was worse than four times**
 
-Real duplication: `ffi_guard` returns a code, so the four functions returning
-`*mut FsCoreDevice` cannot use it and each reimplements the `catch_unwind`,
-error-mapping and message-stashing epilogue.
+`ffi_guard` returns an `FsCoreErrorCode` and takes a body returning
+`Result<(), Error>`, so it fits an entry point whose whole answer is a status
+code and fits nothing else. The report counted the four pointer-returning
+functions that work around it. **There are seven**: the other three return a
+size, a flag, or nothing.
 
-A pointer-returning sibling guard would fix it. Left for its own change:
-it touches the FFI epilogue, where a mistake either leaks the device or reports
-the wrong code to a C caller, and it deserves a review focused on that rather
-than being folded into a documentation pass.
+And those three are not merely duplicated — **they swallow the panic**:
+
+```rust
+std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*handle).inner.size_bytes() }))
+    .unwrap_or(0)
+```
+
+Every fallback here is also a legitimate answer. Zero is what an empty device
+reports for its size, `false` is what a read-only device reports for
+writability, a null pointer is what a failed open returns. A caller seeing only
+the fallback cannot tell an ordinary answer from a driver that exploded
+computing it — and `fs_core_last_error_message`, the one thing that separates
+them, was left empty.
+
+`ffi_guard_or(fail, body)` takes any return type, records the panic's own
+message, and clears the slot on entry so a successful call does not leave the
+previous one's message to be misattributed. All seven sites use it; the four
+that already recorded the message lose a seven-line epilogue each.
+
+Three tests, red before the change. Mutation-checked: dropping the
+`set_last_error` fails 4, dropping the `clear_last_error` fails 2.
+
+**Worth reading beyond the fix.** The abstraction existed, was too narrow to
+reuse, and the crate that owns it worked around it in its own file. Eleven
+sister crates re-roll one of two shapes rather than share either — `ext4`,
+`erofs` and `squashfs` each carry a private `ffi_guard(fail, body)` close to
+what has just been added here. That is the first hard evidence for the open
+question of whether this crate genericises enough, and it is left as evidence:
+adopting this downstream is eleven repositories' worth of change and wants
+deciding as one.
 
 ### M2 — a five-line explanation sat above the wrong function — **fixed**
 
