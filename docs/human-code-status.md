@@ -113,10 +113,18 @@ The comment explaining why `ctx` is round-tripped through `usize` was above
 `cb_io_err`, which does not do that. It now sits above the `let ctx_addr =
 cfg.ctx as usize;` it explains, and `cb_io_err` has a one-line doc of its own.
 
-### M3 — the three callback adapters are the same eight-line shape — **fixable, not yet done**
+### M3 — the three callback adapters are the same eight-line shape — **fixed**
 
-Same reasoning as M1: genuine, mechanical, and in the FFI layer. Worth doing
-together with M1 in a change that is only about that.
+Read, write and flush each wrapped a host callback in the same four lines:
+invoke, compare against zero, `Ok(())` or `cb_io_err`. Three copies of one
+convention is three chances to write `rc != 0` where the others write `rc == 0`
+— and a caller would then see reads succeed while writes reported failure on the
+very same device.
+
+`cb_result(rc, op)` states it once: **zero is success**. `op` names the operation
+in the error, which is the only thing the three genuinely differ in.
+
+Mutation-checked: inverting the comparison fails 2 tests.
 
 ### M4 — `FS_CORE_BAD_STRING` is published and can never be returned — **fixed**
 
@@ -147,11 +155,26 @@ Adding the impl is additive and small. But the gap may be deliberate — a
 that can only be read — and the report does not establish which it is. Adding a
 public impl on a guess is the wrong direction to be wrong in.
 
-### M8 — eleven hand-rolled in-memory device fakes — **fixable, not yet done**
+### M8 — eleven hand-rolled in-memory device fakes — **fixed, four of them**
 
-Real, and a shared test double would be an improvement. Eleven sites across
-several files, each subtly different, so consolidating them means checking that
-no test depended on a difference. Worth its own change.
+Checking that no test depended on a difference was the right caution, and it
+found one. `stream::Bytes`, `slice::Bytes` and `slice::RwBytes` were identical;
+**`readonly::WritableBytes` read without a bounds check**, so a past-end read
+panicked where the other three returned `ShortRead`.
+
+`ShortRead` is the right answer for all four. A device that panics on a past-end
+read turns a caller's arithmetic bug into a crash in the harness rather than an
+error the caller can be asserted against. `src/test_device.rs` holds `Bytes` and
+`RwBytes`, and 101 lines of duplication are gone.
+
+**Three doubles deliberately stay.** `stream::AlwaysFails`, `ffi::Panicking` and
+`tests/cache.rs::CountingDev` each exist to misbehave in one specific way, which
+is the opposite of what a shared device is for — they are not duplicates, they
+are the point of their tests. `tests/` keeps its own for the compilation-boundary
+reason: an integration test cannot see a `#[cfg(test)]` item.
+
+Mutation-checked: making the shared device zero-fill a short read instead of
+failing breaks 3 tests.
 
 ### M9 — `CachingDevice::new` decides the caller's ownership — **needs your decision**
 

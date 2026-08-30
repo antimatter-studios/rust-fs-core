@@ -7,6 +7,10 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+/// One in-memory device for this crate's own tests.
+#[cfg(test)]
+pub(crate) mod test_device;
+
 pub mod block;
 pub mod caching_device;
 pub mod callback_device;

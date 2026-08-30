@@ -136,29 +136,8 @@ fn fs_core_error_to_io(e: Error) -> io::Error {
 mod tests {
     use super::*;
     use crate::error::Result as FsResult;
+    use crate::test_device::Bytes;
     use std::sync::{Arc, Mutex};
-
-    /// In-memory `BlockRead` for tests. Read past end returns `ShortRead`.
-    struct Bytes(Mutex<Vec<u8>>);
-    impl BlockRead for Bytes {
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> FsResult<()> {
-            let b = self.0.lock().unwrap();
-            let start = offset as usize;
-            let end = start + buf.len();
-            if end > b.len() {
-                return Err(Error::ShortRead {
-                    offset,
-                    want: buf.len(),
-                    got: b.len().saturating_sub(start),
-                });
-            }
-            buf.copy_from_slice(&b[start..end]);
-            Ok(())
-        }
-        fn size_bytes(&self) -> u64 {
-            self.0.lock().unwrap().len() as u64
-        }
-    }
 
     /// `BlockRead` that always errors with `Custom` — used to verify
     /// error propagation through the streamer.
