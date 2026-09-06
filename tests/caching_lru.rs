@@ -125,23 +125,34 @@ fn write_invalidates_overlapping_cache_blocks() {
     assert_eq!((hits, misses), (2, 4));
 }
 
+/// Non-aligned and partial reads go through the cache like any other.
+///
+/// This test used to assert the reverse — that neither counted as a hit
+/// or a miss, because both bypassed the cache entirely. That was the
+/// defect: a driver's metadata reads are almost all unaligned or
+/// smaller than a block, so the cache never saw the traffic it exists
+/// for.
 #[test]
-fn non_aligned_or_partial_reads_never_count_as_hit_or_miss() {
+fn non_aligned_and_partial_reads_go_through_the_cache() {
     let inner = Arc::new(CountingDev::new(pattern(8192)));
     let inner_d: Arc<dyn BlockDevice> = inner.clone();
     let bs = 4096u64;
     let cache = CachingDevice::new(inner_d, bs, 4);
 
-    // Non-aligned offset.
+    // Non-aligned offset, a block's worth: straddles blocks 0 and 1, so
+    // both are fetched and held.
     let mut buf = vec![0u8; bs as usize];
     cache.read_at(123, &mut buf).unwrap();
-    // Partial size (not full block).
+    assert_eq!(cache.stats(), (0, 2), "two blocks, neither held yet");
+
+    // Partial size, inside block 0 — which is now cached.
     let mut small = vec![0u8; 64];
     cache.read_at(0, &mut small).unwrap();
+    assert_eq!(&small[..], &pattern(8192)[0..64]);
 
     let (hits, misses) = cache.stats();
-    assert_eq!((hits, misses), (0, 0));
-    // Both reads bypassed the cache and hit the inner directly.
+    assert_eq!((hits, misses), (1, 2));
+    // The second read never reached the device.
     assert_eq!(*inner.read_calls.lock().unwrap(), 2);
 }
 

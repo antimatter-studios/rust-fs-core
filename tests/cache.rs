@@ -158,7 +158,11 @@ fn a_read_across_a_boundary_is_stitched_from_both_blocks() {
     let mut buf = vec![0u8; 200];
     dev.read_at(4000, &mut buf).unwrap();
     assert_eq!(&buf, &bytes[4000..4200]);
-    assert_eq!(*inner.read_calls.lock().unwrap(), 2, "two blocks, once each");
+    assert_eq!(
+        *inner.read_calls.lock().unwrap(),
+        2,
+        "two blocks, once each"
+    );
 
     // Both halves are now cached, so neither is fetched again.
     dev.read_at(4000, &mut buf).unwrap();
