@@ -160,9 +160,15 @@ impl BlockRead for CachingDevice {
         let spanned = (last - first + 1) as usize;
 
         // A read big enough to sweep the cache is not worth caching.
+        //
+        // A SINGLE BLOCK IS NEVER "BIG ENOUGH", however small the cache.
+        // Without that clause a cache of one block bypasses every read
+        // it is ever given -- one block is more than half of one block --
+        // so the smallest cache anybody can ask for is the one that
+        // silently does nothing.
         let sweeps_the_cache = {
             let s = self.state.lock().unwrap();
-            spanned * 2 > s.capacity
+            spanned > 1 && spanned * 2 > s.capacity
         };
         if sweeps_the_cache {
             return self.inner.read_at(offset, buf);
