@@ -9,6 +9,21 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-09-06
+
+### Fixed
+
+- `CachingDevice` reads the last block of a device without running off
+  the end. It always fetched a whole block, so a device whose length is
+  not a multiple of the block size failed on its final block — and a
+  device shorter than one block failed on the very first read. That is
+  not a corner case: `am-fs-squashfs` takes its block size from the
+  archive superblock, usually 128 KiB, and a small image is a few
+  kilobytes whole, so caching one failed immediately. Short blocks are
+  now fetched at their real length and cached that way. A read running
+  past the end of the device is still an error, handed to the device to
+  refuse, rather than being served short with no error.
+
 ## [0.2.8] — 2026-09-06
 
 ### Changed
