@@ -9,6 +9,18 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-09-06
+
+### Added
+
+- `ffi::panic_message` is public. Every other crate in the family guards
+  its C entry points with its own `catch_unwind` and, having no way to
+  reach this, reported a panic as `"panic in <function>"` — the name of
+  the function that was running, which the caller already knew, in place
+  of the message, which is the only part it did not. The guards
+  themselves stay private to each crate: each records into its own
+  thread-local, which is what its own C callers read.
+
 ## [0.2.5] — 2026-09-06
 
 ### Fixed
