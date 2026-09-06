@@ -286,7 +286,12 @@ pub unsafe extern "C" fn fs_core_device_read_at(
     buf: *mut u8,
     len: usize,
 ) -> FsCoreErrorCode {
-    if handle.is_null() || (buf.is_null() && len > 0) {
+    // A null buffer is refused whatever the length. `from_raw_parts_mut`
+    // requires a non-null, aligned pointer even for a zero-length slice,
+    // so `(NULL, 0)` was undefined behaviour rather than the no-op it
+    // looks like -- in a crate that otherwise denies
+    // `unsafe_op_in_unsafe_fn`.
+    if handle.is_null() || buf.is_null() {
         return FsCoreErrorCode::NullArg;
     }
     ffi_guard(|| {
@@ -304,7 +309,8 @@ pub unsafe extern "C" fn fs_core_device_write_at(
     buf: *const u8,
     len: usize,
 ) -> FsCoreErrorCode {
-    if handle.is_null() || (buf.is_null() && len > 0) {
+    // Null is refused whatever the length; see `fs_core_device_read_at`.
+    if handle.is_null() || buf.is_null() {
         return FsCoreErrorCode::NullArg;
     }
     ffi_guard(|| {

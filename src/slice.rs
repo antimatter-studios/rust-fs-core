@@ -75,20 +75,28 @@ impl SliceGeometry {
     }
 
     /// Parent offset corresponding to `offset`, or `None` when
-    /// `[offset, offset + len)` is not wholly inside `[0, length)`. An
-    /// `offset + len` that overflows `u64` counts as outside.
+    /// `[offset, offset + len)` is not wholly inside `[0, length)`, or
+    /// when the rebased offset would not fit on the parent at all.
     ///
-    /// `start + offset` is deliberately unchecked. A slice is built from
-    /// a parent's real geometry, so `start + length` is assumed to fit in
-    /// a `u64`; the constructors do not validate that, and a slice built
-    /// with a nonsense `start` overflows here rather than quietly reading
-    /// some other part of the parent.
+    /// Every one of these additions is checked, `start + offset`
+    /// included. That one used to be deliberate, on the argument that a
+    /// slice built with a nonsense `start` would "overflow here rather
+    /// than quietly reading some other part of the parent" -- which
+    /// holds only while `overflow-checks` is on, and it is off in the
+    /// release profile these crates ship. In release the addition
+    /// wrapped, and the wrap did precisely the thing the argument said
+    /// it avoided: a slice starting at 2^63 and 5000 bytes long
+    /// returned `Ok` and the parent's bytes from offset 5000.
+    ///
+    /// A slice's geometry comes from a partition table, which comes off
+    /// the disk, so "a nonsense start" is an ordinary thing to be
+    /// handed rather than a programming mistake.
     fn rebase(&self, offset: u64, len: u64) -> Option<u64> {
         let end = offset.checked_add(len)?;
         if end > self.length {
             return None;
         }
-        Some(self.start + offset)
+        self.start.checked_add(offset)
     }
 
     /// Bounds-check a read and rebase it onto the parent.
@@ -289,6 +297,36 @@ mod tests {
         let mut buf = [0u8; 4];
         slice.read_at(0, &mut buf).unwrap();
         assert_eq!(buf, [0xAB, 0xCD, 0xEF, 0x01]);
+    }
+
+    /// A slice's geometry comes from a partition table, and a partition
+    /// table comes off the disk. A start and a length that add up past
+    /// 2^64 are an ordinary thing to be handed.
+    ///
+    /// In a release build the rebasing addition wrapped, so a read at an
+    /// offset inside the slice's declared length landed somewhere else
+    /// on the parent entirely -- and came back `Ok`, with those bytes,
+    /// as though they were the slice's own.
+    #[test]
+    fn a_slice_whose_start_plus_offset_leaves_the_parent_reads_nothing() {
+        let mut v = vec![0u8; 64 * 1024];
+        v[5000..5008].copy_from_slice(b"SECRET!!");
+        let dev: Arc<dyn BlockRead> = Arc::new(Bytes(Mutex::new(v)));
+
+        // A GPT entry of starting_lba = 2^54 and ending_lba = 2^55 + 99
+        // produces exactly this.
+        let slice = OwnedSlice::new(dev, 1 << 63, (1 << 63) + 51200);
+        let mut buf = [0u8; 8];
+        let inside_the_declared_length = (1u64 << 63) + 5000;
+
+        let outcome = slice.read_at(inside_the_declared_length, &mut buf);
+        assert!(
+            outcome.is_err(),
+            "the read succeeded and returned {:?}, which is the parent's \
+             bytes from offset 5000",
+            std::str::from_utf8(&buf)
+        );
+        assert_ne!(&buf, b"SECRET!!");
     }
 
     #[test]
