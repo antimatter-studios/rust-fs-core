@@ -557,8 +557,6 @@ pub unsafe extern "C" fn fs_core_device_slice_rw(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// THE MESSAGE, not the fact that something panicked.
     ///
     /// Both shapes a panic payload takes: `panic!("literal")` gives a
@@ -567,8 +565,8 @@ mod tests {
     /// only what it already knew.
     #[test]
     fn a_caught_panic_reports_what_it_said() {
-        let literal = std::panic::catch_unwind(|| panic!("a literal message"))
-            .expect_err("it panicked");
+        let literal =
+            std::panic::catch_unwind(|| panic!("a literal message")).expect_err("it panicked");
         assert_eq!(panic_message(&literal), "a literal message");
 
         let owned = std::panic::catch_unwind(|| {
@@ -583,8 +581,8 @@ mod tests {
         );
 
         // Anything else says so rather than pretending to a message.
-        let odd = std::panic::catch_unwind(|| std::panic::panic_any(42u8))
-            .expect_err("it panicked");
+        let odd =
+            std::panic::catch_unwind(|| std::panic::panic_any(42u8)).expect_err("it panicked");
         assert_eq!(panic_message(&odd), "panic in FFI");
     }
 
