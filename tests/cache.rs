@@ -120,20 +120,71 @@ fn caching_device_caches_repeated_reads() {
     assert_eq!((hits, misses), (2, 1));
 }
 
+/// A small read at an arbitrary offset is served from the block it
+/// falls in, and the second one costs nothing.
+///
+/// This test asserted the opposite until the cache learned to slice:
+/// a read that was not exactly one aligned block went straight to the
+/// device, every time. That is almost every metadata read a filesystem
+/// driver makes — an inode, a directory entry, a B+tree key — so the
+/// cache was being bypassed by the traffic it existed for.
 #[test]
-fn caching_device_bypasses_non_aligned_reads() {
-    let bytes = vec![0x5A; 8192];
-    let inner: Arc<CountingDev> = Arc::new(CountingDev::new(bytes));
+fn a_small_unaligned_read_is_served_from_its_block() {
+    let bytes = (0u8..=255u8).cycle().take(8192).collect::<Vec<_>>();
+    let inner: Arc<CountingDev> = Arc::new(CountingDev::new(bytes.clone()));
     let inner_trait: Arc<dyn BlockDevice> = inner.clone();
     let dev = CachingDevice::new(inner_trait, 4096, 2);
 
     let mut buf = vec![0u8; 100];
     dev.read_at(123, &mut buf).unwrap();
+    assert_eq!(&buf, &bytes[123..223], "the wrong bytes came back");
     dev.read_at(123, &mut buf).unwrap();
+    assert_eq!(&buf, &bytes[123..223]);
 
-    assert_eq!(*inner.read_calls.lock().unwrap(), 2);
+    // One block fetched once, and the repeat came out of it.
+    assert_eq!(*inner.read_calls.lock().unwrap(), 1);
     let (hits, misses) = dev.stats();
-    assert_eq!((hits, misses), (0, 0));
+    assert_eq!((hits, misses), (1, 1));
+}
+
+/// A read that straddles a block boundary is stitched from both.
+#[test]
+fn a_read_across_a_boundary_is_stitched_from_both_blocks() {
+    let bytes = (0u8..=255u8).cycle().take(16384).collect::<Vec<_>>();
+    let inner: Arc<CountingDev> = Arc::new(CountingDev::new(bytes.clone()));
+    let inner_trait: Arc<dyn BlockDevice> = inner.clone();
+    let dev = CachingDevice::new(inner_trait, 4096, 8);
+
+    let mut buf = vec![0u8; 200];
+    dev.read_at(4000, &mut buf).unwrap();
+    assert_eq!(&buf, &bytes[4000..4200]);
+    assert_eq!(*inner.read_calls.lock().unwrap(), 2, "two blocks, once each");
+
+    // Both halves are now cached, so neither is fetched again.
+    dev.read_at(4000, &mut buf).unwrap();
+    assert_eq!(&buf, &bytes[4000..4200]);
+    assert_eq!(*inner.read_calls.lock().unwrap(), 2);
+}
+
+/// A read big enough to sweep the cache goes straight to the device.
+///
+/// Caching it would evict everything to hold bytes the caller has
+/// already got, which costs the next reader and buys this one nothing.
+#[test]
+fn a_read_that_would_sweep_the_cache_bypasses_it() {
+    let bytes = vec![0x5A; 32768];
+    let inner: Arc<CountingDev> = Arc::new(CountingDev::new(bytes));
+    let inner_trait: Arc<dyn BlockDevice> = inner.clone();
+    let dev = CachingDevice::new(inner_trait, 4096, 2);
+
+    // Two blocks against a two-block cache: more than half of it.
+    let mut buf = vec![0u8; 8192];
+    dev.read_at(0, &mut buf).unwrap();
+    dev.read_at(0, &mut buf).unwrap();
+
+    assert_eq!(*inner.read_calls.lock().unwrap(), 2, "each read went out");
+    let (hits, misses) = dev.stats();
+    assert_eq!((hits, misses), (0, 0), "nothing was cached either way");
 }
 
 #[test]
