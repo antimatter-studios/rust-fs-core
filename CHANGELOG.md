@@ -9,6 +9,23 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-09-06
+
+### Fixed
+
+- A slice no longer rebases a read off the end of its parent. Turning an
+  offset inside a slice into an offset on the parent was deliberately
+  unchecked, on the argument that a slice built with a nonsense start
+  would overflow there rather than quietly read elsewhere — but
+  overflow-checks is off in the release profile these crates ship, so
+  the addition wrapped and did exactly what the argument said it
+  avoided. A slice starting at 2^63 and declared 2^63 + 51200 bytes
+  long, which is what a GPT entry of `starting_lba` 2^54 and
+  `ending_lba` 2^55 + 99 produces, answered a read inside its own
+  declared length with `Ok` and the parent's bytes from offset 5000. A
+  slice's geometry comes off the disk, so a start and a length that add
+  past 2^64 are an ordinary thing to be handed.
+
 ## [0.2.4] — 2026-09-04
 
 ### Changed
