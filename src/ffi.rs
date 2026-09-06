@@ -211,7 +211,22 @@ where
     }
 }
 
-fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+/// What a caught panic actually said.
+///
+/// PUBLIC BECAUSE THE OTHER ELEVEN CRATES NEED IT. Each of them guards
+/// its own C entry points with `catch_unwind` and, having no way to
+/// reach this, reports the panic as `"panic in <function>"` -- the name
+/// of the function that was running, which the caller already knew, in
+/// place of the message, which is the only part it did not. An index
+/// out of bounds, a slice out of range, an `expect` with a sentence in
+/// it: all of it was thrown away at the boundary.
+///
+/// The guards themselves are NOT shareable, and that is why this is
+/// what moved rather than [`ffi_guard`]. Each crate's guard records the
+/// message into that crate's own thread-local, which is what its own C
+/// callers read; a guard from here would record into this crate's, and
+/// every panic message would land in a slot nobody reads.
+pub fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = panic.downcast_ref::<&'static str>() {
         return (*s).to_string();
     }
@@ -542,6 +557,35 @@ pub unsafe extern "C" fn fs_core_device_slice_rw(
 
 #[cfg(test)]
 mod tests {
+    /// THE MESSAGE, not the fact that something panicked.
+    ///
+    /// Both shapes a panic payload takes: `panic!("literal")` gives a
+    /// `&'static str`, and `panic!("{x}")` or an out-of-bounds index
+    /// gives a `String`. A guard that reports neither tells its caller
+    /// only what it already knew.
+    #[test]
+    fn a_caught_panic_reports_what_it_said() {
+        let literal =
+            std::panic::catch_unwind(|| panic!("a literal message")).expect_err("it panicked");
+        assert_eq!(panic_message(&literal), "a literal message");
+
+        let owned = std::panic::catch_unwind(|| {
+            let v: Vec<u8> = Vec::new();
+            let _ = v[3];
+        })
+        .expect_err("it panicked");
+        assert!(
+            panic_message(&owned).contains("index out of bounds"),
+            "the index panic's own words should survive: {}",
+            panic_message(&owned)
+        );
+
+        // Anything else says so rather than pretending to a message.
+        let odd =
+            std::panic::catch_unwind(|| std::panic::panic_any(42u8)).expect_err("it panicked");
+        assert_eq!(panic_message(&odd), "panic in FFI");
+    }
+
     use super::*;
     use std::fs::File;
     use std::io::Write;
