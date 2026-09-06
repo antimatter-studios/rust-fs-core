@@ -110,7 +110,15 @@ impl CachingDevice {
             s.misses += 1;
         }
 
-        let mut block = vec![0u8; self.block_size as usize];
+        // THE LAST BLOCK OF A DEVICE IS OFTEN SHORT, and asking the
+        // device for a whole one past its end is an error rather than a
+        // short read. A SquashFS image is 4 KiB and its declared block
+        // size 128 KiB; without this clamp, caching such an image failed
+        // on the first read it ever made.
+        let size = self.inner.size_bytes();
+        let end = block_start.saturating_add(self.block_size).min(size);
+        let len = end.saturating_sub(block_start) as usize;
+        let mut block = vec![0u8; len];
         self.inner.read_at(block_start, &mut block)?;
         let data = Arc::new(block);
 
@@ -174,14 +182,27 @@ impl BlockRead for CachingDevice {
             return self.inner.read_at(offset, buf);
         }
 
+        // A READ RUNNING PAST THE END OF THE DEVICE IS THE DEVICE'S TO
+        // REFUSE. Serving it from clamped blocks would hand back a short
+        // answer with no error, which is worse than the failure the
+        // caller would otherwise have seen.
+        if offset.saturating_add(buf.len() as u64) > self.inner.size_bytes() {
+            return self.inner.read_at(offset, buf);
+        }
+
         let mut done = 0usize;
         for index in first..=last {
             let block_start = index * bs;
             let block = self.block(block_start)?;
             // Where this block overlaps what was asked for.
-            let from = offset.max(block_start) - block_start;
-            let take = ((bs - from) as usize).min(buf.len() - done);
-            buf[done..done + take].copy_from_slice(&block[from as usize..from as usize + take]);
+            let from = (offset.max(block_start) - block_start) as usize;
+            // Bounded by what the BLOCK holds rather than by the block
+            // size, since the last one may be short.
+            let take = (block.len().saturating_sub(from)).min(buf.len() - done);
+            if take == 0 {
+                break;
+            }
+            buf[done..done + take].copy_from_slice(&block[from..from + take]);
             done += take;
         }
         Ok(())
@@ -317,6 +338,50 @@ mod tests {
             cache.stats(),
             (0, 0),
             "neither hit nor miss: it never consulted the cache"
+        );
+    }
+
+    /// A device smaller than one block still reads.
+    ///
+    /// THE CASE THAT BROKE. `am-fs-squashfs` declares a block size from
+    /// the archive's superblock -- 128 KiB is the usual -- and a small
+    /// image is a few kilobytes whole. Fetching "the block at zero"
+    /// asked the device for 128 KiB it did not have, which is an error
+    /// rather than a short read, so opening such an image with a cache
+    /// failed on the very first read.
+    #[test]
+    fn a_device_shorter_than_a_block_still_reads() {
+        let tiny: Arc<Bytes> = Arc::new(Bytes::new((0..100u32).map(|i| i as u8).collect()));
+        let cache = CachingDevice::read_only(tiny, BS, 4);
+
+        let mut buf = vec![0u8; 40];
+        cache
+            .read_at(10, &mut buf)
+            .expect("a read inside the device");
+        assert_eq!(buf[0], 10, "the wrong bytes came back");
+        assert_eq!(buf[39], 49);
+
+        // And the second one is a hit, so the short block was cached
+        // rather than merely tolerated.
+        cache.read_at(10, &mut buf).expect("again");
+        assert_eq!(cache.stats(), (1, 1));
+    }
+
+    /// A read running past the end of the device still fails.
+    ///
+    /// The clamp above must not turn "you asked for bytes that are not
+    /// there" into a short answer with no error. That failure is
+    /// invisible to the caller, which is the one kind this family of
+    /// crates refuses to produce.
+    #[test]
+    fn a_read_past_the_end_is_still_an_error() {
+        let tiny: Arc<Bytes> = Arc::new(Bytes::new(vec![0u8; 100]));
+        let cache = CachingDevice::read_only(tiny, BS, 4);
+
+        let mut buf = vec![0u8; 40];
+        assert!(
+            cache.read_at(80, &mut buf).is_err(),
+            "80 + 40 is past the end of a 100-byte device"
         );
     }
 
