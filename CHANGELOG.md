@@ -9,6 +9,23 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-09-06
+
+### Changed
+
+- `CachingDevice` serves a read from the blocks it falls in, whatever
+  its size or alignment. It cached only a read that was exactly one
+  aligned block and passed everything else straight through, which is
+  almost every metadata read a driver makes: measured against an XFS
+  image, the average read was 1040 bytes against a 4096-byte block, so
+  the cache was bypassed by the traffic it exists for. A read spanning
+  more than half the cache still passes through, because caching it
+  would evict everything to hold bytes the caller already has.
+- A cache of one block no longer declines every read. The pass-through
+  rule was "spans more than half the capacity", which one block against
+  a one-block cache always does, so the smallest cache anybody could
+  ask for silently did nothing.
+
 ## [0.2.7] — 2026-09-06
 
 ### Added
