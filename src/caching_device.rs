@@ -95,33 +95,89 @@ impl CachingDevice {
     }
 }
 
-impl BlockRead for CachingDevice {
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        let cacheable =
-            buf.len() as u64 == self.block_size && offset.is_multiple_of(self.block_size);
-        if !cacheable {
-            return self.inner.read_at(offset, buf);
-        }
-
+impl CachingDevice {
+    /// The cached block at `block_start`, fetching it if it is not held.
+    fn block(&self, block_start: u64) -> Result<Arc<Vec<u8>>> {
         {
             let mut s = self.state.lock().unwrap();
-            if let Some(pos) = s.entries.iter().position(|(o, _)| *o == offset) {
-                let entry = s.entries.remove(pos).unwrap();
-                buf.copy_from_slice(&entry.1);
+            if let Some(pos) = s.entries.iter().position(|(o, _)| *o == block_start) {
+                let entry = s.entries.remove(pos).expect("position just found it");
+                let data = entry.1.clone();
                 s.entries.push_front(entry);
                 s.hits += 1;
-                return Ok(());
+                return Ok(data);
             }
             s.misses += 1;
         }
 
-        self.inner.read_at(offset, buf)?;
-        let data = Arc::new(buf.to_vec());
+        let mut block = vec![0u8; self.block_size as usize];
+        self.inner.read_at(block_start, &mut block)?;
+        let data = Arc::new(block);
+
         let mut s = self.state.lock().unwrap();
         if s.entries.len() >= s.capacity {
             s.entries.pop_back();
         }
-        s.entries.push_front((offset, data));
+        s.entries.push_front((block_start, data.clone()));
+        Ok(data)
+    }
+}
+
+impl BlockRead for CachingDevice {
+    /// # A read is served from the blocks it falls in, whatever its size
+    ///
+    /// This used to serve a read only when it was **exactly one aligned
+    /// block**, and pass everything else through untouched — including
+    /// reads of bytes it was already holding.
+    ///
+    /// The drivers almost never read a whole block. Measured on
+    /// `am-fs-xfs` against a fixture with a 4096-byte block size, the
+    /// average read during a directory walk was **1040 bytes**: inodes
+    /// are read at inode size and group headers at sector size, so
+    /// roughly three quarters of reads missed by construction.
+    ///
+    /// # What it costs
+    ///
+    /// A 512-byte read of an uncached block now fetches 4096. That is a
+    /// trade of bytes for calls, and it is the right way round for these
+    /// drivers: the block being fetched is the one holding the inode,
+    /// and the next inode read is very often in it.
+    ///
+    /// # Where it still passes through
+    ///
+    /// A read larger than the cache's own capacity would evict
+    /// everything to hold one answer, so anything spanning more blocks
+    /// than a useful fraction of the cache goes straight to the device.
+    /// File data is read in large pieces and would otherwise push out
+    /// the metadata this exists to keep.
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let bs = self.block_size;
+        let first = offset / bs;
+        let last = (offset + buf.len() as u64 - 1) / bs;
+        let spanned = (last - first + 1) as usize;
+
+        // A read big enough to sweep the cache is not worth caching.
+        let sweeps_the_cache = {
+            let s = self.state.lock().unwrap();
+            spanned * 2 > s.capacity
+        };
+        if sweeps_the_cache {
+            return self.inner.read_at(offset, buf);
+        }
+
+        let mut done = 0usize;
+        for index in first..=last {
+            let block_start = index * bs;
+            let block = self.block(block_start)?;
+            // Where this block overlaps what was asked for.
+            let from = offset.max(block_start) - block_start;
+            let take = ((bs - from) as usize).min(buf.len() - done);
+            buf[done..done + take].copy_from_slice(&block[from as usize..from as usize + take]);
+            done += take;
+        }
         Ok(())
     }
 
@@ -193,6 +249,69 @@ mod tests {
 
         assert_eq!(first, again, "the cache must serve what the device held");
         assert_eq!(cache.stats(), (1, 1), "one hit after one miss");
+    }
+
+    /// THE CASE THE OLD HIT CONDITION MISSED: a read smaller than a
+    /// block, of a block already held.
+    ///
+    /// Serving only exact aligned blocks meant the drivers' ordinary
+    /// reads — an inode at inode size, a group header at sector size —
+    /// went to the device every time, even when the block containing
+    /// them was cached.
+    #[test]
+    fn a_read_smaller_than_a_block_is_served_from_it() {
+        let cache = CachingDevice::read_only(backing(), BS, 8);
+
+        let mut whole = vec![0u8; BS as usize];
+        cache.read_at(0, &mut whole).expect("warm the block");
+        assert_eq!(cache.stats(), (0, 1), "one miss to fetch it");
+
+        // Four sub-block reads inside the block just fetched.
+        for at in [0u64, 8, 100, 504] {
+            let mut small = [0u8; 8];
+            cache.read_at(at, &mut small).expect("sub-block read");
+            assert_eq!(
+                &small[..],
+                &whole[at as usize..at as usize + 8],
+                "the bytes must be the block's own, at the right offset"
+            );
+        }
+        assert_eq!(cache.stats(), (4, 1), "four hits, and no further misses");
+    }
+
+    /// A read crossing a block boundary is stitched from both blocks,
+    /// and each is cached.
+    #[test]
+    fn a_read_spanning_two_blocks_is_stitched() {
+        let inner = backing();
+        let mut direct = vec![0u8; 16];
+        inner.read_at(BS - 8, &mut direct).expect("read it plainly");
+
+        let cache = CachingDevice::read_only(backing(), BS, 8);
+        let mut across = vec![0u8; 16];
+        cache.read_at(BS - 8, &mut across).expect("spanning read");
+
+        assert_eq!(across, direct, "the same bytes the device would give");
+        assert_eq!(cache.stats(), (0, 2), "one miss per block touched");
+
+        cache.read_at(BS - 8, &mut across).expect("again");
+        assert_eq!(cache.stats(), (2, 2), "and both are held now");
+    }
+
+    /// A read big enough to sweep the cache goes straight to the device.
+    ///
+    /// File data arrives in large pieces, and caching it would evict the
+    /// metadata this exists to hold — the opposite of the point.
+    #[test]
+    fn a_read_that_would_sweep_the_cache_passes_through() {
+        let cache = CachingDevice::read_only(backing(), BS, 4);
+        let mut big = vec![0u8; (BS * 4) as usize];
+        cache.read_at(0, &mut big).expect("a large read");
+        assert_eq!(
+            cache.stats(),
+            (0, 0),
+            "neither hit nor miss: it never consulted the cache"
+        );
     }
 
     /// A cache over a read-only device says so, and refuses a write
