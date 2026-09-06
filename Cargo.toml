@@ -1,6 +1,6 @@
 [package]
 name = "am-fs-core"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 license = "MIT"
 description = "Pure-Rust block-device framework — BlockRead/BlockDevice traits + FileDevice + CallbackDevice + LRU cache. Foundation crate for fs-* drivers and img-* containers."
