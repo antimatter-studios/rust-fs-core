@@ -9,6 +9,23 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-09-06
+
+### Added
+
+- `CountingDevice` — one instrument for measuring what a driver asks of
+  its device. Wraps a `BlockRead`, counts calls and the bytes they
+  asked for, and can be reset so a mount's own reads are not charged to
+  the operation being measured. Both counters matter: a change that
+  halves reads and doubles bytes is a readahead that guessed wrong, and
+  one number alone would call it a win.
+- `CachingDevice::read_only` — the cache can wrap a device that is only
+  read. It required an `Arc<dyn BlockDevice>`, and every driver in this
+  family mounts through an `Arc<dyn BlockRead>`, so a read-only mount
+  could not use it at all: four of the six drivers cached nothing, not
+  by choice but because it was not expressible. A write to such a cache
+  is `Error::ReadOnly`; a flush succeeds, because nothing was written.
+
 ## [0.2.6] — 2026-09-06
 
 ### Added
