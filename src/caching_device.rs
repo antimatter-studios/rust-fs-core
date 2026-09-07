@@ -7,6 +7,19 @@ use crate::error::Result;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+/// The largest block size a cache will accept.
+///
+/// `block()` allocates a whole block eagerly, and the `.min(size)` clamp
+/// that keeps a short device working bounds that allocation by the device
+/// rather than by anything sane — so a declared block size of 2^40 over a
+/// 1 TB image is a request for a terabyte. A ceiling is the only thing
+/// standing between a number off a disk and that allocation.
+///
+/// 64 MiB is far above anything a real filesystem declares — SquashFS tops
+/// out at 1 MiB, and the block sizes every other driver here uses are
+/// measured in kilobytes — and far below a size that could exhaust a host.
+pub const MAX_BLOCK_SIZE: u64 = 64 * 1024 * 1024;
+
 /// LRU read-cache wrapper.
 ///
 /// # It caches a READ device, and writes through one only if it has one
@@ -56,6 +69,10 @@ impl CachingDevice {
     /// was already in flight when the write began. What such a read
     /// *returns* is still either side of the write — that is what racing
     /// means — but it is not remembered.
+    ///
+    /// `block_size` must be non-zero and no larger than
+    /// [`MAX_BLOCK_SIZE`]; see [`CachingDevice::read_only`] for why that
+    /// is enforced at first use rather than here.
     pub fn new(inner: Arc<dyn BlockDevice>, block_size: u64, capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             inner: inner.clone(),
@@ -75,6 +92,12 @@ impl CachingDevice {
     ///
     /// The case every driver here actually has: a volume mounted for
     /// reading, behind a `BlockRead` that was never a `BlockDevice`.
+    ///
+    /// `block_size` must be non-zero and no larger than
+    /// [`MAX_BLOCK_SIZE`]. Construction cannot refuse — it returns
+    /// `Arc<Self>`, not `Result` — so a block size outside that range is
+    /// refused by every read and every write instead, with an error
+    /// naming the offending size.
     pub fn read_only(inner: Arc<dyn BlockRead>, block_size: u64, capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             inner,
@@ -118,6 +141,42 @@ impl CachingDevice {
         let mut s = self.state.lock().unwrap();
         let bs = self.block_size;
         Self::invalidate_range(&mut s, start, end, bs);
+    }
+
+    /// Refuse a block size the cache cannot work with.
+    ///
+    /// # Why this is checked here and not in the constructors
+    ///
+    /// It belongs in the constructors, and they cannot express it: both
+    /// return `Arc<Self>` rather than `Result`, and that signature is
+    /// published API in eleven sibling crates. Making them fallible to
+    /// catch a case no correct caller hits would be a breaking change to
+    /// all of them. So the refusal happens at first use instead, which
+    /// costs two comparisons against an immutable field per call and
+    /// turns both failures into an error the caller can handle.
+    ///
+    /// # Why a block size is worth checking at all
+    ///
+    /// Zero divides by zero on the first read, and integer division by
+    /// zero panics unconditionally — it is not governed by
+    /// `overflow-checks`, so a release build dies too. An absurd value
+    /// reaches `vec![0u8; len]` in `block()` with `len` bounded only by
+    /// the device. Both numbers come off a disk: a driver reads its block
+    /// size from a superblock and passes it through, so a truncated,
+    /// fuzzed or hostile image reaches this.
+    fn check_block_size(&self) -> Result<()> {
+        if self.block_size == 0 {
+            return Err(crate::error::Error::Custom(
+                "cache block size is zero".to_string(),
+            ));
+        }
+        if self.block_size > MAX_BLOCK_SIZE {
+            return Err(crate::error::Error::Custom(format!(
+                "cache block size {} exceeds the {MAX_BLOCK_SIZE}-byte ceiling",
+                self.block_size
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -210,6 +269,7 @@ impl BlockRead for CachingDevice {
     /// File data is read in large pieces and would otherwise push out
     /// the metadata this exists to keep.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.check_block_size()?;
         if buf.is_empty() {
             return Ok(());
         }
@@ -338,6 +398,24 @@ impl BlockDevice for CachingDevice {
     /// counter agrees with it and only the second sweep drops what it
     /// inserted.
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
+        // BEFORE EITHER SWEEP, AND THAT ORDERING IS LOAD-BEARING.
+        //
+        // A sweep cannot be done correctly with a block size of zero:
+        // `invalidate_range` computes `block_end = off + block_size`, so a
+        // zero block size makes `block_end == off` and turns the retain
+        // predicate into `*off >= end || *off <= start`, which KEEPS
+        // entries the write has made stale. Sweeping first and refusing
+        // afterwards would therefore do the one thing this type must never
+        // do, on the way to reporting an error.
+        //
+        // Refusing here is also the only position that cannot break the
+        // two-sweep guarantee above. The invariant that guarantee rests on
+        // is "if the device was written, both sweeps ran" — and returning
+        // at this point means the device is never reached, so nothing was
+        // written and nothing needs sweeping. An early return anywhere
+        // below would skip the second sweep after a write that may have
+        // landed, which is exactly the window that fix closed.
+        self.check_block_size()?;
         let end = offset.saturating_add(buf.len() as u64);
         self.invalidate_for_write(offset, end);
         let Some(writable) = self.writable.as_ref() else {
