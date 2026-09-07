@@ -162,9 +162,44 @@ impl BlockRead for CachingDevice {
         if buf.is_empty() {
             return Ok(());
         }
+
+        // THE END OF THE READ IS COMPUTED ONCE, CHECKED, AND BEFORE ANY
+        // DIVISION.
+        //
+        // This used to be `offset + buf.len()`, twice, unchecked, above
+        // the only bounds check the function has — which then made the
+        // same sum a third time with `saturating_add`, so the line that
+        // knew the sum could overflow sat below the two that did not.
+        //
+        // An offset here is computed by a driver from an on-disk field:
+        // an extent pointer, an inode block number, a directory offset.
+        // A wild one is an ordinary thing to be handed off a corrupt or
+        // hostile image rather than a mistake in the caller, which is
+        // the same argument `slice.rs` was fixed on.
+        //
+        // A sum that does not fit in a `u64` cannot name a byte on any
+        // device, so it is refused here rather than forwarded. `got: 0`
+        // because nothing was transferred — the convention the slice
+        // adapters already use for a read refused before it starts.
+        let Some(end) = offset.checked_add(buf.len() as u64) else {
+            return Err(crate::error::Error::ShortRead {
+                offset,
+                want: buf.len(),
+                got: 0,
+            });
+        };
+
+        // A READ RUNNING PAST THE END OF THE DEVICE IS THE DEVICE'S TO
+        // REFUSE. Serving it from clamped blocks would hand back a short
+        // answer with no error, which is worse than the failure the
+        // caller would otherwise have seen.
+        if end > self.inner.size_bytes() {
+            return self.inner.read_at(offset, buf);
+        }
+
         let bs = self.block_size;
         let first = offset / bs;
-        let last = (offset + buf.len() as u64 - 1) / bs;
+        let last = (end - 1) / bs;
         let spanned = (last - first + 1) as usize;
 
         // A read big enough to sweep the cache is not worth caching.
@@ -176,17 +211,9 @@ impl BlockRead for CachingDevice {
         // silently does nothing.
         let sweeps_the_cache = {
             let s = self.state.lock().unwrap();
-            spanned > 1 && spanned * 2 > s.capacity
+            spanned > 1 && spanned.saturating_mul(2) > s.capacity
         };
         if sweeps_the_cache {
-            return self.inner.read_at(offset, buf);
-        }
-
-        // A READ RUNNING PAST THE END OF THE DEVICE IS THE DEVICE'S TO
-        // REFUSE. Serving it from clamped blocks would hand back a short
-        // answer with no error, which is worse than the failure the
-        // caller would otherwise have seen.
-        if offset.saturating_add(buf.len() as u64) > self.inner.size_bytes() {
             return self.inner.read_at(offset, buf);
         }
 
