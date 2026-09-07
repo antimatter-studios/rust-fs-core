@@ -205,6 +205,29 @@ impl BlockRead for CachingDevice {
             buf[done..done + take].copy_from_slice(&block[from..from + take]);
             done += take;
         }
+
+        // A BUFFER THIS DID NOT FILL IS A FAILURE, NOT A SUCCESS.
+        //
+        // The loop can run out of bytes before the buffer is full: a
+        // cached block is clamped to the device's size when it is
+        // fetched, so a block held from when the device measured smaller
+        // is short, and the guard above — which asks the device its size
+        // a second time — lets the read through as in range. Reporting
+        // `Ok` there hands back exactly the short answer with no error
+        // that the guard's own comment refuses.
+        //
+        // It cannot fire while `size_bytes` is stable, which is the
+        // contract `BlockRead` now states: the guard bounds the read by
+        // the device, and the blocks between them cover everything up to
+        // that bound. So this is the device breaking its promise being
+        // caught rather than believed.
+        if done != buf.len() {
+            return Err(crate::error::Error::ShortRead {
+                offset,
+                want: buf.len(),
+                got: done,
+            });
+        }
         Ok(())
     }
 

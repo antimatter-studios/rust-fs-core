@@ -21,6 +21,20 @@ pub trait BlockRead: Send + Sync {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()>;
 
     /// Total device size in bytes. Used for bounds checks.
+    ///
+    /// # It must not change for the life of the device
+    ///
+    /// Callers are entitled to read it once, act on it, and read it again
+    /// later expecting the same answer — [`crate::CachingDevice`] does
+    /// exactly that, bounding a read against it and then clamping each
+    /// block it fetches against it. A device whose size moves between the
+    /// two makes the cache hold a block shorter than the read it was
+    /// fetched for.
+    ///
+    /// An implementation whose length genuinely changes — a file being
+    /// appended to, a volume being grown — should be reopened rather than
+    /// reporting a new number through the same handle. Every implementation
+    /// in this crate takes its size once, at construction, for this reason.
     fn size_bytes(&self) -> u64;
 }
 
