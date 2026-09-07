@@ -40,11 +40,22 @@ struct CacheState {
     capacity: usize,
     hits: u64,
     misses: u64,
+    /// Bumped by every invalidation. A miss records it before it lets go
+    /// of the lock to read the device, and the insert on the way back in
+    /// is refused if it has moved — see `CachingDevice::block`.
+    generation: u64,
 }
 
 impl CachingDevice {
     /// Cache a device that can be written. Writes invalidate the
     /// entries they overlap and go through to `inner`.
+    ///
+    /// The invalidation holds against concurrent readers as well as
+    /// sequential ones: once `write_at` has returned, no later read can
+    /// be served pre-write bytes from this cache, including a read that
+    /// was already in flight when the write began. What such a read
+    /// *returns* is still either side of the write — that is what racing
+    /// means — but it is not remembered.
     pub fn new(inner: Arc<dyn BlockDevice>, block_size: u64, capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             inner: inner.clone(),
@@ -55,6 +66,7 @@ impl CachingDevice {
                 capacity,
                 hits: 0,
                 misses: 0,
+                generation: 0,
             }),
         })
     }
@@ -73,6 +85,7 @@ impl CachingDevice {
                 capacity,
                 hits: 0,
                 misses: 0,
+                generation: 0,
             }),
         })
     }
@@ -85,6 +98,7 @@ impl CachingDevice {
     pub fn invalidate_all(&self) {
         let mut s = self.state.lock().unwrap();
         s.entries.clear();
+        s.generation = s.generation.wrapping_add(1);
     }
 
     fn invalidate_range(state: &mut CacheState, start: u64, end: u64, block_size: u64) {
@@ -92,12 +106,46 @@ impl CachingDevice {
             let block_end = off.saturating_add(block_size);
             *off >= end || block_end <= start
         });
+        // BUMPED WHETHER OR NOT ANYTHING WAS DROPPED. The counter is not a
+        // record of what this sweep removed; it is a fence a concurrent
+        // miss can compare itself against, and a miss that is mid-flight
+        // over this range holds no entry for the sweep to find.
+        state.generation = state.generation.wrapping_add(1);
+    }
+
+    /// One invalidation sweep, taking and releasing the lock.
+    fn invalidate_for_write(&self, start: u64, end: u64) {
+        let mut s = self.state.lock().unwrap();
+        let bs = self.block_size;
+        Self::invalidate_range(&mut s, start, end, bs);
     }
 }
 
 impl CachingDevice {
     /// The cached block at `block_start`, fetching it if it is not held.
+    ///
+    /// # A MISS THAT OVERLAPPED AN INVALIDATION IS NOT CACHED
+    ///
+    /// The device read below runs with the lock released — holding a mutex
+    /// across I/O would serialise every reader, which is the whole reason
+    /// the lock is dropped. That leaves a window: a write can sweep the
+    /// cache and land on the device while this read is in flight, and the
+    /// bytes in hand are then the ones the device held *before* the write.
+    /// Inserting them puts a stale entry in a cache the sweep has already
+    /// gone past, and nothing would ever invalidate it again.
+    ///
+    /// So the miss records the generation counter before it lets go, and
+    /// declines to insert if any invalidation has happened since. The
+    /// caller still gets the bytes that were read — a read racing a write
+    /// may legitimately see either side of it — but the cache does not keep
+    /// them.
+    ///
+    /// The check is deliberately coarse: the counter is global rather than
+    /// per range, so a write to an unrelated block also costs this miss its
+    /// insert. Writes are far rarer than reads in these drivers, and the
+    /// price of being conservative is one extra device read.
     fn block(&self, block_start: u64) -> Result<Arc<Vec<u8>>> {
+        let generation_at_miss;
         {
             let mut s = self.state.lock().unwrap();
             if let Some(pos) = s.entries.iter().position(|(o, _)| *o == block_start) {
@@ -108,6 +156,7 @@ impl CachingDevice {
                 return Ok(data);
             }
             s.misses += 1;
+            generation_at_miss = s.generation;
         }
 
         // THE LAST BLOCK OF A DEVICE IS OFTEN SHORT, and asking the
@@ -123,10 +172,12 @@ impl CachingDevice {
         let data = Arc::new(block);
 
         let mut s = self.state.lock().unwrap();
-        if s.entries.len() >= s.capacity {
-            s.entries.pop_back();
+        if s.generation == generation_at_miss {
+            if s.entries.len() >= s.capacity {
+                s.entries.pop_back();
+            }
+            s.entries.push_front((block_start, data.clone()));
         }
-        s.entries.push_front((block_start, data.clone()));
         Ok(data)
     }
 }
@@ -264,21 +315,39 @@ impl BlockRead for CachingDevice {
 }
 
 impl BlockDevice for CachingDevice {
+    /// # THE CACHE IS INVALIDATED EVEN IF THE WRITE THEN FAILS
+    ///
+    /// Deliberately: dropping entries the write would have made stale
+    /// costs a re-read, while keeping them past a write that half
+    /// succeeded serves bytes the device no longer holds.
+    ///
+    /// # AND IT IS INVALIDATED TWICE, ONCE EITHER SIDE OF THE DEVICE
+    ///
+    /// One sweep before the write is not enough. Between it and the
+    /// device write landing, a concurrent [`CachingDevice::read_at`] can
+    /// miss, fetch pre-write bytes, and insert them behind the sweep —
+    /// an entry the sweep has already gone past and nothing else would
+    /// ever drop. The second sweep is what closes that window, together
+    /// with the generation check on the miss path that refuses such an
+    /// insert outright.
+    ///
+    /// Both are needed, and each covers what the other cannot. A read
+    /// that began BEFORE this write is caught by the counter, because it
+    /// recorded the generation before the first sweep bumped it. A read
+    /// that begins AFTER that sweep records the bumped value, so the
+    /// counter agrees with it and only the second sweep drops what it
+    /// inserted.
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
-        // THE CACHE IS INVALIDATED EVEN IF THE WRITE THEN FAILS, and
-        // deliberately: dropping entries the write would have made stale
-        // costs a re-read, while keeping them past a write that half
-        // succeeded serves bytes the device no longer holds.
         let end = offset.saturating_add(buf.len() as u64);
-        {
-            let mut s = self.state.lock().unwrap();
-            let bs = self.block_size;
-            Self::invalidate_range(&mut s, offset, end, bs);
-        }
+        self.invalidate_for_write(offset, end);
         let Some(writable) = self.writable.as_ref() else {
             return Err(crate::error::Error::ReadOnly);
         };
-        writable.write_at(offset, buf)
+        let result = writable.write_at(offset, buf);
+        // Unconditionally, for the same reason the first sweep is
+        // unconditional: a write that failed may still have landed.
+        self.invalidate_for_write(offset, end);
+        result
     }
 
     fn flush(&self) -> Result<()> {
