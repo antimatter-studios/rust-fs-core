@@ -882,3 +882,184 @@ mod panic_message_tests {
         unsafe { fs_core_device_close(h2) };
     }
 }
+
+// ---------------------------------------------------------------------------
+// The published error numbering, pinned on both sides.
+//
+// `FsCoreErrorCode` and the `FsCoreErrorCode` enum in
+// `include/fs_core.h` are two hand-written copies of one ABI, of which
+// the header says "Stable: do not renumber." Nothing compiles the
+// header, and every other test in this file compares codes symbolically
+// — `assert_eq!(rc, FsCoreErrorCode::ShortRead)` — which is invariant
+// under precisely the change that breaks the ABI: a variant inserted
+// into the middle of one copy, or added to one copy and not the other.
+//
+// Two checks, because neither sees what the other does. Comparing the
+// two files as text catches a variant that reached only one of them.
+// Pinning the discriminants against literals catches a renumbering
+// applied tidily to both, which is the change the header forbids and
+// the one the text comparison would call agreement.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod error_code_abi_tests {
+    use super::FsCoreErrorCode;
+
+    /// The C spelling of a Rust variant name: `Ok` is `FS_CORE_OK`,
+    /// `OutOfBounds` is `FS_CORE_OUT_OF_BOUNDS`.
+    fn c_name(rust_name: &str) -> String {
+        let mut out = String::from("FS_CORE_");
+        for (i, ch) in rust_name.chars().enumerate() {
+            if i != 0 && ch.is_ascii_uppercase() {
+                out.push('_');
+            }
+            out.extend(ch.to_uppercase());
+        }
+        out
+    }
+
+    /// The body of an enum block: everything between an opening marker
+    /// that must occur exactly once — so a second enum added to either
+    /// file cannot quietly redirect the parse — and the first brace at
+    /// column 0 after it, which must be followed by `closes_with`.
+    fn enum_body<'a>(src: &'a str, opens_with: &str, closes_with: &str) -> &'a str {
+        assert_eq!(
+            src.matches(opens_with).count(),
+            1,
+            "{opens_with:?} must appear exactly once or this parses the wrong enum"
+        );
+        let start = src.find(opens_with).unwrap() + opens_with.len();
+        let end = start
+            + src[start..]
+                .find("\n}")
+                .expect("the enum block is closed by a brace at column 0");
+        let after = &src[end + 2..];
+        assert!(
+            after.starts_with(closes_with),
+            "the closing brace should be followed by {closes_with:?}, not {:?} — \
+             the parse stopped somewhere other than the end of the enum",
+            &after[..closes_with.len().min(after.len())]
+        );
+        &src[start..end]
+    }
+
+    /// The error codes as `src/ffi.rs` declares them, in declaration
+    /// order, spelled the way C spells them.
+    ///
+    /// Reads this very file rather than listing the variants, so a
+    /// variant added to the enum cannot be absent from what is compared
+    /// against the header — that absence being the drift under guard,
+    /// and a hand-maintained list here would share it.
+    ///
+    /// It refuses to guess. A line in the enum body that is neither
+    /// blank, a comment, an attribute nor `Name = <integer>,` fails the
+    /// test, because a parser that silently matches nothing agrees with
+    /// every header.
+    fn codes_declared_in_rust() -> Vec<(String, i32)> {
+        let body = enum_body(
+            include_str!("ffi.rs"),
+            "pub enum FsCoreErrorCode {\n",
+            "\n\nimpl FsCoreErrorCode {",
+        );
+        assert!(
+            !body.contains('{'),
+            "the extracted Rust enum body should hold no nested braces: {body:?}"
+        );
+        body.lines()
+            .map(str::trim)
+            .filter(|l| !(l.is_empty() || l.starts_with("//") || l.starts_with("#[")))
+            .map(|l| {
+                let (name, value) = l
+                    .strip_suffix(',')
+                    .and_then(|entry| entry.split_once('='))
+                    .unwrap_or_else(|| panic!("unparsed line in the Rust enum body: {l:?}"));
+                let value = value.trim().parse().unwrap_or_else(|e| {
+                    panic!("{name:?} has no literal discriminant ({e}): {l:?}")
+                });
+                (c_name(name.trim()), value)
+            })
+            .collect()
+    }
+
+    /// The same list as `include/fs_core.h` declares it, with the same
+    /// refusal to guess: an entry it cannot read fails the test.
+    fn codes_declared_in_c() -> Vec<(String, i32)> {
+        let body = enum_body(
+            include_str!("../include/fs_core.h"),
+            "typedef enum {\n",
+            " FsCoreErrorCode;",
+        );
+
+        // A C comment spans lines and sits between entries, so it goes
+        // before the split on commas rather than after it.
+        let mut stripped = String::new();
+        let mut rest = body;
+        while let Some(open) = rest.find("/*") {
+            stripped.push_str(&rest[..open]);
+            let tail = &rest[open + 2..];
+            let close = tail
+                .find("*/")
+                .expect("an unterminated comment in the header's enum");
+            rest = &tail[close + 2..];
+        }
+        stripped.push_str(rest);
+
+        stripped
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let (name, value) = entry
+                    .split_once('=')
+                    .unwrap_or_else(|| panic!("unparsed entry in the C enum body: {entry:?}"));
+                let value = value
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{name:?} has no literal value ({e}): {entry:?}"));
+                (name.trim().to_owned(), value)
+            })
+            .collect()
+    }
+
+    /// Name for name and number for number, in the same order.
+    ///
+    /// This is the check a ninth code added to one file and not the
+    /// other fails. The crate has no other defence against it: the
+    /// build succeeds and every symbolic comparison still passes.
+    #[test]
+    fn the_header_and_the_rust_enum_publish_the_same_error_codes() {
+        let rust = codes_declared_in_rust();
+        let c = codes_declared_in_c();
+
+        // Nine codes are published and a published code is never
+        // withdrawn, so a parse returning fewer read less than the
+        // enum — whatever it then agreed with.
+        assert!(
+            rust.len() >= 9 && c.len() >= 9,
+            "both parses should reach every published code, got {} from Rust and {} from C",
+            rust.len(),
+            c.len()
+        );
+        assert_eq!(rust, c, "the two copies of the error ABI have drifted");
+    }
+
+    /// What the compiler assigns, against the numbers the header
+    /// publishes as unchangeable.
+    ///
+    /// The text comparison above cannot see a renumbering applied to
+    /// both files, and `BadString` is carried as a deliberately dead
+    /// variant precisely so that 8 keeps its meaning for a consumer
+    /// already switching on it.
+    #[test]
+    fn the_error_codes_still_have_the_numbers_they_were_published_with() {
+        assert_eq!(FsCoreErrorCode::Ok as i32, 0);
+        assert_eq!(FsCoreErrorCode::Io as i32, 1);
+        assert_eq!(FsCoreErrorCode::ShortRead as i32, 2);
+        assert_eq!(FsCoreErrorCode::ReadOnly as i32, 3);
+        assert_eq!(FsCoreErrorCode::OutOfBounds as i32, 4);
+        assert_eq!(FsCoreErrorCode::Custom as i32, 5);
+        assert_eq!(FsCoreErrorCode::NullArg as i32, 6);
+        assert_eq!(FsCoreErrorCode::Panic as i32, 7);
+        assert_eq!(FsCoreErrorCode::BadString as i32, 8);
+    }
+}
