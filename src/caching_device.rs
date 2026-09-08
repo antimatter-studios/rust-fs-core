@@ -5,7 +5,8 @@
 use crate::block::{BlockDevice, BlockRead};
 use crate::error::Result;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
 
 /// The largest block size a cache will accept.
 ///
@@ -58,6 +59,17 @@ pub struct CachingDevice {
     /// size next to it.
     capacity: usize,
     state: Mutex<CacheState>,
+    /// Signalled every time a block leaves [`CacheState::in_flight`],
+    /// whether its fetch succeeded or failed.
+    ///
+    /// One condition variable for all blocks rather than one per block.
+    /// A waiter wakes on any fetch completing and re-checks its own
+    /// block, so a wake it did not want costs it a lock and a scan of a
+    /// list bounded by the number of threads fetching. A map of
+    /// per-block condvars would avoid those wakes and has to be built,
+    /// looked up and torn down on every miss — the ordinary path — to
+    /// save work on the rare one.
+    fetched: Condvar,
 }
 
 struct CacheState {
@@ -71,6 +83,23 @@ struct CacheState {
     /// of the lock to read the device, and the insert on the way back in
     /// is refused if it has moved — see `CachingDevice::block`.
     generation: u64,
+    /// The blocks some thread is reading from the device right now.
+    ///
+    /// `generation` fences a miss against an *invalidation*; this fences
+    /// it against another *miss*. Nothing used to: two threads missing
+    /// the same block both read the device and both inserted, so a
+    /// capacity-4 cache could end up holding four copies of one block
+    /// having evicted the other three to make room. The more contention,
+    /// the worse it got, which is the opposite of what a cache is for.
+    ///
+    /// A `Vec` scanned linearly, like `entries` beside it. Its length is
+    /// the number of blocks being fetched concurrently, not the number
+    /// cached, so it is small in exactly the cases the scan would matter.
+    ///
+    /// EACH FETCH CARRIES THE THREAD DOING IT, so that a thread can tell
+    /// somebody else's fetch from its own. Waiting for another thread is
+    /// the point; waiting for itself is a deadlock. See `block`.
+    in_flight: Vec<(u64, ThreadId)>,
 }
 
 impl CachingDevice {
@@ -98,7 +127,9 @@ impl CachingDevice {
                 hits: 0,
                 misses: 0,
                 generation: 0,
+                in_flight: Vec::new(),
             }),
+            fetched: Condvar::new(),
         })
     }
 
@@ -123,7 +154,9 @@ impl CachingDevice {
                 hits: 0,
                 misses: 0,
                 generation: 0,
+                in_flight: Vec::new(),
             }),
+            fetched: Condvar::new(),
         })
     }
 
@@ -218,19 +251,90 @@ impl CachingDevice {
     /// insert. Writes are far rarer than reads in these drivers, and the
     /// price of being conservative is one extra device read.
     fn block(&self, block_start: u64) -> Result<Arc<Vec<u8>>> {
-        let generation_at_miss;
-        {
+        // ONE FETCH PER BLOCK, NOT ONE PER MISSING THREAD.
+        //
+        // The lock has to be released for the device read -- holding a
+        // mutex across I/O would serialise every reader, which is what
+        // `perf: reads are positioned, and no longer take a lock`
+        // deliberately stopped doing. But releasing it used to mean N
+        // threads missing the same block all read the device and all
+        // inserted, so the cache held N copies of one block and had
+        // evicted up to N-1 others to store bytes it already had.
+        //
+        // So a thread that is going to fetch says so first, under the
+        // lock. A thread that finds someone else already fetching its
+        // block waits for them and then looks again, rather than making
+        // a second trip to the device for bytes already on their way.
+        //
+        // The loop is not a spin: `wait` blocks until a fetch finishes,
+        // and re-checking from the top afterwards is what makes it
+        // correct against a spurious wake, an invalidation that landed
+        // in the meantime, and a fetch that failed and left nothing.
+        //
+        // A THREAD NEVER WAITS FOR ITS OWN FETCH, WHICH IS WHY THE
+        // MARKER CARRIES AN OWNER.
+        //
+        // A device whose `read_at` reads back through the cache that
+        // wraps it re-enters this method for the block it is itself
+        // fetching. Waiting there would be waiting for a fetch this
+        // thread is holding up: a deadlock. So a thread that finds its
+        // own id against the block falls through and reads the device
+        // again -- the redundant read this commit removes for every
+        // other caller, which is the right answer for the one caller
+        // that cannot be served any other way.
+        //
+        // THE GUARD IS HERE BECAUSE OF WHAT A HANG COSTS, not because
+        // re-entrancy is expected. It is not: no device in this crate
+        // can do it today, since none holds a handle to what wraps it,
+        // and stacked caches are unaffected because each has its own
+        // lock and its own list. But `CachingDevice` accepts any
+        // `BlockRead`, so the constraint is a property of the current
+        // devices rather than of this API -- a device with a slower
+        // tier behind it that consults a cache on miss would violate it
+        // the day it is written. And the drivers built on this crate
+        // run as filesystem extensions, where a deadlock inside a
+        // fetch is not a visible failure but a spinning cursor on a
+        // volume that cannot be unmounted, with no error and no log
+        // line to say which mount is stuck. Four lines and a thread id
+        // turn that into a redundant read.
+        let generation_at_miss = {
             let mut s = self.state.lock().unwrap();
-            if let Some(pos) = s.entries.iter().position(|(o, _)| *o == block_start) {
-                let entry = s.entries.remove(pos).expect("position just found it");
-                let data = entry.1.clone();
-                s.entries.push_front(entry);
-                s.hits += 1;
-                return Ok(data);
+            loop {
+                if let Some(pos) = s.entries.iter().position(|(o, _)| *o == block_start) {
+                    let entry = s.entries.remove(pos).expect("position just found it");
+                    let data = entry.1.clone();
+                    s.entries.push_front(entry);
+                    s.hits += 1;
+                    return Ok(data);
+                }
+                let mine = std::thread::current().id();
+                if s.in_flight
+                    .iter()
+                    .any(|(o, owner)| *o == block_start && *owner != mine)
+                {
+                    // Counted as neither yet. It becomes a hit when the
+                    // fetch it is waiting for lands, and a miss if that
+                    // fetch fails and this thread has to do it instead
+                    // -- so `hits + misses` stays the number of calls,
+                    // and `misses` stays the number of device fetches.
+                    s = self.fetched.wait(s).unwrap();
+                    continue;
+                }
+                s.misses += 1;
+                s.in_flight.push((block_start, mine));
+                break s.generation;
             }
-            s.misses += 1;
-            generation_at_miss = s.generation;
-        }
+        };
+
+        // FROM HERE EVERY EXIT MUST CLEAR THE MARKER, including the `?`
+        // below and a panic inside the device. A fetch that vanished
+        // without clearing it would leave every later reader of that
+        // block waiting for a thread that is gone.
+        let _fetch = FetchGuard {
+            device: self,
+            block_start,
+            owner: std::thread::current().id(),
+        };
 
         // THE LAST BLOCK OF A DEVICE IS OFTEN SHORT, and asking the
         // device for a whole one past its end is an error rather than a
@@ -244,12 +348,30 @@ impl CachingDevice {
         self.inner.read_at(block_start, &mut block)?;
         let data = Arc::new(block);
 
-        let mut s = self.state.lock().unwrap();
-        if s.generation == generation_at_miss {
-            if s.entries.len() >= self.capacity {
-                s.entries.pop_back();
+        // Inserted BEFORE `_fetch` clears the marker and wakes the
+        // waiters, so a thread woken by this fetch finds the entry
+        // rather than an empty cache and a free marker.
+        {
+            let mut s = self.state.lock().unwrap();
+            // ALREADY HELD? Then return that copy and drop this one
+            // rather than holding the same block twice. Only a
+            // re-entrant fetch reaches this -- one fetch per block per
+            // thread is the rule for every other caller -- and without
+            // it a re-entrant read puts two entries in for one block,
+            // which is the defect this commit exists to remove, in a
+            // new place.
+            if let Some(pos) = s.entries.iter().position(|(o, _)| *o == block_start) {
+                let entry = s.entries.remove(pos).expect("position just found it");
+                let held = entry.1.clone();
+                s.entries.push_front(entry);
+                return Ok(held);
             }
-            s.entries.push_front((block_start, data.clone()));
+            if s.generation == generation_at_miss {
+                if s.entries.len() >= self.capacity {
+                    s.entries.pop_back();
+                }
+                s.entries.push_front((block_start, data.clone()));
+            }
         }
         Ok(data)
     }
@@ -455,6 +577,46 @@ impl BlockDevice for CachingDevice {
 
     fn is_writable(&self) -> bool {
         self.writable.as_ref().is_some_and(|w| w.is_writable())
+    }
+}
+
+/// Clears one block from [`CacheState::in_flight`] and wakes whoever is
+/// waiting for it.
+///
+/// A guard rather than a line at the end of `block()`, because the
+/// paths out of that method are not all the happy one: the device read
+/// uses `?`, and a device is free to panic. Either would step over a
+/// manual cleanup and strand every future reader of that block on a
+/// fetch that no longer exists.
+struct FetchGuard<'a> {
+    device: &'a CachingDevice,
+    block_start: u64,
+    owner: ThreadId,
+}
+
+impl Drop for FetchGuard<'_> {
+    fn drop(&mut self) {
+        // REMOVES ONE ENTRY, NOT EVERY MATCH. `retain` would be wrong:
+        // it reads as the same thing and would clear a second fetch of
+        // this block that this guard does not own.
+        //
+        // A poisoned lock is left alone. Another thread panicked holding
+        // it, so the cache is already unusable and every waiter will
+        // surface the poison from its own `wait`; unwrapping here could
+        // panic while a panic is already unwinding, which aborts.
+        if let Ok(mut s) = self.device.state.lock() {
+            if let Some(pos) = s
+                .in_flight
+                .iter()
+                .position(|(o, owner)| *o == self.block_start && *owner == self.owner)
+            {
+                s.in_flight.remove(pos);
+            }
+        }
+        // Outside the lock, and after it: waiters re-check the state, so
+        // waking them before the marker was cleared would send them
+        // straight back to sleep.
+        self.device.fetched.notify_all();
     }
 }
 
