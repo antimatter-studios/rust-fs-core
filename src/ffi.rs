@@ -995,8 +995,15 @@ mod error_code_abi_tests {
     /// test, because a parser that silently matches nothing agrees with
     /// every header.
     fn codes_declared_in_rust() -> Vec<(String, i32)> {
+        // NORMALISED FIRST. A Windows checkout has CRLF, so every marker
+        // below would carry a `\r` the source does not, and the
+        // uniqueness assertion fails rather than parsing the wrong enum
+        // -- which is the guard working, but it fails a correct file.
+        // The caller owns the normalised copy because `enum_body`
+        // borrows from it.
+        let src = include_str!("ffi.rs").replace("\r\n", "\n");
         let body = enum_body(
-            include_str!("ffi.rs"),
+            &src,
             "pub enum FsCoreErrorCode {\n",
             "\n\nimpl FsCoreErrorCode {",
         );
@@ -1023,11 +1030,8 @@ mod error_code_abi_tests {
     /// The same list as `include/fs_core.h` declares it, with the same
     /// refusal to guess: an entry it cannot read fails the test.
     fn codes_declared_in_c() -> Vec<(String, i32)> {
-        let body = enum_body(
-            include_str!("../include/fs_core.h"),
-            "typedef enum {\n",
-            " FsCoreErrorCode;",
-        );
+        let src = include_str!("../include/fs_core.h").replace("\r\n", "\n");
+        let body = enum_body(&src, "typedef enum {\n", " FsCoreErrorCode;");
 
         // A C comment spans lines and sits between entries, so it goes
         // before the split on commas rather than after it.
