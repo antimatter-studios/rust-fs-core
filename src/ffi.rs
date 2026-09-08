@@ -24,7 +24,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use crate::block::BlockDevice;
+use crate::block::{BlockDevice, BlockRead};
 use crate::callback_device::CallbackDevice;
 use crate::error::Error;
 use std::cell::RefCell;
@@ -509,6 +509,11 @@ pub unsafe extern "C" fn fs_core_device_from_callbacks(
 
 /// Read-only slice. Writes via the returned handle return
 /// `FS_CORE_READ_ONLY` regardless of the parent's writability.
+///
+/// `length` is clamped to what the parent can back, and a `start` at or
+/// past the parent's end returns NULL with a message — see
+/// [`crate::slice::window_on_parent`]. Read `fs_core_device_size_bytes`
+/// on the returned handle rather than assuming it is `length`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fs_core_device_slice_ro(
     parent: *const FsCoreDevice,
@@ -521,6 +526,9 @@ pub unsafe extern "C" fn fs_core_device_slice_ro(
     }
     ffi_guard_or(ptr::null_mut(), || unsafe {
         let parent_arc = (*parent).inner().clone();
+        let Some(length) = slice_window(parent_arc.size_bytes(), start, length, "slice_ro") else {
+            return ptr::null_mut();
+        };
         // OwnedSlice takes Arc<dyn BlockRead>; trait upcast from
         // BlockDevice -> BlockRead is supported in the pinned toolchain.
         let parent_read: Arc<dyn crate::block::BlockRead> = parent_arc;
@@ -533,6 +541,11 @@ pub unsafe extern "C" fn fs_core_device_slice_ro(
 /// offset`; writes outside `[0, length)` return `FS_CORE_OUT_OF_BOUNDS`.
 /// If the parent reports `is_writable() == false`, write attempts return
 /// `FS_CORE_READ_ONLY`.
+///
+/// `length` is clamped to what the parent can back, and a `start` at or
+/// past the parent's end returns NULL with a message — see
+/// [`crate::slice::window_on_parent`]. Read `fs_core_device_size_bytes`
+/// on the returned handle rather than assuming it is `length`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fs_core_device_slice_rw(
     parent: *const FsCoreDevice,
@@ -545,9 +558,35 @@ pub unsafe extern "C" fn fs_core_device_slice_rw(
     }
     ffi_guard_or(ptr::null_mut(), || unsafe {
         let parent_arc = (*parent).inner().clone();
+        let Some(length) = slice_window(parent_arc.size_bytes(), start, length, "slice_rw") else {
+            return ptr::null_mut();
+        };
         let slice = crate::slice::OwnedRwSlice::new(parent_arc, start, length);
         FsCoreDevice::into_handle(Arc::new(slice))
     })
+}
+
+/// The slice window both C constructors take, or `None` with the error
+/// slot already set.
+///
+/// The clamp itself lives in [`crate::slice::window_on_parent`] and is
+/// applied again inside the slice constructors, so calling it here is
+/// not the check — it is how the C ABI learns that there was nothing to
+/// slice, which is the one outcome a `*mut` return can express and an
+/// infallible Rust constructor cannot. A zero-byte handle would be
+/// technically honest and useless to debug: the mount that follows fails
+/// on its superblock read with no hint that the window was the problem.
+fn slice_window(parent_size: u64, start: u64, length: u64, what: &str) -> Option<u64> {
+    match crate::slice::window_on_parent(parent_size, start, length) {
+        Some(clamped) => Some(clamped),
+        None => {
+            set_last_error(format!(
+                "fs_core_device_{what}: start {start} is at or past the end of the \
+                 parent device ({parent_size} bytes), so there is nothing to slice"
+            ));
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
