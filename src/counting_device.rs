@@ -19,14 +19,44 @@
 //! - **reads** — calls to [`BlockRead::read_at`]. This is the number a
 //!   cache moves: a metadata block read twice is two reads here and one
 //!   after a cache is put underneath.
-//! - **bytes** — the total of every buffer those calls filled. This is
-//!   what the *device* moves, which is not the same thing: a driver
-//!   that reads a 4 KiB block to look at 8 bytes of it moves 4 KiB, and
-//!   only the read count will show the waste.
+//! - **bytes** — the size of every buffer those calls asked to have
+//!   filled. This is not the same number as the read count, and that is
+//!   why both are here: a driver that reads a 4 KiB block to look at
+//!   8 bytes of it is one read either way, and only the byte count
+//!   shows the 4 KiB it asked the device for to use 8.
 //!
 //! Both are worth having. A change that halves reads and doubles bytes
 //! is a readahead that guessed wrong, and one number alone would call
 //! it a win.
+//!
+//! # Both numbers are what was asked for, not what moved
+//!
+//! `bytes` is the buffer a call presented, added before the call is
+//! forwarded and never adjusted afterwards, so a read the device
+//! refuses contributes its whole buffer. That is the same rule as
+//! `reads`, for the same reason: a driver looping on an out-of-range
+//! offset is exactly the shape these numbers exist to make visible, and
+//! a counter that sat still through it would hide the loop.
+//!
+//! It is worth being plain that this is the only rule available, rather
+//! than a convenience. **Bytes-moved is not reachable through
+//! [`BlockRead`] at all**: [`BlockRead::read_at`] returns `Result<()>`
+//! and carries no transfer count, so the only place a real figure ever
+//! appears is `got` inside [`crate::Error::ShortRead`] — off the
+//! success path, and absent from the other errors an over-read can
+//! produce. Counting only on `Ok` would not recover it either, because
+//! a refused read is not reliably a transfer of nothing: a
+//! [`crate::FileDevice`] copies the readable prefix into the buffer
+//! before reporting the shortfall, so a 64-byte request against a
+//! 16-byte file really moves 16 bytes, while the same request against
+//! an in-memory device moves none. Counting on `Ok` reports 0 for both;
+//! this counter reports 64 for both.
+//!
+//! Reporting the request is therefore the one answer that does not
+//! depend on which device happens to be underneath, which is what makes
+//! two drivers' numbers comparable — the whole point of the module. The
+//! price is that these counters are not a transfer total for a run with
+//! failed reads in it, and should not be read as one.
 
 use crate::block::BlockRead;
 use crate::error::Result;
@@ -58,7 +88,12 @@ impl CountingDevice {
         self.reads.load(Ordering::Relaxed)
     }
 
-    /// How many bytes those calls asked for.
+    /// How many bytes those calls asked for, including the buffers of
+    /// reads the device refused.
+    ///
+    /// This is the request, not the transfer. See the module header for
+    /// why bytes-moved is not reachable through [`BlockRead`] and why
+    /// counting the request is what makes two drivers comparable.
     pub fn bytes(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
     }
@@ -126,6 +161,91 @@ mod tests {
         let mut buf = [0u8; 64];
         assert!(dev.read_at(0, &mut buf).is_err(), "past the end");
         assert_eq!(dev.reads(), 1, "the driver asked, so it counts");
+    }
+
+    /// The byte counter follows the same rule as the read counter, and
+    /// nothing was pinning that.
+    ///
+    /// A refused read leaves three candidate answers a reader of the
+    /// module might expect, and this separates them. The device holds
+    /// 16 bytes, the call asks for 64, and the in-memory device copies
+    /// nothing before refusing:
+    ///
+    /// - 0, if the counter charged only successful reads;
+    /// - 16, if it charged what the error says was available;
+    /// - 64, the buffer presented — which is what it does.
+    ///
+    /// The read count on a failed read has a test above; the byte count
+    /// had none, and that is how the module header came to describe a
+    /// counter of bytes moved while the code counted bytes requested.
+    #[test]
+    fn bytes_counts_what_was_asked_for_including_a_failed_read() {
+        let dev = device(16);
+        let mut buf = [0u8; 64];
+
+        assert!(dev.read_at(0, &mut buf).is_err(), "past the end");
+        assert_eq!(
+            dev.bytes(),
+            64,
+            "the whole buffer the driver presented, not the 16 bytes \
+             available and not the 0 bytes delivered"
+        );
+        assert_eq!(
+            buf, [0u8; 64],
+            "this device refused without copying, so 64 bytes were \
+             charged for a transfer of none"
+        );
+    }
+
+    /// And the answer does not change when the device *did* move bytes,
+    /// which is the property that makes two drivers comparable.
+    ///
+    /// A [`crate::FileDevice`] copies the readable prefix into the
+    /// buffer before reporting the shortfall, so this same 64-byte
+    /// request against a 16-byte file genuinely transfers 16 bytes
+    /// where the in-memory device above transferred none. Both are
+    /// charged 64. A counter of bytes moved would have to report 16
+    /// here and 0 there for identical driver behaviour, which is the
+    /// "two numbers that look alike and are not" failure this module
+    /// exists to prevent.
+    #[test]
+    fn bytes_is_the_request_even_when_the_device_moved_a_prefix() {
+        use std::sync::atomic::AtomicU64;
+
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fs_core_counting_prefix_{}_{}.bin",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, [7u8; 16]).expect("write the fixture");
+
+        let file = crate::FileDevice::open(&path).expect("open the fixture");
+        assert_eq!(file.size_bytes(), 16, "the fixture is the size it claims");
+
+        let dev = CountingDevice::new(Arc::new(file));
+        let mut buf = [0u8; 64];
+        let err = dev.read_at(0, &mut buf).expect_err("past the end");
+
+        // Read everything out before asserting, so a failure does not
+        // leave the fixture behind.
+        let (reads, bytes) = (dev.reads(), dev.bytes());
+        let moved = buf.iter().filter(|b| **b == 7).count();
+        drop(dev);
+        std::fs::remove_file(&path).expect("remove the fixture");
+
+        match err {
+            crate::Error::ShortRead { want, got, .. } => {
+                assert_eq!((want, got), (64, 16), "asked 64, got the 16 there were");
+            }
+            other => panic!("expected ShortRead, got {other:?}"),
+        }
+        assert_eq!(moved, 16, "the file device really did copy its prefix");
+        assert_eq!(
+            (reads, bytes),
+            (1, 64),
+            "charged the request, exactly as the in-memory device was"
+        );
     }
 
     /// Resetting drops the mount's own reads, which is the whole reason
