@@ -145,6 +145,19 @@ FsCoreDevice *fs_core_device_from_callbacks(const FsCoreCallbackCfg *cfg);
  * (start + offset); writes outside [0, length) return
  * FS_CORE_OUT_OF_BOUNDS, and a non-writable parent surfaces
  * FS_CORE_READ_ONLY.
+ *
+ * `length` IS CLAMPED to what the parent can back, so the addressable
+ * range is min(length, parent_size - start) — call
+ * `fs_core_device_size_bytes` on the returned handle rather than
+ * assuming `length`. A partition table is bytes off the disk, and a
+ * `dd` of the first part of a disk or a table left stale after a shrink
+ * both produce a last partition that runs off the end; clamping still
+ * hands you what is there, and what must not happen is the slice
+ * claiming more device than exists, because whatever you stack on it
+ * sizes its own structures from that answer.
+ *
+ * A `start` at or past the parent's end has nothing behind it, so both
+ * calls return NULL and set `fs_core_last_error_message`.
  * ------------------------------------------------------------------------- */
 
 FsCoreDevice *fs_core_device_slice_ro(const FsCoreDevice *parent,

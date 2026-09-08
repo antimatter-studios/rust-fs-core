@@ -9,6 +9,60 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Fixed
+
+- A slice can no longer report more device than its parent holds. All
+  three constructors — `SliceReader::new`, `OwnedSlice::new`,
+  `OwnedRwSlice::new` — now ask the parent its size and clamp `length`
+  to what is actually there, so `size_bytes()` is a fact rather than the
+  caller's claim. It was stored verbatim and reported straight back, so
+  `OwnedSlice::new(hundred_byte_device, 0, 1_000_000)` was a device that
+  told every consumer it held a megabyte — and `size_bytes()` is the
+  number the bounds checks in this crate, and the structures of every
+  driver stacked on a slice, are sized from.
+
+  Two things went wrong downstream of that lie, both now pinned by
+  tests. A read inside the declared length but past the parent's real
+  end was forwarded, so the caller got the parent's `ShortRead` with the
+  parent's absolute offset and a non-zero `got`, with the readable
+  prefix already copied into its buffer — the opposite of the "refuses
+  before it touches the parent, `got: 0`, buffer untouched" contract the
+  module documents. And a write past that end was forwarded too:
+  `FileDevice::write_at` seeks and writes with no bounds check of its
+  own, so an over-long RW slice over an image file returned `Ok` and
+  EXTENDED THE FILE, 64 bytes becoming 72 in the test that now catches
+  it.
+
+  The length is clamped rather than the slice refused, because a
+  partition table is bytes off the disk: a `dd` of the first part of a
+  disk, or a table left stale after a shrink, both produce a last
+  partition that runs off the end, and refusing it takes away the one
+  thing someone with a truncated image wants. The rule is
+  `slice::window_on_parent`, and `am-partitions` — which had to write
+  this rule for itself, at the call site, because the constructor would
+  not enforce it — can now use it instead of its own copy.
+
+  A window whose `start` is at or past the parent's end has nothing
+  behind it. The Rust constructors are infallible and make it a
+  zero-byte slice; `fs_core_device_slice_ro` / `_rw` return NULL with a
+  message saying which start and which parent size, because a zero-byte
+  handle is honest and useless to debug — the mount that follows fails
+  on its superblock read with no hint that the window was the problem.
+
+  This closes the `start + offset + len` overflow in
+  `SliceGeometry::rebase` at the root rather than with another
+  `checked_add`: that sum can only leave a `u64` if `start + length`
+  does, and `length` is now at most `parent_size - start`.
+
+### Changed
+
+- `SliceGeometry::rebase`'s doc comment no longer claims a check against
+  the parent that it never performed. It said it returned `None` "when
+  the rebased offset would not fit on the parent at all"; there was no
+  parent in scope, and the only thing tested was that the address fit in
+  a `u64`. The C header made the matching promise, that the slice's
+  addressable range "is `length` bytes", and now states the clamp.
+
 ## [0.2.10] — 2026-09-06
 
 ### Changed

@@ -50,11 +50,65 @@
 //! about it — including [`Error::OutOfBounds`] from a container reader
 //! that knows its virtual size — comes back unchanged.
 //!
+//! # A slice cannot report more device than its parent holds
+//!
+//! All three constructors ask the parent its size and CLAMP `length` to
+//! what is actually there — see [`window_on_parent`] for the rule and
+//! why it clamps rather than refuses. So `size_bytes()` is the truth
+//! about how much is readable, not a number the caller asserted.
+//!
+//! That is load-bearing rather than tidy. `size_bytes()` is "used for
+//! bounds checks" ([`BlockRead::size_bytes`]), and a driver mounted on a
+//! slice sizes its own structures from it. A slice that claimed a
+//! megabyte over a hundred-byte parent kept both promises of the section
+//! above and broke them in the same breath: a read inside the *declared*
+//! length but past the *real* end was forwarded, and the parent — being
+//! a real device — answered with a `ShortRead` carrying its own absolute
+//! offset and a non-zero `got`, having already copied the readable prefix
+//! into the caller's buffer. Substitutable for a real device of size
+//! `length` is exactly what that is not.
+//!
+//! A slice whose `start` is at or past the parent's end has nothing
+//! behind it at all. The constructors are infallible and give it
+//! `length = 0`, which behaves as a zero-byte device does: every read is
+//! `ShortRead { got: 0 }` and every write is `OutOfBounds { size: 0 }`.
+//! The C ABI, which can afford to be fallible, refuses it instead —
+//! `fs_core_device_slice_ro`/`_rw` return NULL with a message.
+//!
 //! [`FileDevice`]: crate::FileDevice
 
 use crate::block::{BlockDevice, BlockRead};
 use crate::error::{Error, Result};
 use std::sync::Arc;
+
+/// How much of the window `[start, start + length)` is actually on a
+/// parent of `parent_size` bytes, or `None` when the window begins at or
+/// past the parent's end and there is nothing on it to slice.
+///
+/// A slice's geometry comes from a partition table, and a partition
+/// table comes off the disk, so a window that claims to start or end
+/// past the device is an ordinary thing to be handed -- and not only
+/// from a hostile image. A `dd` of the first N gigabytes of a disk, or a
+/// table left stale after the volume was shrunk, both produce a last
+/// partition that runs off the end.
+///
+/// So the length is CLAMPED rather than the slice refused. Refusing it
+/// takes away the one thing someone with a truncated image wants, which
+/// is to read what is still there. What must not happen is the slice
+/// reporting more device than exists, because the driver stacked on it
+/// sizes its own structures from that answer.
+///
+/// Clamping also closes the arithmetic hole in the slices' shared
+/// rebasing step as a side effect, and closes it at the root.
+/// `start + offset + len`
+/// can only leave a `u64` if `start + length` does, and `length` is now
+/// at most `parent_size - start`.
+pub fn window_on_parent(parent_size: u64, start: u64, length: u64) -> Option<u64> {
+    if start >= parent_size {
+        return None;
+    }
+    Some(length.min(parent_size - start))
+}
 
 /// Where a slice sits on its parent, and the one bounds rule the three
 /// slice types share.
@@ -70,27 +124,47 @@ struct SliceGeometry {
 }
 
 impl SliceGeometry {
-    fn new(start: u64, length: u64) -> Self {
-        Self { start, length }
+    /// `length` is CLAMPED to what `parent_size` can back — see
+    /// [`window_on_parent`]. A window beginning at or past the parent's
+    /// end becomes a zero-length slice, which is what it is.
+    ///
+    /// Taking the parent's size here rather than on each read is
+    /// deliberate: [`BlockRead::size_bytes`] must not change for the
+    /// life of a device, so one call at construction is the whole
+    /// answer, and `length` is then a fact instead of a claim.
+    fn new(parent_size: u64, start: u64, length: u64) -> Self {
+        Self {
+            start,
+            length: window_on_parent(parent_size, start, length).unwrap_or(0),
+        }
     }
 
     /// Parent offset corresponding to `offset`, or `None` when
-    /// `[offset, offset + len)` is not wholly inside `[0, length)`, or
-    /// when the rebased offset would not fit on the parent at all.
+    /// `[offset, offset + len)` is not wholly inside `[0, length)`.
     ///
-    /// Every one of these additions is checked, `start + offset`
-    /// included. That one used to be deliberate, on the argument that a
-    /// slice built with a nonsense `start` would "overflow here rather
-    /// than quietly reading some other part of the parent" -- which
-    /// holds only while `overflow-checks` is on, and it is off in the
-    /// release profile these crates ship. In release the addition
-    /// wrapped, and the wrap did precisely the thing the argument said
-    /// it avoided: a slice starting at 2^63 and 5000 bytes long
-    /// returned `Ok` and the parent's bytes from offset 5000.
+    /// This asks the parent nothing — the parent was asked once, in
+    /// [`SliceGeometry::new`], and `length` is its answer. The comment
+    /// here used to claim a second check "when the rebased offset would
+    /// not fit on the parent at all", which no code performed and no
+    /// parent was in scope to perform: it was a `u64` overflow guard
+    /// being described as a bounds check against the device.
     ///
-    /// A slice's geometry comes from a partition table, which comes off
-    /// the disk, so "a nonsense start" is an ordinary thing to be
-    /// handed rather than a programming mistake.
+    /// Both additions stay checked, `start + offset` included. That one
+    /// used to be deliberate, on the argument that a slice built with a
+    /// nonsense `start` would "overflow here rather than quietly
+    /// reading some other part of the parent" -- which holds only while
+    /// `overflow-checks` is on, and it is off in the release profile
+    /// these crates ship. In release the addition wrapped, and the wrap
+    /// did precisely the thing the argument said it avoided: a slice
+    /// starting at 2^63 and 5000 bytes long returned `Ok` and the
+    /// parent's bytes from offset 5000.
+    ///
+    /// Both are now unreachable through the public API, because the
+    /// clamp makes `start + length <= parent_size` and every accepted
+    /// `offset + len` is at most `length`. They are kept as the last
+    /// line of defence for a parent that violates the `size_bytes`
+    /// stability contract and shrinks under a live slice; the guard that
+    /// is actually load-bearing, and tested, is the clamp.
     fn rebase(&self, offset: u64, len: u64) -> Option<u64> {
         let end = offset.checked_add(len)?;
         if end > self.length {
@@ -135,11 +209,11 @@ pub struct SliceReader<'a> {
 }
 
 impl<'a> SliceReader<'a> {
+    /// `length` is clamped to what the parent can back, so
+    /// `size_bytes()` never exceeds it. See [`window_on_parent`].
     pub fn new(parent: &'a (dyn BlockRead + 'a), start: u64, length: u64) -> Self {
-        Self {
-            parent,
-            geom: SliceGeometry::new(start, length),
-        }
+        let geom = SliceGeometry::new(parent.size_bytes(), start, length);
+        Self { parent, geom }
     }
 
     /// Byte offset of this slice on the parent device.
@@ -180,11 +254,11 @@ pub struct OwnedSlice {
 }
 
 impl OwnedSlice {
+    /// `length` is clamped to what the parent can back, so
+    /// `size_bytes()` never exceeds it. See [`window_on_parent`].
     pub fn new(parent: Arc<dyn BlockRead>, start: u64, length: u64) -> Self {
-        Self {
-            parent,
-            geom: SliceGeometry::new(start, length),
-        }
+        let geom = SliceGeometry::new(parent.size_bytes(), start, length);
+        Self { parent, geom }
     }
 
     /// Byte offset of this slice on the parent device.
@@ -225,11 +299,14 @@ pub struct OwnedRwSlice {
 }
 
 impl OwnedRwSlice {
+    /// `length` is clamped to what the parent can back, so
+    /// `size_bytes()` never exceeds it and a write past the parent's end
+    /// is [`Error::OutOfBounds`] from this slice rather than whatever
+    /// the parent makes of an address beyond itself. See
+    /// [`window_on_parent`].
     pub fn new(parent: Arc<dyn BlockDevice>, start: u64, length: u64) -> Self {
-        Self {
-            parent,
-            geom: SliceGeometry::new(start, length),
-        }
+        let geom = SliceGeometry::new(parent.size_bytes(), start, length);
+        Self { parent, geom }
     }
 
     /// Byte offset of this slice on the parent device.
@@ -307,6 +384,12 @@ mod tests {
     /// offset inside the slice's declared length landed somewhere else
     /// on the parent entirely -- and came back `Ok`, with those bytes,
     /// as though they were the slice's own.
+    ///
+    /// The `checked_add` in `rebase` is no longer what stops this: the
+    /// constructor's clamp gets there first, and a start of 2^63 over a
+    /// 64 KiB parent now leaves nothing to read at all. Both assertions
+    /// are kept -- the size, which is the guard now in force, and the
+    /// bytes, which are what went wrong.
     #[test]
     fn a_slice_whose_start_plus_offset_leaves_the_parent_reads_nothing() {
         let mut v = vec![0u8; 64 * 1024];
@@ -316,6 +399,11 @@ mod tests {
         // A GPT entry of starting_lba = 2^54 and ending_lba = 2^55 + 99
         // produces exactly this.
         let slice = OwnedSlice::new(dev, 1 << 63, (1 << 63) + 51200);
+        assert_eq!(
+            slice.size_bytes(),
+            0,
+            "the window begins past the parent, so none of it is there"
+        );
         let mut buf = [0u8; 8];
         let inside_the_declared_length = (1u64 << 63) + 5000;
 
@@ -430,6 +518,147 @@ mod tests {
             }
             other => panic!("expected OutOfBounds, got {other:?}"),
         }
+    }
+
+    /// The rule itself, at its edges. Clamp where the window merely runs
+    /// off the end; `None` only where it begins at or past the end and
+    /// there is nothing to slice.
+    #[test]
+    fn window_on_parent_clamps_the_length_and_refuses_only_a_start_past_the_end() {
+        // Wholly inside: untouched.
+        assert_eq!(window_on_parent(1024, 0, 1024), Some(1024));
+        assert_eq!(window_on_parent(1024, 512, 512), Some(512));
+        assert_eq!(window_on_parent(1024, 1023, 1), Some(1));
+
+        // Running off the end: as much of it as is there. A `dd` of the
+        // first part of a disk, or a table left stale after a shrink.
+        assert_eq!(window_on_parent(1024, 512, 513), Some(512));
+        assert_eq!(window_on_parent(1024, 0, u64::MAX), Some(1024));
+
+        // Beginning at or past the end: nothing on the parent to slice.
+        assert_eq!(window_on_parent(1024, 1024, 1), None);
+        assert_eq!(window_on_parent(1024, 4096, 1), None);
+        assert_eq!(window_on_parent(0, 0, 8), None);
+
+        // The pair a GPT entry of starting_lba 2^54 and ending_lba
+        // 2^55 + 99 produces: the sum leaves a u64 entirely, and the
+        // start alone is already past the parent.
+        assert_eq!(
+            window_on_parent(64 * 1024, 1 << 63, (1 << 63) + 51200),
+            None
+        );
+
+        // The arithmetic case from the top of the address space. The
+        // clamp is what keeps `start + offset + len` inside a u64: 4
+        // bytes rebase to exactly `u64::MAX`, and the requested 8 would
+        // not have.
+        assert_eq!(window_on_parent(u64::MAX, u64::MAX - 4, 8), Some(4));
+    }
+
+    /// `size_bytes()` is what bounds checks are done against, so a
+    /// borrowed slice must not report a window its parent cannot back.
+    ///
+    /// The read assertion is on the ShortRead's FIELDS, not on
+    /// `is_err()`. An unclamped slice rebases 45 to 95 and the parent
+    /// refuses that too -- the error arrives either way. What tells the
+    /// two apart is whose bounds were consulted: the slice's own offset
+    /// and `got: 0`, or the parent's absolute 95 and the five bytes it
+    /// could have delivered.
+    #[test]
+    fn a_borrowed_slice_cannot_claim_more_than_its_parent_holds() {
+        let dev = Bytes::new(vec![0xEE; 100]);
+        let slice = SliceReader::new(&dev, 50, 100);
+
+        assert_eq!(slice.size_bytes(), 50);
+        assert_eq!(slice.length(), 50);
+        assert_eq!(
+            slice.start(),
+            50,
+            "the start is not clamped, only the length"
+        );
+
+        let mut buf = [0u8; 8];
+        match slice.read_at(45, &mut buf) {
+            Err(Error::ShortRead { offset, want, got }) => {
+                assert_eq!((offset, want, got), (45, 8, 0));
+            }
+            other => panic!("expected the slice's own ShortRead, got {other:?}"),
+        }
+        assert_eq!(buf, [0u8; 8], "a refused read leaves the buffer alone");
+    }
+
+    /// The same for the `Arc` variant, which is the one the C ABI and
+    /// the partition walkers reach.
+    #[test]
+    fn an_owned_slice_cannot_claim_more_than_its_parent_holds() {
+        let mut v = vec![0u8; 100];
+        v[50..58].copy_from_slice(b"LASTHALF");
+        let dev: Arc<dyn BlockRead> = Arc::new(Bytes::new(v));
+        let slice = OwnedSlice::new(dev, 50, 100);
+
+        assert_eq!(slice.size_bytes(), 50);
+        assert_eq!(slice.length(), 50);
+
+        // What is there still reads.
+        let mut buf = [0u8; 8];
+        slice.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"LASTHALF");
+
+        match slice.read_at(45, &mut buf) {
+            Err(Error::ShortRead { offset, want, got }) => {
+                assert_eq!((offset, want, got), (45, 8, 0));
+            }
+            other => panic!("expected the slice's own ShortRead, got {other:?}"),
+        }
+    }
+
+    /// The write direction has its own currency, and an over-long slice
+    /// lost it: the write was inside the declared length, so it was
+    /// forwarded, and the caller got whatever the parent makes of an
+    /// address beyond itself -- a `ShortRead` from a WRITE, in the case
+    /// of the in-memory double, and a silently extended file in the case
+    /// of `FileDevice`, which seeks and writes without a bounds check.
+    #[test]
+    fn an_rw_slice_refuses_a_write_past_its_parents_end_as_out_of_bounds() {
+        let dev: Arc<dyn BlockDevice> = Arc::new(RwBytes::new(vec![0u8; 64]));
+        let slice = OwnedRwSlice::new(dev.clone(), 32, 4096);
+
+        assert_eq!(slice.size_bytes(), 32);
+
+        // Inside the clamped window still writes through.
+        slice.write_at(0, &[0xAB; 4]).unwrap();
+        let mut pbuf = [0u8; 4];
+        dev.read_at(32, &mut pbuf).unwrap();
+        assert_eq!(pbuf, [0xAB; 4]);
+
+        match slice.write_at(32, &[0xCD; 8]) {
+            Err(Error::OutOfBounds { offset, len, size }) => {
+                assert_eq!((offset, len, size), (32, 8, 32));
+            }
+            other => panic!("expected the slice's own OutOfBounds, got {other:?}"),
+        }
+        assert_eq!(dev.size_bytes(), 64, "the parent did not grow");
+    }
+
+    /// A window that begins at or past the parent's end is a zero-byte
+    /// device, not a window onto somewhere else.
+    #[test]
+    fn a_slice_starting_past_its_parents_end_is_empty() {
+        let mut v = vec![0u8; 100];
+        v[0..8].copy_from_slice(b"NOTYOURS");
+        let dev: Arc<dyn BlockRead> = Arc::new(Bytes::new(v));
+        let slice = OwnedSlice::new(dev, 200, 64);
+
+        assert_eq!(slice.size_bytes(), 0);
+
+        let mut buf = [0u8; 8];
+        match slice.read_at(0, &mut buf) {
+            Err(Error::ShortRead { offset, want, got }) => {
+                assert_eq!((offset, want, got), (0, 8, 0));
+            }
+            other => panic!("expected ShortRead, got {other:?}"),
+        }
+        assert_eq!(buf, [0u8; 8]);
     }
 
     #[test]

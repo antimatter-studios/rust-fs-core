@@ -207,6 +207,128 @@ fn slice_survives_parent_close_via_arc_ownership() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A C caller hands `start` and `length` straight in, so this is where
+/// an unchecked window reached the constructor. The addressable range is
+/// what the parent can back, and `fs_core_device_size_bytes` says so.
+///
+/// The read assertion is on the BUFFER, not on the return code. Both the
+/// clamped slice and the unclamped one fail this read — the unclamped
+/// one because the parent runs out — and `FsCoreErrorCode::ShortRead`
+/// cannot tell them apart. What can: `FileDevice` copies the readable
+/// prefix before it reports the short read, so an unclamped slice fills
+/// the first 16 bytes with the parent's bytes 48..64. A slice is
+/// supposed to refuse an out-of-range read before touching the parent
+/// and leave the buffer alone.
+#[test]
+fn slice_ro_length_is_clamped_to_what_the_parent_holds() {
+    let bytes: Vec<u8> = (0..64).map(|i| i as u8).collect();
+    let path = tmp_image(&bytes);
+    let parent = open_handle(&path, false);
+    assert!(!parent.is_null());
+
+    unsafe {
+        let slice = fs_core_device_slice_ro(parent, 32, 4096);
+        assert!(!slice.is_null());
+        assert_eq!(fs_core_device_size_bytes(slice), 32);
+
+        // Byte 0 of the slice is still byte 32 of the parent.
+        let mut ok = [0u8; 8];
+        assert_eq!(
+            fs_core_device_read_at(slice, 0, ok.as_mut_ptr(), ok.len()),
+            FsCoreErrorCode::Ok
+        );
+        assert_eq!(ok, [32, 33, 34, 35, 36, 37, 38, 39]);
+
+        let mut buf = [0u8; 32];
+        let rc = fs_core_device_read_at(slice, 16, buf.as_mut_ptr(), buf.len());
+        assert_eq!(rc, FsCoreErrorCode::ShortRead);
+        assert_eq!(
+            buf, [0u8; 32],
+            "a read the slice refused must not have reached the parent"
+        );
+
+        fs_core_device_close(slice);
+        fs_core_device_close(parent);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The write direction, where the unclamped window did real damage:
+/// `FileDevice::write_at` seeks and writes with no bounds check of its
+/// own, so a write past the declared-but-absent end of the slice
+/// EXTENDED THE IMAGE FILE. The oracle is the file's length on disk.
+#[test]
+fn slice_rw_length_is_clamped_and_a_write_past_it_does_not_grow_the_image() {
+    let path = tmp_image(&[0u8; 64]);
+    let parent = open_handle(&path, true);
+    assert!(!parent.is_null());
+
+    unsafe {
+        let slice = fs_core_device_slice_rw(parent, 32, 4096);
+        assert!(!slice.is_null());
+        assert_eq!(fs_core_device_size_bytes(slice), 32);
+
+        let payload = [0xAAu8; 16];
+        let rc = fs_core_device_write_at(slice, 24, payload.as_ptr(), payload.len());
+        assert_eq!(rc, FsCoreErrorCode::OutOfBounds);
+
+        fs_core_device_close(slice);
+        fs_core_device_close(parent);
+    }
+
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        64,
+        "the refused write must not have extended the backing file"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `start` at or past the parent's end has nothing behind it. Rust's
+/// constructors are infallible and make a zero-byte slice; a `*mut`
+/// return can say so, and does, because a zero-byte handle is honest and
+/// useless to debug — the mount that follows fails on its superblock
+/// read with no hint that the window was the problem.
+#[test]
+fn slice_ro_starting_past_the_parent_returns_null_with_a_message() {
+    let path = tmp_image(&[7u8; 64]);
+    let parent = open_handle(&path, false);
+
+    unsafe {
+        let h = fs_core_device_slice_ro(parent, 64, 8);
+        assert!(
+            h.is_null(),
+            "a slice starting at the parent's end is nothing"
+        );
+        let msg = fs_core_last_error_message();
+        assert!(!msg.is_null(), "the refusal must say why");
+        let s = std::ffi::CStr::from_ptr(msg).to_string_lossy();
+        assert!(s.contains("past the end"), "unhelpful message: {s}");
+        assert!(s.contains("64"), "the message should carry the sizes: {s}");
+
+        fs_core_device_close(parent);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn slice_rw_starting_past_the_parent_returns_null_with_a_message() {
+    let path = tmp_image(&[7u8; 64]);
+    let parent = open_handle(&path, true);
+
+    unsafe {
+        let h = fs_core_device_slice_rw(parent, 1 << 40, 8);
+        assert!(h.is_null());
+        let msg = fs_core_last_error_message();
+        assert!(!msg.is_null());
+        let s = std::ffi::CStr::from_ptr(msg).to_string_lossy();
+        assert!(s.contains("past the end"), "unhelpful message: {s}");
+
+        fs_core_device_close(parent);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn closing_null_slice_handle_is_safe_noop() {
     unsafe {

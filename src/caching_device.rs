@@ -44,13 +44,27 @@ pub struct CachingDevice {
     /// has to remember to check.
     writable: Option<Arc<dyn BlockDevice>>,
     block_size: u64,
+    /// NOT IN `CacheState`, BECAUSE IT IS NOT STATE.
+    ///
+    /// It is a construction parameter, written once and never mutated,
+    /// and it used to live behind the mutex. Every read therefore took
+    /// the lock to compare `spanned` against it — including the reads
+    /// that were about to be passed straight through and never touch
+    /// the cache at all. On a hit the lock was taken twice, once here
+    /// and once inside `block()`, to serve bytes already in memory.
+    ///
+    /// A plain field beside `block_size` makes the bypass test lock-free
+    /// and says what the value is: fixed at construction, like the block
+    /// size next to it.
+    capacity: usize,
     state: Mutex<CacheState>,
 }
 
 struct CacheState {
-    /// Fixed-capacity LRU; head is most-recently used.
+    /// Fixed-capacity LRU; head is most-recently used. The capacity
+    /// itself is [`CachingDevice::capacity`] — it never changes, so it
+    /// is not kept under the lock.
     entries: VecDeque<(u64, Arc<Vec<u8>>)>,
-    capacity: usize,
     hits: u64,
     misses: u64,
     /// Bumped by every invalidation. A miss records it before it lets go
@@ -78,9 +92,9 @@ impl CachingDevice {
             inner: inner.clone(),
             writable: Some(inner),
             block_size,
+            capacity,
             state: Mutex::new(CacheState {
                 entries: VecDeque::with_capacity(capacity),
-                capacity,
                 hits: 0,
                 misses: 0,
                 generation: 0,
@@ -103,9 +117,9 @@ impl CachingDevice {
             inner,
             writable: None,
             block_size,
+            capacity,
             state: Mutex::new(CacheState {
                 entries: VecDeque::with_capacity(capacity),
-                capacity,
                 hits: 0,
                 misses: 0,
                 generation: 0,
@@ -232,7 +246,7 @@ impl CachingDevice {
 
         let mut s = self.state.lock().unwrap();
         if s.generation == generation_at_miss {
-            if s.entries.len() >= s.capacity {
+            if s.entries.len() >= self.capacity {
                 s.entries.pop_back();
             }
             s.entries.push_front((block_start, data.clone()));
@@ -320,11 +334,12 @@ impl BlockRead for CachingDevice {
         // it is ever given -- one block is more than half of one block --
         // so the smallest cache anybody can ask for is the one that
         // silently does nothing.
-        let sweeps_the_cache = {
-            let s = self.state.lock().unwrap();
-            spanned > 1 && spanned.saturating_mul(2) > s.capacity
-        };
-        if sweeps_the_cache {
+        //
+        // AND THE TEST TAKES NO LOCK. `capacity` is a plain field on the
+        // device, so a read that is about to bypass the cache decides
+        // that without ever contending for the mutex -- see the field's
+        // own comment.
+        if spanned > 1 && spanned.saturating_mul(2) > self.capacity {
             return self.inner.read_at(offset, buf);
         }
 
@@ -579,6 +594,53 @@ mod tests {
         assert!(
             cache.read_at(80, &mut buf).is_err(),
             "80 + 40 is past the end of a 100-byte device"
+        );
+    }
+
+    /// A READ THAT BYPASSES THE CACHE DOES NOT WAIT FOR THE CACHE LOCK.
+    ///
+    /// The state lock is held for the whole of the read, by a thread
+    /// that is not doing the read. With the `capacity` comparison under
+    /// that mutex the bypass cannot proceed and the receive times out;
+    /// with it outside there is nothing to wait for. No timing
+    /// threshold and no thread count, so nothing here is flaky on a
+    /// loaded machine.
+    #[test]
+    fn a_bypassed_read_does_not_wait_for_the_cache_lock() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        // Capacity 4 and a read spanning 4 blocks: 4 * 2 > 4, so this
+        // read bypasses -- the same read
+        // `a_read_that_would_sweep_the_cache_passes_through` makes.
+        let cache = CachingDevice::read_only(backing(), BS, 4);
+        let held = cache.state.lock().expect("nothing else holds it yet");
+
+        let reader = Arc::clone(&cache);
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut big = vec![0u8; (BS * 4) as usize];
+            let outcome = reader.read_at(0, &mut big);
+            // Sent whatever it is: the point is that the read RETURNED.
+            let _ = tx.send(outcome);
+        });
+
+        let outcome = rx.recv_timeout(Duration::from_secs(5)).expect(
+            "a read that bypasses the cache must not block on the cache lock; \
+             it timed out waiting for a mutex it has no reason to take",
+        );
+        outcome.expect("and the bypassed read itself must succeed");
+
+        // Released only now, and it has to be explicit: `stats()` takes
+        // the same lock, so leaving the guard to the end of scope would
+        // deadlock the assertion below.
+        drop(held);
+
+        assert_eq!(
+            cache.stats(),
+            (0, 0),
+            "it bypassed, so it neither hit nor missed"
         );
     }
 
