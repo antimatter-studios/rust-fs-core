@@ -48,12 +48,17 @@ pub enum Error {
     /// wholly inside the device's declared size. Nothing was read or
     /// written; `size` is the device size, so the caller can clamp.
     ///
-    /// **This crate constructs it in exactly one place:**
+    /// **This crate constructs it in exactly two places, both writes:**
     /// [`crate::OwnedRwSlice`]'s `write_at`, for a write outside the
-    /// slice. No read path here builds it, so matching it to catch an
-    /// over-read of a [`FileDevice`], or a read past a slice's own end,
-    /// is an arm that will never be taken — those report
-    /// [`Error::ShortRead`] with `got: 0`.
+    /// slice, and [`FileDevice`]'s `write_at`, for a write outside the
+    /// size that device took at construction. No read path here builds
+    /// it, so matching it to catch an over-read of a [`FileDevice`], or
+    /// a read past a slice's own end, is an arm that will never be
+    /// taken — those report [`Error::ShortRead`] with `got: 0`.
+    ///
+    /// The count is pinned by `tests/outofbounds_constructors.rs`
+    /// against the source, because this paragraph said "exactly one
+    /// place" for as long as it took someone to add the second.
     ///
     /// **It still reaches reads, from elsewhere.** A container that knows
     /// its virtual size before touching the backing store rejects an
