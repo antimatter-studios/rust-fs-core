@@ -38,8 +38,10 @@ impl Bytes {
 }
 
 impl BlockRead for Bytes {
-    /// A read past the end is [`Error::ShortRead`], carrying how much
-    /// was actually available — not a zero-fill, and not a panic.
+    /// A read past the end is [`Error::ShortRead`] with `got: 0` — not
+    /// a zero-fill, not a panic, and not a count of what was there. It
+    /// refuses before copying, so nothing reaches the buffer and
+    /// nothing is what it reports.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         let b = self.0.lock().unwrap();
         read_into(&b, offset, buf)
@@ -71,8 +73,9 @@ impl BlockRead for RwBytes {
 }
 
 impl BlockDevice for RwBytes {
-    /// A write past the end grows nothing and reports what it could
-    /// have taken — a device is not a `Vec`.
+    /// A write past the end grows nothing and transfers nothing — a
+    /// device is not a `Vec` — so it reports `got: 0` rather than what
+    /// it could have taken.
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         let mut b = self.0.lock().unwrap();
         // The same arithmetic as the read, from the same place: this
@@ -87,9 +90,9 @@ impl BlockDevice for RwBytes {
     }
 }
 
-/// Where `offset` lands in a buffer of `len` bytes, and how much is
-/// actually there — or the [`Error::ShortRead`] that says it does not
-/// fit.
+/// Where `offset` lands in a buffer of `len` bytes — or the
+/// [`Error::ShortRead`] that says the range does not fit, which always
+/// reports `got: 0` because nothing is copied on that path.
 ///
 /// ONE PLACE DOES THE ARITHMETIC, because the arithmetic is what went
 /// wrong. `offset as usize` followed by `start + buf.len()` computed
@@ -110,9 +113,24 @@ pub(crate) fn range_within(len: usize, offset: u64, want: usize) -> Result<(usiz
     let short = || Error::ShortRead {
         offset,
         want,
-        // What is actually available from `offset` — nothing at all,
-        // once `offset` is itself past the end.
-        got: len64.saturating_sub(offset) as usize,
+        // ZERO, ALWAYS — AND NOT "WHAT WAS AVAILABLE".
+        //
+        // `got` counts the bytes placed in the CALLER'S BUFFER. This
+        // refuses before `copy_from_slice` runs, on every path that
+        // builds this error, so the buffer is provably untouched and
+        // the count is provably nothing.
+        //
+        // It reported `len - offset`, which is a different number
+        // whenever the read starts inside the buffer and only overruns
+        // at the far end: 16 bytes from offset 0 of an 8-byte double
+        // claimed `got: 8` for a read that copied none. That is
+        // `FileDevice`'s answer, not this one's. A file really does
+        // hand back the readable prefix and report its length; the
+        // slice adapters refuse outright and report 0; `error.rs`
+        // spells out that `got: 0` means nothing was transferred and
+        // says nothing about what was there. This double refuses, so
+        // it is the second kind.
+        got: 0,
     };
     let end = offset.checked_add(want as u64).ok_or_else(short)?;
     if end > len64 {
@@ -203,12 +221,24 @@ mod tests {
 
     /// The behaviour the four copies were supposed to share, and one
     /// did not.
+    ///
+    /// THE `got` HERE WAS 8, AND 8 WAS WRONG. This is the one shape in
+    /// the suite where "bytes available" and "bytes copied" differ —
+    /// the read starts inside the buffer and only overruns at the far
+    /// end — so it was the one assertion pinning the defect rather
+    /// than passing over it. Every other case uses an offset already
+    /// past the end, where `len - offset` saturates to 0 and the two
+    /// numbers agree by accident.
+    ///
+    /// The line below asserts the buffer was not touched, in the same
+    /// test, two lines apart. `got: 8` and "nothing was copied" cannot
+    /// both be true.
     #[test]
     fn a_read_past_the_end_is_a_short_read_not_a_panic() {
         let dev = Bytes::new(vec![0xAB; 8]);
         let mut buf = [0u8; 16];
         match dev.read_at(0, &mut buf).expect_err("past the end") {
-            Error::ShortRead { offset, want, got } => assert_eq!((offset, want, got), (0, 16, 8)),
+            Error::ShortRead { offset, want, got } => assert_eq!((offset, want, got), (0, 16, 0)),
             other => panic!("expected ShortRead, got {other:?}"),
         }
         assert_eq!(buf, [0u8; 16], "a refused read leaves the buffer alone");
