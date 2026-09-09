@@ -350,7 +350,8 @@ impl FileDevice {
         Arrival(&self.arrivals)
     }
 
-    /// THE ONLY TWO PLACES `io_lock` IS ACQUIRED.
+    /// THE ONLY PLACES `io_lock` IS ACQUIRED — two on Unix, one on
+    /// Windows.
     ///
     /// Not a wrapper for its own sake: the arrival counter has to sit
     /// immediately before the acquisition to mean anything, and one
@@ -362,6 +363,25 @@ impl FileDevice {
     /// The `cfg` is on the statement rather than on two bodies of
     /// `arriving`, so a non-test build contains the acquisition and
     /// nothing else.
+    ///
+    /// # `shared_guard` IS UNIX-ONLY, AND THAT IS THE DESIGN RATHER
+    /// THAN TIDINESS
+    ///
+    /// Nothing on Windows takes `io_lock` shared. `read_guard` there is
+    /// `exclusive_guard`, deliberately, because `seek_read` moves the
+    /// file pointer and a reader must exclude other readers as well as
+    /// writers — see `read_guard`. So on Windows this method is not
+    /// merely unused, it MUST NOT BE CALLED: a future caller reaching
+    /// for the cheaper guard would reintroduce the cursor race that the
+    /// exclusive read guard exists to prevent.
+    ///
+    /// `cargo clippy --target x86_64-pc-windows-msvc --all-targets
+    /// -- -D warnings` reported it as `method shared_guard is never
+    /// used`, and `#[allow(dead_code)]` would have been the wrong
+    /// answer: it silences the compiler on a platform where the right
+    /// statement is that the method does not exist. Compiling it out
+    /// makes a call site that should not exist fail to build.
+    #[cfg(unix)]
     fn shared_guard(&self) -> std::sync::RwLockReadGuard<'_, ()> {
         #[cfg(test)]
         let _arrival = self.arriving();
