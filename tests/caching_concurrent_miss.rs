@@ -469,3 +469,201 @@ fn a_device_that_re_enters_the_cache_reads_again_instead_of_waiting_for_itself()
          entry to make room for the copy"
     );
 }
+
+/// TWO THREADS RE-ENTERING INTO EACH OTHER'S FETCHES, AND NEITHER IS
+/// WAITING FOR ITSELF.
+///
+/// The test above covers the cycle of length one: a thread that
+/// re-enters for the block it is already fetching. Carrying the owner on
+/// each in-flight marker is what makes that visible — but a test that
+/// compares the owner against the thread asking can only ever see that
+/// one shape.
+///
+/// Here thread A fetches block A and re-enters for block B, while thread
+/// B fetches block B and re-enters for block A. Neither thread finds its
+/// own id against the block it wants, so an owner-vs-self test lets both
+/// of them wait — each for a fetch the other is holding up, on a
+/// condition variable only a completed fetch can signal. Nothing
+/// completes. It is the same deadlock one link longer.
+///
+/// # Why the barrier, and why it is not a race
+///
+/// The deadlock needs both fetches registered as in flight *before*
+/// either re-enters; if A's re-entry lands before B has claimed block B,
+/// A simply fetches it and there is no cycle to see. The barrier makes
+/// that ordering the only possible one, so this test does not depend on
+/// which thread the scheduler favours. There are no sleeps here and no
+/// assertion reads a clock.
+///
+/// The one-shot flags are what stop the recursion: without them the two
+/// devices re-enter for each other for ever, which is a stack overflow
+/// rather than the hang under test.
+///
+/// # The deadline is what makes this a test
+///
+/// The failure mode is a hang, and a hung suite reports nothing and has
+/// to be killed. Coming back over a channel with a deadline turns it
+/// into a named assertion instead.
+#[test]
+fn two_threads_re_entering_into_each_others_fetches_do_not_deadlock() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Barrier, OnceLock};
+
+    /// The two blocks the threads fetch, each re-entering for the other.
+    const BLOCK_A: u64 = 24;
+    const BLOCK_B: u64 = 32;
+    /// Two primed blocks. With an entry for each of the two above, a
+    /// capacity-4 cache is then exactly full, so a duplicate entry for
+    /// either block would have to evict a primed one to fit — which is
+    /// how "held once, not twice" is observable from outside.
+    const PRIMED_PAIR: [u64; 2] = [0, 8];
+
+    /// Re-enters the cache once per block, for the *other* block.
+    struct CrossReentrant {
+        bytes: Vec<u8>,
+        cache: OnceLock<std::sync::Weak<CachingDevice>>,
+        /// Opens once both blocks are marked in flight.
+        gate: Barrier,
+        /// One shot each, or the two reads recurse into each other
+        /// without end.
+        recursed_a: AtomicBool,
+        recursed_b: AtomicBool,
+        /// Reads that actually re-entered the cache.
+        nested: AtomicUsize,
+        reads: Mutex<Vec<u64>>,
+    }
+
+    impl CrossReentrant {
+        fn total_reads(&self) -> usize {
+            self.reads.lock().expect("reads lock").len()
+        }
+    }
+
+    impl BlockRead for CrossReentrant {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+            self.reads.lock().expect("reads lock").push(offset);
+
+            // The partner block this read re-enters for, claimed once.
+            let partner = match offset {
+                BLOCK_A if !self.recursed_a.swap(true, Ordering::SeqCst) => Some(BLOCK_B),
+                BLOCK_B if !self.recursed_b.swap(true, Ordering::SeqCst) => Some(BLOCK_A),
+                _ => None,
+            };
+
+            if let Some(partner) = partner {
+                // Hold here until BOTH blocks are in flight, so the
+                // re-entry below is certain to land on a fetch another
+                // thread owns.
+                self.gate.wait();
+                self.nested.fetch_add(1, Ordering::SeqCst);
+                let cache = self
+                    .cache
+                    .get()
+                    .expect("the test wires this before reading")
+                    .upgrade()
+                    .expect("the cache outlives the read");
+                let mut inner = vec![0u8; buf.len()];
+                cache
+                    .read_at(partner, &mut inner)
+                    .expect("the re-entrant read itself succeeds");
+                assert_eq!(
+                    inner,
+                    self.bytes[partner as usize..partner as usize + buf.len()],
+                    "the re-entrant read of block {partner} returned the wrong bytes"
+                );
+            }
+
+            let start = offset as usize;
+            buf.copy_from_slice(&self.bytes[start..start + buf.len()]);
+            Ok(())
+        }
+
+        fn size_bytes(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+    }
+
+    let device = Arc::new(CrossReentrant {
+        bytes: (0..64u8).collect(),
+        cache: OnceLock::new(),
+        gate: Barrier::new(2),
+        recursed_a: AtomicBool::new(false),
+        recursed_b: AtomicBool::new(false),
+        nested: AtomicUsize::new(0),
+        reads: Mutex::new(Vec::new()),
+    });
+    let cache = CachingDevice::read_only(Arc::clone(&device) as Arc<dyn BlockRead>, BS, CAPACITY);
+    device.cache.set(Arc::downgrade(&cache)).expect("set once");
+
+    for off in PRIMED_PAIR {
+        read_block(&cache, off);
+    }
+    assert_eq!(
+        device.total_reads(),
+        PRIMED_PAIR.len(),
+        "priming should be one device read per block"
+    );
+
+    // The cycle. Each thread asks for one block; the device read for
+    // that block re-enters for the other.
+    let (tx, rx) = std::sync::mpsc::channel();
+    for block in [BLOCK_A, BLOCK_B] {
+        let cache = Arc::clone(&cache);
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((block, read_block(&cache, block)));
+        });
+    }
+    drop(tx);
+
+    let mut returned = Vec::new();
+    for _ in 0..2 {
+        let (block, got) = rx.recv_timeout(JOIN_DEADLINE).expect(
+            "one of the two threads never came back. Each re-entered the cache \
+             for the block the other was fetching, so each waited for a fetch \
+             the other was holding up and neither could ever be signalled. A \
+             thread that already owns a fetch must read again rather than wait, \
+             or a cycle of length two hangs both of them",
+        );
+        assert_eq!(
+            got,
+            expected_block(&device.bytes, block),
+            "block {block} came back wrong"
+        );
+        returned.push(block);
+    }
+    returned.sort_unstable();
+    assert_eq!(
+        returned,
+        vec![BLOCK_A, BLOCK_B],
+        "both threads must report, once each"
+    );
+
+    // NEGATIVE CONTROL. If the reads never actually re-entered, this is
+    // two ordinary concurrent misses and every assertion above is about
+    // nothing. Both flags are claimed before the barrier opens, so this
+    // count is not a race.
+    assert_eq!(
+        device.nested.load(Ordering::SeqCst),
+        2,
+        "both device reads must have re-entered the cache for the other's \
+         block, or the cycle this test exists for never formed"
+    );
+
+    // AND EACH BLOCK IS HELD ONCE, NOT TWICE. Breaking the cycle by
+    // reading again puts two fetches in flight for one block, so the
+    // insert on the way back has to notice the block is already held
+    // rather than storing a second copy of it. With the two primed
+    // entries the cache is exactly full, so a duplicate would have
+    // evicted one of them and this would go back to the device.
+    let before = device.total_reads();
+    for off in PRIMED_PAIR.iter().copied().chain([BLOCK_A, BLOCK_B]) {
+        read_block(&cache, off);
+    }
+    assert_eq!(
+        device.total_reads(),
+        before,
+        "after the race all four blocks must be cached; a duplicate entry for \
+         block {BLOCK_A} or {BLOCK_B} evicted a primed one to make room"
+    );
+}

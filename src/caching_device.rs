@@ -96,9 +96,12 @@ struct CacheState {
     /// the number of blocks being fetched concurrently, not the number
     /// cached, so it is small in exactly the cases the scan would matter.
     ///
-    /// EACH FETCH CARRIES THE THREAD DOING IT, so that a thread can tell
-    /// somebody else's fetch from its own. Waiting for another thread is
-    /// the point; waiting for itself is a deadlock. See `block`.
+    /// EACH FETCH CARRIES THE THREAD DOING IT, so that a thread can ask
+    /// whether it is holding a fetch of its own before it waits for
+    /// anybody else's. Waiting for another thread is the point; waiting
+    /// while holding a fetch is how a cycle forms, whether the block
+    /// waited on is this thread's own or two links away round a ring of
+    /// re-entrant threads. See `block`.
     in_flight: Vec<(u64, ThreadId)>,
 }
 
@@ -271,17 +274,43 @@ impl CachingDevice {
         // correct against a spurious wake, an invalidation that landed
         // in the meantime, and a fetch that failed and left nothing.
         //
-        // A THREAD NEVER WAITS FOR ITS OWN FETCH, WHICH IS WHY THE
-        // MARKER CARRIES AN OWNER.
+        // A THREAD THAT IS ALREADY FETCHING SOMETHING NEVER WAITS,
+        // WHOEVER OWNS THE BLOCK IT WANTS. WHICH IS WHY THE MARKER
+        // CARRIES AN OWNER.
         //
         // A device whose `read_at` reads back through the cache that
-        // wraps it re-enters this method for the block it is itself
-        // fetching. Waiting there would be waiting for a fetch this
-        // thread is holding up: a deadlock. So a thread that finds its
-        // own id against the block falls through and reads the device
-        // again -- the redundant read this commit removes for every
-        // other caller, which is the right answer for the one caller
-        // that cannot be served any other way.
+        // wraps it re-enters this method while its own fetch is still
+        // outstanding. The narrow case is that it asks for the very
+        // block it is fetching, and waiting there is waiting for a
+        // fetch this thread is holding up: a deadlock. That shape is
+        // visible from the owner alone.
+        //
+        // THE GENERAL CASE IS NOT, and asking only "is this fetch
+        // mine" cannot see it. Thread A fetches X and re-enters for Y;
+        // thread B fetches Y and re-enters for X. Neither finds its own
+        // id against the block it wants, so both wait -- each for a
+        // fetch the other is holding up, on a condition variable only a
+        // completed fetch can signal. Nothing completes. It is the same
+        // deadlock one link longer, and there is no length at which
+        // comparing the owner to the caller starts to notice.
+        //
+        // So the question is not "is this fetch mine" but "am I holding
+        // one at all". A cycle needs every thread in it to be both
+        // holding a fetch and waiting for another one; a thread holding
+        // nothing cannot be waited on, so it cannot be in a cycle. A
+        // thread therefore waits only when it holds nothing, and that
+        // removes every cycle rather than the shortest one. It needs no
+        // wait-for graph and no new state to do it -- only a wider
+        // question asked of the list already being scanned.
+        //
+        // WHAT IT COSTS is a redundant device read in one narrow case:
+        // a re-entrant thread that wants a block another thread is
+        // fetching, where waiting would in fact have been safe. That is
+        // the same trade the self case already made, and only a device
+        // that re-enters can reach it. For every other caller nothing
+        // changes at all, because a thread holds a fetch here only
+        // while it is inside `read_at` on the device, and a device that
+        // cannot call back in leaves this false on every ordinary miss.
         //
         // THE GUARD IS HERE BECAUSE OF WHAT A HANG COSTS, not because
         // re-entrancy is expected. It is not: no device in this crate
@@ -308,10 +337,12 @@ impl CachingDevice {
                     return Ok(data);
                 }
                 let mine = std::thread::current().id();
-                if s.in_flight
-                    .iter()
-                    .any(|(o, owner)| *o == block_start && *owner != mine)
-                {
+                // Any fetch of this thread's, not just one of this
+                // block: holding any of them is what makes waiting
+                // unsafe. See the cycle argument above.
+                let holding_a_fetch = s.in_flight.iter().any(|(_, owner)| *owner == mine);
+                let being_fetched = s.in_flight.iter().any(|(o, _)| *o == block_start);
+                if being_fetched && !holding_a_fetch {
                     // Counted as neither yet. It becomes a hit when the
                     // fetch it is waiting for lands, and a miss if that
                     // fetch fails and this thread has to do it instead
