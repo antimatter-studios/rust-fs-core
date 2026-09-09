@@ -60,6 +60,74 @@ pub struct FileDevice {
     io_lock: RwLock<()>,
     size: u64,
     writable: bool,
+    /// Test-only witness that a thread reached `io_lock` — see
+    /// [`LockArrivals`]. Absent from every non-test build, and the
+    /// `arriving` it feeds compiles to nothing there.
+    #[cfg(test)]
+    arrivals: LockArrivals,
+}
+
+/// How many threads are inside an `io_lock` acquisition and have not
+/// yet been granted the guard.
+///
+/// # WHY A TEST NEEDS THIS AND CANNOT DO WITHOUT IT
+///
+/// The exclusion this type promises can only be asserted negatively —
+/// an operation that must *not* proceed — and "did not finish within
+/// 300ms" is not that assertion. It is satisfied just as well by a
+/// worker the OS has not scheduled, so on a loaded runner a build with
+/// no lock at all passes. That is rust-fs-core#104, and it applied to
+/// all four of the tests that are the only evidence #77's fix works.
+///
+/// Signalling readiness from the top of the worker closure does not
+/// fix it: the gap between the signal and the call under test has no
+/// synchronisation in it, so the signal proves the thread ran once,
+/// not that it reached the lock.
+///
+/// A counter incremented immediately before the acquisition and
+/// decremented immediately after it is granted turns that into a
+/// positive observation the test can wait for. Seeing it non-zero
+/// while the test itself holds the lock means: this thread is in the
+/// acquisition, and it cannot leave until we let go. Remove the lock
+/// from the operation and the counter is never touched, so the wait
+/// times out and names what failed rather than passing.
+///
+/// Measured on `a_read_cannot_proceed_while_a_write_holds_the_lock`
+/// with `read_at`'s guard deleted, one commit, this machine:
+///
+/// | test shape                                | result   | time  |
+/// |-------------------------------------------|----------|-------|
+/// | ready signal, 400ms deschedule in the gap | **ok**   | 0.41s |
+/// | ready signal, no deschedule               | FAILED   | 0.33s |
+/// | this counter                              | FAILED   | 10.0s |
+///
+/// The first row is the defect: a build with no lock at all, passing.
+/// The gap has no upper bound on it, so 400ms is an illustration of a
+/// class rather than a threshold.
+///
+/// THE DECREMENT IS WHAT KEEPS THIS HONEST. If it went missing the
+/// counter would stick above zero, every wait would return
+/// immediately, and all four exclusion tests would pass without a
+/// worker ever reaching the lock — the same unwitnessed shape one
+/// level up. See
+/// `an_uncontended_operation_leaves_no_thread_waiting_at_the_lock`.
+#[cfg(test)]
+#[derive(Default)]
+struct LockArrivals {
+    waiting: std::sync::atomic::AtomicUsize,
+}
+
+/// Decrements the moment the guard is granted, whatever happens.
+#[cfg(test)]
+struct Arrival<'a>(&'a LockArrivals);
+
+#[cfg(test)]
+impl Drop for Arrival<'_> {
+    fn drop(&mut self) {
+        self.0
+            .waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl FileDevice {
@@ -72,6 +140,8 @@ impl FileDevice {
             io_lock: RwLock::new(()),
             size,
             writable: false,
+            #[cfg(test)]
+            arrivals: LockArrivals::default(),
         })
     }
 
@@ -84,6 +154,8 @@ impl FileDevice {
             io_lock: RwLock::new(()),
             size,
             writable: true,
+            #[cfg(test)]
+            arrivals: LockArrivals::default(),
         })
     }
 
@@ -263,6 +335,65 @@ fn device_size_bytes(_file: &File) -> Result<u64> {
 }
 
 impl FileDevice {
+    /// Marks this thread as having reached `io_lock` and not yet been
+    /// granted it. The returned value decrements on drop — which, at
+    /// the two call sites below, is after the acquisition returns.
+    ///
+    /// Compiles to nothing outside a test build: the field it counts
+    /// does not exist there. See [`LockArrivals`] for why a test cannot
+    /// establish the same thing from outside.
+    #[cfg(test)]
+    fn arriving(&self) -> Arrival<'_> {
+        self.arrivals
+            .waiting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Arrival(&self.arrivals)
+    }
+
+    /// THE ONLY PLACES `io_lock` IS ACQUIRED — two on Unix, one on
+    /// Windows.
+    ///
+    /// Not a wrapper for its own sake: the arrival counter has to sit
+    /// immediately before the acquisition to mean anything, and one
+    /// pair of methods is what stops a third call site being added
+    /// without it. `_arrival` outlives the tail expression and is
+    /// dropped once the guard has been granted — which is what makes
+    /// a non-zero count mean "waiting" rather than "has waited".
+    ///
+    /// The `cfg` is on the statement rather than on two bodies of
+    /// `arriving`, so a non-test build contains the acquisition and
+    /// nothing else.
+    ///
+    /// # `shared_guard` IS UNIX-ONLY, AND THAT IS THE DESIGN RATHER
+    /// THAN TIDINESS
+    ///
+    /// Nothing on Windows takes `io_lock` shared. `read_guard` there is
+    /// `exclusive_guard`, deliberately, because `seek_read` moves the
+    /// file pointer and a reader must exclude other readers as well as
+    /// writers — see `read_guard`. So on Windows this method is not
+    /// merely unused, it MUST NOT BE CALLED: a future caller reaching
+    /// for the cheaper guard would reintroduce the cursor race that the
+    /// exclusive read guard exists to prevent.
+    ///
+    /// `cargo clippy --target x86_64-pc-windows-msvc --all-targets
+    /// -- -D warnings` reported it as `method shared_guard is never
+    /// used`, and `#[allow(dead_code)]` would have been the wrong
+    /// answer: it silences the compiler on a platform where the right
+    /// statement is that the method does not exist. Compiling it out
+    /// makes a call site that should not exist fail to build.
+    #[cfg(unix)]
+    fn shared_guard(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        #[cfg(test)]
+        let _arrival = self.arriving();
+        self.io_lock.read().unwrap()
+    }
+
+    fn exclusive_guard(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
+        #[cfg(test)]
+        let _arrival = self.arriving();
+        self.io_lock.write().unwrap()
+    }
+
     /// The guard a read holds for the whole of `read_at`.
     ///
     /// Unix takes it SHARED: `pread` carries its own offset, so readers
@@ -275,12 +406,12 @@ impl FileDevice {
     /// call site, and only that platform pays for the cursor.
     #[cfg(unix)]
     fn read_guard(&self) -> std::sync::RwLockReadGuard<'_, ()> {
-        self.io_lock.read().unwrap()
+        self.shared_guard()
     }
 
     #[cfg(windows)]
     fn read_guard(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
-        self.io_lock.write().unwrap()
+        self.exclusive_guard()
     }
 
     /// One positioned read, returning what it got.
@@ -397,7 +528,7 @@ impl BlockDevice for FileDevice {
             });
         }
         // EXCLUSIVE: excludes other writers' seeks and every reader.
-        let _guard = self.io_lock.write().unwrap();
+        let _guard = self.exclusive_guard();
         let mut f = &self.file;
         f.seek(SeekFrom::Start(offset))?;
         f.write_all(buf)?;
@@ -411,7 +542,7 @@ impl BlockDevice for FileDevice {
         // EXCLUSIVE for the same reason as `write_at`: this pushes
         // buffered bytes at the file and must not interleave with a
         // write or a read.
-        let _guard = self.io_lock.write().unwrap();
+        let _guard = self.exclusive_guard();
         let mut f = &self.file;
         f.flush()?;
         self.file.sync_data()?;
@@ -589,12 +720,18 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// How long an operation that must be blocked is given to prove it.
-    /// Only a false PASS can come of this being short, and the
-    /// ready-signal in each test removes the way that happens.
-    const BLOCKED_FOR: Duration = Duration::from_millis(300);
     /// How long an operation that must finish is given. Generous on
     /// purpose: a loaded machine makes it slower, not flakier.
+    ///
+    /// EVERY DEADLINE IN THE EXCLUSION TESTS IS THIS ONE. There used to
+    /// be a second, short one — 300ms, after which a worker that had
+    /// not finished was taken to have been blocked. That is the defect
+    /// rust-fs-core#104 describes: an unscheduled worker is
+    /// indistinguishable from a blocked one, so the assertion passed
+    /// for a reason unrelated to the lock and would have kept passing
+    /// with the lock removed. Blocking is now established by
+    /// [`await_arrival`] instead, which fails when nothing arrives
+    /// rather than passing when nothing happens.
     const UNBLOCKED_WITHIN: Duration = Duration::from_secs(10);
 
     /// A 4 KiB image of one repeated byte, opened read-write.
@@ -604,6 +741,211 @@ mod tests {
         std::fs::write(&path, vec![fill; 4096]).expect("write the image");
         let dev = std::sync::Arc::new(FileDevice::open_rw(&path).expect("open rw"));
         (dev, cleanup)
+    }
+
+    fn waiting_at_the_lock(dev: &FileDevice) -> usize {
+        dev.arrivals.waiting.load(Ordering::SeqCst)
+    }
+
+    /// Blocks until a thread is parked inside an `io_lock` acquisition,
+    /// and PANICS IF NONE EVER IS.
+    ///
+    /// This is the half that carries the evidence. Once it returns, the
+    /// worker is between the counter's increment and the guard being
+    /// granted — and since the caller holds that guard and has not let
+    /// go, the worker cannot leave. "The operation is blocked on the
+    /// lock" is then a fact about the program's state rather than an
+    /// inference from a stopwatch.
+    ///
+    /// An operation that stopped taking the lock never increments, so
+    /// this times out and says which operation never arrived. The
+    /// deadline can only produce a false FAILURE, which is the safe
+    /// direction and the opposite of what it replaced.
+    fn await_arrival(dev: &FileDevice, operation: &str) {
+        let deadline = std::time::Instant::now() + UNBLOCKED_WITHIN;
+        while waiting_at_the_lock(dev) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{operation} never reached io_lock. It either never ran, or it \
+                 does not take the lock at all — which is the exclusion this \
+                 test exists to assert"
+            );
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+
+    /// Releases the holder's guard and THEN joins the worker, on every
+    /// path out of a test including a panicking assertion.
+    ///
+    /// Both halves are rust-fs-core#105. Discarding the `JoinHandle`
+    /// let a failing assertion unwind the test thread while the worker
+    /// was still inside `read_at`/`write_at`/`flush` with the file
+    /// open, so `Cleanup` removed the temp file underneath it — a race
+    /// on exactly the run where a real regression is being diagnosed,
+    /// and a leaked file per failure on a platform that will not unlink
+    /// an open file.
+    ///
+    /// THE ORDER IS NOT INCIDENTAL. Joining first would wait for a
+    /// worker this very thread is blocking, and the test would hang
+    /// instead of failing. Dropping the guard is what lets the worker
+    /// finish so the join can return.
+    ///
+    /// Declared after the `Cleanup` it protects, so it drops first and
+    /// the file still exists when the worker touches it.
+    struct ReleaseThenJoin<G> {
+        held: Option<G>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl<G> ReleaseThenJoin<G> {
+        /// Let the blocked operation through, keeping the join.
+        fn release(&mut self) {
+            self.held = None;
+        }
+    }
+
+    impl<G> Drop for ReleaseThenJoin<G> {
+        fn drop(&mut self) {
+            self.held = None;
+            if let Some(worker) = self.worker.take() {
+                // Ignored on purpose: this runs while unwinding a
+                // failed assertion, and a panic in a drop during
+                // unwinding aborts the process, which would replace the
+                // test's own message with nothing.
+                let _ = worker.join();
+            }
+        }
+    }
+
+    /// THE WORKER IS JOINED BEFORE THE TEMP FILE GOES, ON THE PANIC
+    /// PATH SPECIFICALLY.
+    ///
+    /// rust-fs-core#105 is a failure-path defect, so the only way to
+    /// witness it is to fail on purpose. The four exclusion tests
+    /// discarded their `JoinHandle`, so a failing assertion unwound the
+    /// test thread while the worker was still inside the operation with
+    /// the file open, and `Cleanup` removed the file underneath it —
+    /// worst on the one run that matters, the run where a real
+    /// regression tripped one of them.
+    ///
+    /// This reproduces that shape with the file replaced by a recorder,
+    /// because the ordering is what is being asserted and a removed
+    /// file cannot say when it went. With the join dropped the recorder
+    /// sees `cleanup` first; with the release and the join in the order
+    /// [`ReleaseThenJoin`] fixes, it sees `worker` first.
+    ///
+    /// **Two panics are printed while this test runs, and both are the
+    /// test working.** The first is the deliberate one. The second is
+    /// the worker's: unwinding past a held `RwLock` guard poisons it,
+    /// and every acquisition in this module `unwrap`s, so the read the
+    /// worker was blocked on comes back `PoisonError` instead of
+    /// bytes. That is why the worker's arrival is recorded from a
+    /// `Drop` rather than after the read — the ordering claim is about
+    /// when the thread *ends*, and it must hold whether the read
+    /// returns or unwinds.
+    #[test]
+    fn a_panicking_assertion_joins_the_worker_before_the_cleanup_runs() {
+        use std::panic::AssertUnwindSafe;
+        use std::sync::{Arc, Mutex};
+
+        /// Stands in for `Cleanup`: same position, same drop timing,
+        /// but it says when it ran.
+        struct Recorder(Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Recorder {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().push("cleanup");
+            }
+        }
+
+        let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let (dev, _c) = rw_image("panic_joins", 0x99);
+
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            // Declared first, so it drops last — exactly where
+            // `Cleanup` sits in the four exclusion tests.
+            let _recorder = Recorder(Arc::clone(&order));
+
+            let held = dev.io_lock.write().unwrap();
+            let worker = {
+                let dev = Arc::clone(&dev);
+                let order = Arc::clone(&order);
+                std::thread::spawn(move || {
+                    /// Records the worker ENDING, return or unwind.
+                    struct Ended(Arc<Mutex<Vec<&'static str>>>);
+                    impl Drop for Ended {
+                        fn drop(&mut self) {
+                            self.0.lock().unwrap().push("worker");
+                        }
+                    }
+                    let _ended = Ended(order);
+                    let mut buf = [0u8; 4096];
+                    let _ = dev.read_at(0, &mut buf);
+                })
+            };
+            let _lock = ReleaseThenJoin {
+                held: Some(held),
+                worker: Some(worker),
+            };
+
+            await_arrival(&dev, "read_at");
+            panic!("the assertion an exclusion test exists to make, failing");
+        }));
+
+        // NAMED, NOT MERELY PRESENT. `await_arrival` panics too, and
+        // an `is_err()` satisfied by that one would report a join this
+        // test never exercised.
+        let payload = outcome.expect_err("the deliberate panic must have unwound");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<panic payload was not a string>");
+        assert!(
+            message.contains("an exclusion test exists to make"),
+            "the test unwound for the wrong reason, so the ordering below is \
+             about some other failure: {message}"
+        );
+
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["worker", "cleanup"],
+            "the worker was still inside read_at when cleanup ran: an unwinding \
+             test must release the guard, join the worker, and only then let the \
+             temp file be removed"
+        );
+    }
+
+    /// THE COUNTER COMES BACK DOWN.
+    ///
+    /// [`await_arrival`] is only evidence while a non-zero `waiting`
+    /// means a thread is parked *now*. A missing decrement would leave
+    /// it stuck above zero, every wait would return immediately, and
+    /// all four exclusion tests would pass without a worker ever
+    /// reaching the lock — the same unwitnessed shape they were fixed
+    /// for, one level up. So the uncontended path is asserted too:
+    /// every acquisition site, no contention, nothing left behind.
+    #[test]
+    fn an_uncontended_operation_leaves_no_thread_waiting_at_the_lock() {
+        let (dev, _c) = rw_image("arrivals_settle", 0x0F);
+        assert_eq!(waiting_at_the_lock(&dev), 0, "nothing has run yet");
+
+        let mut buf = [0u8; 16];
+        dev.read_at(0, &mut buf).expect("read");
+        assert_eq!(
+            waiting_at_the_lock(&dev),
+            0,
+            "read_at left an arrival behind"
+        );
+
+        dev.write_at(0, &[0x10u8; 16]).expect("write");
+        assert_eq!(
+            waiting_at_the_lock(&dev),
+            0,
+            "write_at left an arrival behind"
+        );
+
+        dev.flush().expect("flush");
+        assert_eq!(waiting_at_the_lock(&dev), 0, "flush left an arrival behind");
     }
 
     /// A READ CONCURRENT WITH A WRITE MUST NOT PROCEED.
@@ -629,36 +971,49 @@ mod tests {
     /// `write_at` takes and requiring that a read cannot get past it.
     /// That is deterministic, needs no tear to be reproducible, and
     /// fails the moment `read_at` stops taking the lock.
+    ///
+    /// # And "cannot get past it" is observed, not timed
+    ///
+    /// See [`await_arrival`] and rust-fs-core#104: the reader is
+    /// required to *arrive* at the lock, which a build that does not
+    /// take the lock cannot do, rather than merely to not finish within
+    /// a short window, which a build that does not take the lock
+    /// manages easily on a loaded machine.
     #[test]
     fn a_read_cannot_proceed_while_a_write_holds_the_lock() {
         let (dev, _c) = rw_image("read_excluded_by_write", 0x5A);
 
         // Stands in for a write in progress: the same exclusive guard
-        // `write_at` holds across its seek and write.
+        // `write_at` holds across its seek and write. Taken directly
+        // rather than through `exclusive_guard`, so the holder is not
+        // itself counted as an arrival.
         let held = dev.io_lock.write().unwrap();
+        assert_eq!(
+            waiting_at_the_lock(&dev),
+            0,
+            "the holder must not count as a waiter, or the wait below proves nothing"
+        );
 
-        let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        {
+        let worker = {
             let dev = std::sync::Arc::clone(&dev);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 4096];
-                let _ = ready_tx.send(());
                 let outcome = dev.read_at(0, &mut buf);
                 let _ = done_tx.send(outcome.map(|()| buf[0]));
-            });
-        }
+            })
+        };
+        let mut lock = ReleaseThenJoin {
+            held: Some(held),
+            worker: Some(worker),
+        };
 
-        // PROVE THE READER REACHED THE CALL. A thread that has not been
-        // scheduled yet looks exactly like a thread correctly blocked,
-        // and without this the assertion below would pass for that
-        // reason on a busy machine.
-        ready_rx
-            .recv_timeout(UNBLOCKED_WITHIN)
-            .expect("the reader thread never started");
-
+        // PROVE THE READER IS PARKED IN THE LOCK. Not that it started,
+        // and not that it failed to finish in time: that it is inside
+        // the acquisition this thread is holding shut.
+        await_arrival(&dev, "read_at");
         assert!(
-            done_rx.recv_timeout(BLOCKED_FOR).is_err(),
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
             "a read completed while the exclusive write guard was held. Reads and \
              writes are not mutually excluded, so a read overlapping a write_at \
              can observe a partially written region"
@@ -667,7 +1022,7 @@ mod tests {
         // And it is blocked rather than broken: it completes once the
         // writer lets go. Without this half the test would pass against
         // a read_at that simply never returned.
-        drop(held);
+        lock.release();
         let first = done_rx
             .recv_timeout(UNBLOCKED_WITHIN)
             .expect("the read must proceed once the write guard is released")
@@ -686,27 +1041,28 @@ mod tests {
 
         // Stands in for a read in progress.
         let held = dev.io_lock.read().unwrap();
+        assert_eq!(waiting_at_the_lock(&dev), 0, "the holder is not a waiter");
 
-        let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        {
+        let worker = {
             let dev = std::sync::Arc::clone(&dev);
             std::thread::spawn(move || {
-                let _ = ready_tx.send(());
                 let _ = done_tx.send(dev.write_at(0, &[0x22u8; 4096]));
-            });
-        }
-        ready_rx
-            .recv_timeout(UNBLOCKED_WITHIN)
-            .expect("the writer thread never started");
+            })
+        };
+        let mut lock = ReleaseThenJoin {
+            held: Some(held),
+            worker: Some(worker),
+        };
 
+        await_arrival(&dev, "write_at");
         assert!(
-            done_rx.recv_timeout(BLOCKED_FOR).is_err(),
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
             "a write completed while a read guard was held; a write_at may not \
              run through a read that is already in progress"
         );
 
-        drop(held);
+        lock.release();
         done_rx
             .recv_timeout(UNBLOCKED_WITHIN)
             .expect("the write must proceed once the read releases")
@@ -730,27 +1086,28 @@ mod tests {
 
         // Stands in for a read in progress.
         let held = dev.io_lock.read().unwrap();
+        assert_eq!(waiting_at_the_lock(&dev), 0, "the holder is not a waiter");
 
-        let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        {
+        let worker = {
             let dev = std::sync::Arc::clone(&dev);
             std::thread::spawn(move || {
-                let _ = ready_tx.send(());
                 let _ = done_tx.send(dev.flush());
-            });
-        }
-        ready_rx
-            .recv_timeout(UNBLOCKED_WITHIN)
-            .expect("the flushing thread never started");
+            })
+        };
+        let mut lock = ReleaseThenJoin {
+            held: Some(held),
+            worker: Some(worker),
+        };
 
+        await_arrival(&dev, "flush");
         assert!(
-            done_rx.recv_timeout(BLOCKED_FOR).is_err(),
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
             "a flush completed while a read guard was held; flush takes the lock \
              exclusively for the same reason write_at does"
         );
 
-        drop(held);
+        lock.release();
         done_rx
             .recv_timeout(UNBLOCKED_WITHIN)
             .expect("the flush must proceed once the read releases")
@@ -777,20 +1134,24 @@ mod tests {
         // Stands in for another reader already inside `read_at`.
         let held = dev.io_lock.read().unwrap();
 
-        let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        {
+        let worker = {
             let dev = std::sync::Arc::clone(&dev);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 4096];
-                let _ = ready_tx.send(());
                 let outcome = dev.read_at(0, &mut buf);
                 let _ = done_tx.send(outcome.map(|()| buf[0]));
-            });
-        }
-        ready_rx
-            .recv_timeout(UNBLOCKED_WITHIN)
-            .expect("the reader thread never started");
+            })
+        };
+        // Holds the read guard for the whole assertion, so the read
+        // below completes WHILE another reader holds the lock — which
+        // is the claim. No arrival wait here and no ready signal: this
+        // assertion is a positive one, and a worker that has not been
+        // scheduled makes it slower, never falsely green.
+        let lock = ReleaseThenJoin {
+            held: Some(held),
+            worker: Some(worker),
+        };
 
         let first = done_rx
             .recv_timeout(UNBLOCKED_WITHIN)
@@ -801,6 +1162,6 @@ mod tests {
             )
             .expect("and the read must succeed");
         assert_eq!(first, 0x77);
-        drop(held);
+        drop(lock);
     }
 }

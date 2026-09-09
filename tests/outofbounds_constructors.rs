@@ -44,6 +44,205 @@ fn is_construction(line: &str) -> bool {
     t.contains("Error::OutOfBounds {") && !t.contains("=>")
 }
 
+/// The part of a source file that is not the test module.
+///
+/// # WHY NOT "EVERYTHING BEFORE THE FIRST `#[cfg(test)]`", WHICH IS
+/// WHAT THIS WAS
+///
+/// That attribute does not belong to the test module alone. It sits on
+/// individual items and struct FIELDS too, and `src/file_device.rs`
+/// grew three of them — the lock-arrival witness rust-fs-core#104
+/// needed — around 400 lines above `FileDevice::write_at`. Cutting at
+/// the first one dropped `write_at` out of the scan, and this file
+/// then failed saying `["file_device.rs"]` was documented as
+/// constructing `Error::OutOfBounds` "and no longer does". It still
+/// did; the scan had stopped early. The count assertion agreed,
+/// reporting 1 site where the paragraph says two.
+///
+/// It failed loudly this time, which was luck: the same cut hides an
+/// UNDOCUMENTED constructor just as readily, and that direction is
+/// silent. `src/caching_device.rs` (first `#[cfg(test)]` at an
+/// item, line 291, test module at 922) and `src/lib.rs` were already
+/// being cut early on main; neither happens to construct the variant,
+/// so the hole was latent rather than harmless.
+///
+/// So the boundary looked for is the test MODULE: an unindented
+/// `#[cfg(test)]` whose next line opens an inline `mod`. A
+/// `#[cfg(test)] mod name;` DECLARATION is deliberately not a
+/// boundary — `src/lib.rs` has one on line 11 with production code
+/// under it.
+///
+/// Line scanning rather than parsing, because there is no Rust parser
+/// in this crate's dev-dependencies and adding one to find a `mod` is
+/// not a trade worth making. The two tests below pin both directions.
+fn production_half(text: &str) -> &str {
+    /// A line WITH its terminator, so its length is its span in `text`.
+    ///
+    /// This was `lines()` plus `offset += line.len() + 1`, which
+    /// assumes a one-byte line ending. `lines()` strips a trailing
+    /// `\r`, so on a CRLF checkout the length excludes it while the
+    /// `+ 1` counts only the `\n`, and the cut point falls one byte
+    /// further behind the truth with every preceding line. The
+    /// production half is then TRUNCATED — the scan covers less source
+    /// than it claims to and still passes, which is the defect this
+    /// file exists to catch, in the file catching it. A drifted offset
+    /// can also land inside a multi-byte character, where slicing
+    /// panics.
+    ///
+    /// `split_inclusive` removes the arithmetic rather than correcting
+    /// it: the offsets are sums of real slice lengths, so they are
+    /// exact for either line ending and always on a character
+    /// boundary. Nothing here depends on which one the checkout used.
+    fn strip_ending(raw: &str) -> &str {
+        raw.trim_end_matches(['\n', '\r'])
+    }
+
+    let mut offset = 0usize;
+    let mut lines = text.split_inclusive('\n').peekable();
+    while let Some(raw) = lines.next() {
+        let start = offset;
+        offset += raw.len();
+        if strip_ending(raw) != "#[cfg(test)]" {
+            continue;
+        }
+        let next = lines.peek().copied().map(strip_ending).unwrap_or("");
+        let opens_a_module = (next.starts_with("mod ")
+            || next.starts_with("pub mod ")
+            || next.starts_with("pub(crate) mod "))
+            && next.ends_with('{');
+        if opens_a_module {
+            return &text[..start];
+        }
+    }
+    text
+}
+
+/// A `#[cfg(test)]` ON AN ITEM IS NOT THE TEST MODULE, and the scan
+/// must not stop at one. This is the regression `file_device.rs`
+/// produced: the production constructor sits below a test-only field.
+#[test]
+fn a_cfg_test_item_does_not_end_the_production_half() {
+    let text = "\
+struct D {
+    #[cfg(test)]
+    arrivals: LockArrivals,
+}
+
+#[cfg(test)]
+struct LockArrivals;
+
+fn write_at() {
+    return Err(Error::OutOfBounds {
+        offset,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    fn t() {
+        let _ = Error::OutOfBounds {
+            offset: 0,
+        };
+    }
+}
+";
+    let production = production_half(text);
+    assert!(
+        production.contains("fn write_at()"),
+        "the scan stopped at a test-only item and lost the production constructor"
+    );
+    assert!(
+        !production.contains("mod tests"),
+        "the test module must still be excluded"
+    );
+    assert_eq!(
+        production.matches("Error::OutOfBounds {").count(),
+        1,
+        "exactly the production constructor, and not the one inside mod tests"
+    );
+}
+
+/// THE CUT IS A BYTE OFFSET IN THE TEXT, NOT A COUNT OF LINES.
+///
+/// The first version added `line.len() + 1` per line. `lines()` strips
+/// a trailing `\r`, so on CRLF that is one byte short per line and the
+/// returned slice ends progressively before the boundary it names —
+/// the production half silently truncated, the scan covering less than
+/// it claims, and passing. The runner checks out LF, so nothing was
+/// firing; that is the reason it needs a fixture rather than a
+/// `.gitattributes`, which would hide it and leave the function wrong
+/// for any caller that passes CRLF text of its own.
+///
+/// The assertion is on the CUT rather than on what the slice contains:
+/// the remainder must begin exactly at the test module's attribute. A
+/// containment check passes while the offset is a few bytes out, which
+/// is the whole failure mode.
+///
+/// The em dash is deliberate. A drifted offset that lands inside a
+/// multi-byte character does not truncate, it PANICS, and this
+/// module's real sources are full of them.
+#[test]
+fn the_boundary_is_a_byte_offset_and_survives_either_line_ending() {
+    const LINES: &[&str] = &[
+        "// a comment with an em dash — as the real sources have",
+        "#[cfg(test)]",
+        "struct Witness;",
+        "",
+        "fn write_at() {",
+        "    return Err(Error::OutOfBounds {",
+        "        offset,",
+        "    });",
+        "}",
+        "",
+        "#[cfg(test)]",
+        "mod tests {",
+        "}",
+        "",
+    ];
+
+    for (what, ending) in [("LF", "\n"), ("CRLF", "\r\n")] {
+        let text = LINES.join(ending);
+        let production = production_half(&text);
+        assert!(
+            production.contains("fn write_at()"),
+            "{what}: the production constructor fell outside the production half"
+        );
+        let rest = &text[production.len()..];
+        assert!(
+            rest.starts_with("#[cfg(test)]"),
+            "{what}: the cut landed {} bytes in, and the text there begins {:?} \
+             rather than at the test module's attribute. An offset computed from a \
+             line count is wrong by one byte per line whenever the ending is two.",
+            production.len(),
+            &rest[..rest.len().min(24)]
+        );
+    }
+}
+
+/// AND THE FILE ON DISK, not only the sample above. A hand-written
+/// fixture can drift from the real thing; this is the assertion that
+/// would have caught the regression at the moment it was introduced.
+#[test]
+fn the_real_file_device_keeps_its_constructor_in_the_production_half() {
+    let text =
+        std::fs::read_to_string(src_dir().join("file_device.rs")).expect("read src/file_device.rs");
+    assert!(
+        text.contains("    #[cfg(test)]"),
+        "control: this asserts something only while file_device.rs still carries a \
+         test-only item above write_at. If that has gone, so has the regression, \
+         and this test is measuring nothing"
+    );
+    let production = production_half(&text);
+    assert!(
+        production.contains("fn write_at("),
+        "FileDevice::write_at fell outside the production half of its own file"
+    );
+    assert!(
+        !production.contains("fn rw_image("),
+        "the test module leaked into the production half"
+    );
+}
+
 /// Every place this crate constructs it, as `file:line`.
 ///
 /// SITES, NOT FILES, and the difference is the defect this returned
@@ -54,9 +253,10 @@ fn is_construction(line: &str) -> bool {
 /// which is the shape of the original defect, reproduced by the check
 /// written to catch it.
 ///
-/// Anything below a `#[cfg(test)]` is skipped: a test building the
+/// Anything below the test module is skipped: a test building the
 /// value to check its formatting is not a place the crate reports one
-/// from.
+/// from. Which line that is, and why it is not simply the first
+/// `#[cfg(test)]`, is [`production_half`].
 fn constructing_sites() -> Vec<String> {
     let mut found = Vec::new();
     let dir = src_dir();
@@ -70,10 +270,7 @@ fn constructing_sites() -> Vec<String> {
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("a readable source file");
-        let production = match text.find("#[cfg(test)]") {
-            Some(at) => &text[..at],
-            None => &text[..],
-        };
+        let production = production_half(&text);
         let name = path
             .file_name()
             .expect("a named file")
