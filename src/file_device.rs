@@ -193,13 +193,50 @@ fn device_size_bytes(file: &File) -> Result<u64> {
         })
 }
 
+/// `BLKGETSIZE64` as `_IOR(0x12, 114, size_t)`, for a given pointer
+/// width.
+///
+/// THE SIZE FIELD OF AN IOCTL REQUEST IS `sizeof(size_t)` -- the
+/// USERSPACE POINTER WIDTH, not the width of the value the kernel
+/// writes back. The payload is a `u64` on both, but the request NUMBER
+/// differs: `0x8008_1272` where a pointer is 8 bytes, `0x8004_1272`
+/// where it is 4. A literal for one width is rejected by the kernel on
+/// the other.
+///
+/// That is a regression this change would have INTRODUCED rather than
+/// inherited. Before it, an unmeasurable device node gave `Ok` with a
+/// size of 0; now it is an error, so a 64-bit-only constant would make
+/// [`FileDevice::open`] fail for EVERY block device on a 32-bit target.
+///
+/// Taking the width as a parameter is what makes it testable: nothing
+/// available here runs 32-bit, and `cargo check --target` compiles a
+/// wrong literal perfectly happily, so the only witness possible is to
+/// compute both encodings and compare them with the two numbers the
+/// kernel headers actually define.
+///
+/// Available in every TEST build rather than on Linux alone, because a
+/// test that cannot run is not a witness: gated to Linux it would be
+/// compiled and never executed on the machine the work is done on, and
+/// the arithmetic is the same arithmetic everywhere.
+#[cfg(any(target_os = "linux", test))]
+const fn blkgetsize64_for(pointer_width: usize) -> std::os::raw::c_ulong {
+    /// `_IOC_READ << _IOC_DIRSHIFT`.
+    const READ: std::os::raw::c_ulong = 0x8000_0000;
+    /// `_IOC_TYPESHIFT` is 8, `_IOC_SIZESHIFT` is 16.
+    const TYPE: std::os::raw::c_ulong = 0x12;
+    const NR: std::os::raw::c_ulong = 114;
+    READ | ((pointer_width as std::os::raw::c_ulong) << 16) | (TYPE << 8) | NR
+}
+
 /// Linux: `<linux/fs.h>` answers in bytes in one call.
 #[cfg(target_os = "linux")]
 fn device_size_bytes(file: &File) -> Result<u64> {
     use std::io;
     use std::os::fd::AsRawFd;
-    // _IOR(0x12, 114, size_t).
-    const BLKGETSIZE64: std::os::raw::c_ulong = 0x8008_1272;
+    // _IOR(0x12, 114, size_t), encoded for THIS target -- see
+    // `blkgetsize64_for`. Identical to the familiar 0x8008_1272 on a
+    // 64-bit target and correct on a 32-bit one.
+    const BLKGETSIZE64: std::os::raw::c_ulong = blkgetsize64_for(std::mem::size_of::<usize>());
 
     let mut size: u64 = 0;
     // SAFETY: as above -- one call, writing one u64 into a u64.
@@ -388,6 +425,41 @@ impl BlockDevice for FileDevice {
 
 #[cfg(test)]
 mod tests {
+    /// THE TWO NUMBERS THE KERNEL HEADERS DEFINE, and the pointer
+    /// widths they belong to. External knowledge, not a restatement of
+    /// the formula -- a test that recomputed the encoding on both sides
+    /// would agree with itself whatever the encoding was.
+    ///
+    /// This cannot prove the ioctl works on 32-bit; nothing available
+    /// here runs 32-bit, and `cargo check --target` compiles a wrong
+    /// literal happily. What it does is stop the encoding quietly
+    /// reverting to a single hardcoded number, which is the way this
+    /// defect arrived.
+    #[test]
+    fn blkgetsize64_is_encoded_for_the_pointer_width() {
+        const KNOWN: &[(usize, u64)] = &[(4, 0x8004_1272), (8, 0x8008_1272)];
+        for (width, want) in KNOWN {
+            assert_eq!(
+                super::blkgetsize64_for(*width) as u64,
+                *want,
+                "_IOR(0x12, 114, size_t) with a {width}-byte size_t is {want:#010x}"
+            );
+        }
+    }
+
+    /// And the one this build will actually issue is the one for THIS
+    /// target, rather than whichever happened to be written down.
+    #[test]
+    fn this_target_issues_its_own_encoding() {
+        let width = std::mem::size_of::<usize>();
+        let expected = if width == 8 {
+            0x8008_1272u64
+        } else {
+            0x8004_1272u64
+        };
+        assert_eq!(super::blkgetsize64_for(width) as u64, expected);
+    }
+
     use super::*;
 
     /// Concurrent readers do not serialise, and none of them sees
