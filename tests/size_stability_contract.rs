@@ -119,26 +119,56 @@ fn assert_stable(name: &str, dev: &dyn BlockDevice) {
 /// The implementations that DO take their size once, at construction.
 #[test]
 fn the_devices_that_own_their_size_report_a_stable_one() {
-    // open_rw DELIBERATELY, not open. `FileDevice::write_at` seeks and
-    // writes, so on a writable handle a write past the end GROWS THE
-    // FILE while the device goes on reporting the size it took at
-    // construction. That is what makes this arm able to fail: a
-    // FileDevice reporting a live `metadata().len()` would move here.
-    // On a read-only handle `write_at` is `Error::ReadOnly` and the
-    // file cannot grow, so the test would pass either way and pin
-    // nothing.
+    // THE BACKING IS MOVED THROUGH A SECOND HANDLE, and that is not an
+    // ornament -- it is the only thing making this arm able to fail.
+    //
+    // It used to rely on `exercise` writing past the end of an `open_rw`
+    // handle, which grew the real file while the device went on
+    // reporting its construction-time size. #70 bounded `write_at`
+    // against `self.size`, so that write is now `Error::OutOfBounds`,
+    // the file does not grow, and NOTHING IN A ROUND OF TRAIT
+    // OPERATIONS PERTURBS THE BACKING. Measured across that merge with
+    // one mutation -- `size_bytes` returning a live `metadata().len()`
+    // -- this arm was EXIT=101 at f1e4aa9 and EXIT=0 at 4e19fc9. It
+    // stopped discriminating without going red, which is why nobody saw
+    // it.
+    //
+    // The bound is right; the instrument was wrong. What has to move is
+    // the BACKING STORE, so a second plain handle moves it explicitly,
+    // the way the slice arms below move theirs through `Movable`.
     let path = tmp_image(&vec![3u8; 4096]);
     let file = FileDevice::open_rw(&path).unwrap();
     assert_stable("FileDevice", &file);
+
+    {
+        use std::io::Write as _;
+        let mut grow = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open a second handle on the backing file");
+        grow.write_all(&[9u8; 6]).expect("grow the backing file");
+        grow.flush().expect("flush the growth");
+    }
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("stat the backing file")
+            .len(),
+        4102,
+        "precondition -- the backing file must really have grown, or the assertion \
+         below says nothing about the device in front of it"
+    );
+    assert_eq!(
+        file.size_bytes(),
+        4096,
+        "FileDevice took its size at construction and must keep reporting that. A \
+         live metadata().len() would follow the file here."
+    );
     let _ = std::fs::remove_file(&path);
 
     // THE BACKING HAS TO MOVE FOR THESE THREE, and `assert_stable`
-    // alone does not move it.
-    //
-    // `FileDevice` above needs no such help: `exercise` writes past
-    // the end, and on an `open_rw` handle that grows the real file, so
-    // the backing moves there with no prompting -- which is what makes
-    // that arm fail when `FileDevice::size_bytes` is made live.
+    // alone does not move it. The same is now true of `FileDevice`
+    // above, which is why it grows its file through a second handle
+    // rather than relying on a write the crate no longer performs.
     //
     // The slice devices take their length from the parent at
     // construction and nothing in a round of trait operations changes
