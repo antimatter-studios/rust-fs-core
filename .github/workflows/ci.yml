@@ -21,7 +21,22 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --all-targets
+      # AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP ACKNOWLEDGES A REAL GAP.
+      # tests/device_node_size.rs covers the Linux device-size probe's
+      # success path with a loop device, and losetup needs root, which
+      # this runner is not. Without this the test FAILS rather than
+      # skipping quietly -- libtest discards a passing test's output, so
+      # a printed "skipped" line reaches nobody.
+      #
+      # What is still covered on this runner: the probe's FAILURE path,
+      # via /dev/zero, which needs no privileges. What is not: the
+      # success path, i.e. BLKGETSIZE64 returning a real size. macOS
+      # covers its own equivalent in full, unprivileged, via hdiutil.
+      #
+      # To close this rather than acknowledge it, run the suite as root.
       - run: cargo test --locked --all-targets
+        env:
+          AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
       - run: cargo clippy --locked --all-targets -- -D warnings
   fmt:
     name: fmt
