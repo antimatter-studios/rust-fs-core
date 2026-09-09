@@ -185,3 +185,146 @@ fn an_ordinary_block_size_still_writes() {
     assert_eq!(dev.writes.load(Ordering::SeqCst), 1);
     assert_eq!(&dev.data.lock().unwrap()[..8], &[0xBB; 8]);
 }
+
+/// A read-only device that counts the reads that reached it.
+struct CountingRo {
+    data: Vec<u8>,
+    reads: AtomicUsize,
+}
+
+impl BlockRead for CountingRo {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::error::Result<()> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let start = offset as usize;
+        let end = start.saturating_add(buf.len());
+        if end > self.data.len() {
+            return Err(fs_core::error::Error::ShortRead {
+                offset,
+                want: buf.len(),
+                got: self.data.len().saturating_sub(start),
+            });
+        }
+        buf.copy_from_slice(&self.data[start..end]);
+        Ok(())
+    }
+
+    fn size_bytes(&self) -> u64 {
+        self.data.len() as u64
+    }
+}
+
+fn counting_ro() -> Arc<CountingRo> {
+    Arc::new(CountingRo {
+        data: vec![0xAA; 64],
+        reads: AtomicUsize::new(0),
+    })
+}
+
+/// A READ-ONLY CACHE REFUSES A WRITE WITH `ReadOnly`, WHATEVER ITS BLOCK
+/// SIZE SAYS.
+///
+/// The block size is checked before anything else in `write_at`, so a
+/// cache with no writable half whose block size came off a damaged disk
+/// used to answer `Error::Custom` instead — against this type's own
+/// documented promise that such a write is `Error::ReadOnly`.
+///
+/// The variant is not cosmetic. `stream.rs` maps `ReadOnly` to
+/// `io::ErrorKind::PermissionDenied` and `Custom` to `io::Error::other`,
+/// so a caller branching on `PermissionDenied` to report "this volume is
+/// read-only" reported an uncategorised failure. A read-only mount of a
+/// damaged image is precisely where a bad block size shows up, so the two
+/// conditions arrive together rather than independently.
+///
+/// Both ends of the range, because the block-size guard has two arms and
+/// either would have masked the contract.
+#[test]
+fn a_read_only_cache_refuses_a_write_with_read_only_whatever_the_block_size() {
+    for block_size in [0u64, fs_core::caching_device::MAX_BLOCK_SIZE + 1] {
+        let cache = CachingDevice::read_only(counting_ro(), block_size, 4);
+        let result = cache.write_at(0, &[0xBB; 8]);
+        assert!(
+            matches!(result, Err(fs_core::error::Error::ReadOnly)),
+            "a read-only cache with block size {block_size} must refuse a write \
+             with ReadOnly, or an io consumer sees Other instead of \
+             PermissionDenied; got {result:?}"
+        );
+    }
+}
+
+/// THE OVER-CORRECTION CONTROL. A cache that CAN be written still reports
+/// the block size.
+///
+/// Answering `ReadOnly` whenever the block size is unusable would satisfy
+/// the test above and be wrong: it would tell a caller holding a writable
+/// device that its volume is read-only, and hide the one fact that would
+/// let anyone fix the image. The hoist has to move the read-only refusal
+/// up, not turn the block-size refusal into a read-only one.
+#[test]
+fn a_writable_cache_with_a_bad_block_size_still_reports_the_block_size() {
+    for block_size in [0u64, fs_core::caching_device::MAX_BLOCK_SIZE + 1] {
+        let dev = Arc::new(CountingRw {
+            data: std::sync::Mutex::new(vec![0xAA; 64]),
+            writes: AtomicUsize::new(0),
+        });
+        let cache = CachingDevice::new(dev.clone(), block_size, 4);
+        let result = cache.write_at(0, &[0xBB; 8]);
+        assert!(
+            matches!(result, Err(fs_core::error::Error::Custom(_))),
+            "a WRITABLE cache with block size {block_size} must report the block \
+             size, not claim the device is read-only; got {result:?}"
+        );
+        assert_eq!(
+            dev.writes.load(Ordering::SeqCst),
+            0,
+            "and still nothing may reach the device"
+        );
+    }
+}
+
+/// A REFUSED WRITE LEAVES THE CACHE ALONE.
+///
+/// The read-only refusal used to sit below the first invalidation sweep,
+/// so every write a read-only cache refused first emptied the region it
+/// was refused for. The entries could not have been stale — the write
+/// never reached the device and never could — so the re-read bought
+/// nothing.
+///
+/// Counted in device reads rather than asserted about internals: prime an
+/// entry, prove it is being served from the cache, refuse a write over it,
+/// and require that it is still served from the cache.
+#[test]
+fn a_write_refused_on_a_read_only_cache_does_not_empty_the_cache() {
+    let dev = counting_ro();
+    let cache = CachingDevice::read_only(dev.clone(), 16, 4);
+    let mut buf = [0u8; 8];
+
+    cache.read_at(0, &mut buf).expect("prime the entry");
+    let primed = dev.reads.load(Ordering::SeqCst);
+    assert!(primed > 0, "priming must have reached the device");
+
+    // PROVE THE ENTRY IS CACHED BEFORE RELYING ON IT. Without this the
+    // assertion below would hold just as well for a cache that never
+    // stored anything, and would be measuring nothing.
+    cache.read_at(0, &mut buf).expect("served from the cache");
+    assert_eq!(
+        dev.reads.load(Ordering::SeqCst),
+        primed,
+        "the second read must be a hit, or this test cannot tell a surviving \
+         entry from an absent one"
+    );
+
+    let refused = cache.write_at(0, &[0xBB; 8]);
+    assert!(
+        matches!(refused, Err(fs_core::error::Error::ReadOnly)),
+        "the write must be refused; got {refused:?}"
+    );
+
+    cache.read_at(0, &mut buf).expect("still cached");
+    assert_eq!(
+        dev.reads.load(Ordering::SeqCst),
+        primed,
+        "a refused write swept the cache: the entry had to be fetched again, \
+         though the write it was swept for never reached the device"
+    );
+    assert_eq!(buf, [0xAA; 8], "and the bytes are the device's own");
+}
