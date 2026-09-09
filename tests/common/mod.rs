@@ -35,9 +35,9 @@
 use fs_core::block::BlockRead;
 use fs_core::error::{Error, Result};
 
-/// Where `offset` lands in a buffer of `len` bytes, and how much is
-/// actually there — or the [`Error::ShortRead`] that says it does not
-/// fit.
+/// Where `offset` lands in a buffer of `len` bytes — or the
+/// [`Error::ShortRead`] that says the range does not fit, which always
+/// reports `got: 0` because nothing is copied on that path.
 ///
 /// The arithmetic is `u64` throughout, and the narrowing to `usize`
 /// happens only *after* the bounds check has proved the range fits
@@ -50,9 +50,24 @@ pub fn range_within(len: usize, offset: u64, want: usize) -> Result<(usize, usiz
     let short = || Error::ShortRead {
         offset,
         want,
-        // What is actually available from `offset` — nothing at all,
-        // once `offset` is itself past the end.
-        got: len64.saturating_sub(offset) as usize,
+        // ZERO, ALWAYS — AND NOT "WHAT WAS AVAILABLE".
+        //
+        // `got` counts the bytes placed in the CALLER'S BUFFER. This
+        // refuses before `copy_from_slice` runs, on every path that
+        // builds this error, so the buffer is provably untouched and
+        // the count is provably nothing.
+        //
+        // It reported `len - offset`, which is a different number
+        // whenever the read starts inside the buffer and only overruns
+        // at the far end: 16 bytes from offset 0 of an 8-byte double
+        // claimed `got: 8` for a read that copied none. That is
+        // `FileDevice`'s answer, not this one's. A file really does
+        // hand back the readable prefix and report its length; the
+        // slice adapters refuse outright and report 0; `error.rs`
+        // spells out that `got: 0` means nothing was transferred and
+        // says nothing about what was there. This double refuses, so
+        // it is the second kind.
+        got: 0,
     };
     let end = offset.checked_add(want as u64).ok_or_else(short)?;
     if end > len64 {

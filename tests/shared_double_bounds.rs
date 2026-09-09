@@ -65,3 +65,68 @@ fn a_write_at_a_wild_offset_is_refused_rather_than_panicking() {
     common::write_from(&mut bytes, 4, &[9u8; 4]).expect("inside the buffer");
     assert_eq!(bytes, [0, 0, 0, 0, 9, 9, 9, 9]);
 }
+
+/// THE ONE SHAPE WHERE "AVAILABLE" AND "COPIED" DIFFER, WHICH NOTHING
+/// HERE COVERED.
+///
+/// Every case above starts at or past the end — `u64::MAX`,
+/// `u64::MAX - 7`, `1 << 40`, `9` against eight bytes — where
+/// `len - offset` saturates to 0 and the two readings of `got` agree by
+/// accident. A read that BEGINS INSIDE the buffer and only overruns at
+/// the far end is the case that tells them apart, and there was no such
+/// test, so the helper reported `got: 8` for a read that copied nothing
+/// and the whole suite stayed green.
+///
+/// `error.rs` is explicit that `got` counts what was placed in the
+/// caller's buffer, and that a device which refuses rather than
+/// copying a prefix reports 0. This double refuses: `read_into` returns
+/// through `?` before `copy_from_slice`. The assertion on the untouched
+/// buffer and the assertion on `got` are the same claim said twice, and
+/// the point is that they used to disagree.
+///
+/// The offsets are swept rather than singular because 0 is the special
+/// case that would pass a `got: offset` implementation too.
+#[test]
+fn a_read_beginning_inside_the_buffer_that_overruns_it_copies_nothing() {
+    let bytes = [0xABu8; 8];
+    for (offset, available) in [(0u64, 8usize), (1, 7), (7, 1)] {
+        let mut buf = [0u8; 16];
+        match common::read_into(&bytes, offset, &mut buf).expect_err("overruns the end") {
+            Error::ShortRead {
+                offset: o,
+                want,
+                got,
+            } => {
+                assert_eq!((o, want), (offset, 16));
+                assert_eq!(
+                    got, 0,
+                    "{available} bytes were available from {offset}, and none of them \
+                     were copied -- got counts the buffer, not the source"
+                );
+            }
+            other => panic!("expected ShortRead at {offset}, got {other:?}"),
+        }
+        assert_eq!(buf, [0u8; 16], "a refused read leaves the buffer alone");
+    }
+}
+
+/// And the write half, which shares the same arithmetic and had the
+/// same blind spot.
+#[test]
+fn a_write_beginning_inside_the_buffer_that_overruns_it_writes_nothing() {
+    for offset in [0u64, 1, 7] {
+        let mut bytes = [0u8; 8];
+        match common::write_from(&mut bytes, offset, &[1u8; 16]).expect_err("overruns the end") {
+            Error::ShortRead {
+                offset: o,
+                want,
+                got,
+            } => {
+                assert_eq!((o, want), (offset, 16));
+                assert_eq!(got, 0, "a refused write transfers nothing");
+            }
+            other => panic!("expected ShortRead at {offset}, got {other:?}"),
+        }
+        assert_eq!(bytes, [0u8; 8], "no refused write reached the buffer");
+    }
+}
