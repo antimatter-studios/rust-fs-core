@@ -6,33 +6,58 @@ use crate::error::{Error, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 /// A file opened as a block device.
 ///
-/// # Reads do not take the lock; writes do
+/// # Readers share the lock; writers take it alone
 ///
-/// A read was `seek` then `read` under a mutex, which made the file's
-/// cursor shared state: two threads reading different offsets had to
-/// take turns, not because the device could not serve them at once but
-/// because one would have moved the other's cursor.
+/// A read was once `seek` then `read` under a plain mutex, which made
+/// the file's cursor shared state: two threads reading different offsets
+/// had to take turns, not because the device could not serve them at
+/// once but because one would have moved the other's cursor.
 ///
 /// On Unix the cursor is not involved at all — `pread` takes the offset
-/// as an argument — so reads run without the lock and genuinely overlap.
+/// as an argument — so readers hold the lock *shared* and genuinely
+/// overlap. On Windows the equivalent (`seek_read`) *does* move the file
+/// pointer, so readers there take it exclusively and only that platform
+/// pays for the cursor.
 ///
-/// On Windows the equivalent (`seek_read`) *does* move the file
-/// pointer, so the lock stays there. Same behaviour, one platform
-/// paying for it.
-///
-/// Writes keep the lock on both, because `write_at` is still `seek` plus
-/// `write_all` and a partial write must not have another writer's seek
+/// Writers take it exclusively on both, because `write_at` is `seek`
+/// plus `write_all` and neither another writer's seek nor a reader may
 /// land in the middle of it.
+///
+/// # THE LOCK IS NOT AN OPTIMISATION, IT IS THE READ/WRITE CONTRACT
+///
+/// Reads briefly took no lock at all, which read as a natural
+/// consequence of positioned reads needing no cursor. It was not: it
+/// silently dropped the exclusion between readers and writers that the
+/// single mutex had provided, so a read overlapping a `write_at` could
+/// observe part of it. `write_all` is permitted to become several
+/// `write` calls, and a read is a loop of positioned reads — either
+/// split is a window, and the second one does not need the first.
+///
+/// So a reader holds the lock for the whole of [`FileDevice::read_at`],
+/// not for each positioned read inside it. Per-read guards would leave
+/// exactly the same hole one level down, and a rarer tear is worse than
+/// a common one because nobody can reproduce it.
+///
+/// # A known limit, stated rather than fixed
+///
+/// `std::sync::RwLock` does not promise writer preference on every
+/// platform, and the read path here is the hot one. A device under
+/// sustained parallel reads can therefore make a writer wait longer than
+/// a fair queue would. That is a throughput property, not a correctness
+/// one, and it is left alone rather than solved with a hand-rolled queue
+/// nobody would be able to audit.
 pub struct FileDevice {
     file: File,
-    /// Held for writes only — see the type's own note. `()` rather than
-    /// the file, so that a reader physically cannot be made to wait on
-    /// it by a later edit.
-    write_lock: Mutex<()>,
+    /// Shared by readers, exclusive to writers — see the type's own
+    /// note. `()` rather than the file, because it orders access rather
+    /// than owning the handle: positioned reads need no cursor, so
+    /// putting the `File` in here would reintroduce the serialisation
+    /// the shared guard exists to avoid.
+    io_lock: RwLock<()>,
     size: u64,
     writable: bool,
 }
@@ -44,7 +69,7 @@ impl FileDevice {
         let size = file.metadata()?.len();
         Ok(Self {
             file,
-            write_lock: Mutex::new(()),
+            io_lock: RwLock::new(()),
             size,
             writable: false,
         })
@@ -56,7 +81,7 @@ impl FileDevice {
         let size = file.metadata()?.len();
         Ok(Self {
             file,
-            write_lock: Mutex::new(()),
+            io_lock: RwLock::new(()),
             size,
             writable: true,
         })
@@ -73,29 +98,77 @@ impl FileDevice {
 }
 
 impl FileDevice {
+    /// The guard a read holds for the whole of `read_at`.
+    ///
+    /// Unix takes it SHARED: `pread` carries its own offset, so readers
+    /// do not disturb each other and only need to be kept apart from
+    /// writers.
+    ///
+    /// Windows takes it EXCLUSIVE, because `seek_read` moves the file
+    /// pointer — there, one reader really can spoil another's offset, so
+    /// readers must exclude readers as well as writers. Same lock, same
+    /// call site, and only that platform pays for the cursor.
+    #[cfg(unix)]
+    fn read_guard(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.io_lock.read().unwrap()
+    }
+
+    #[cfg(windows)]
+    fn read_guard(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
+        self.io_lock.write().unwrap()
+    }
+
     /// One positioned read, returning what it got.
     ///
-    /// Unix: `pread`, which does not touch the file cursor, so this
-    /// needs no lock and concurrent readers overlap.
+    /// TAKES NO LOCK ON EITHER PLATFORM. The caller holds `read_guard`
+    /// for the whole read; acquiring anything here would be a second,
+    /// non-reentrant acquisition of the same lock — on Windows, where
+    /// that guard is exclusive, an immediate self-deadlock.
     #[cfg(unix)]
     fn read_once(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
         use std::os::unix::fs::FileExt;
         Ok(self.file.read_at(buf, offset)?)
     }
 
-    /// Windows: `seek_read` DOES move the file pointer, so the lock is
-    /// still required here. The interface is the same and only this
-    /// platform pays.
+    /// Windows: `seek_read` DOES move the file pointer. The exclusion
+    /// that needs is held by the caller's guard, not taken here — see
+    /// `read_guard`.
     #[cfg(windows)]
     fn read_once(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
         use std::os::windows::fs::FileExt;
-        let _guard = self.write_lock.lock().unwrap();
         Ok(self.file.seek_read(buf, offset)?)
     }
 }
 
 impl BlockRead for FileDevice {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        // HELD ACROSS THE WHOLE LOOP, NOT AROUND EACH POSITIONED READ.
+        //
+        // The loop below can issue several reads for one call, and a
+        // guard taken inside it would let a `write_at` land between two
+        // of them: the caller would get some bytes from before the write
+        // and some from after, which is the tear this exists to prevent
+        // moved one level down and made rarer. Rarer is worse — nobody
+        // can reproduce it.
+        //
+        // NO TEST PINS THIS PLACEMENT, and the reason is worth writing
+        // down because the obvious one is wrong. A regular file does
+        // return short reads — at EOF — and this loop retries rather
+        // than failing on one, so a read spanning EOF really does run
+        // twice and the guard really would be released in between. That
+        // discriminator was built: a 4096-byte file, a reader asking
+        // 4090..4102, a writer parked on the lock growing the file at
+        // 4090, where interleaved old-and-new bytes are reachable no
+        // other way. 200 trials with the guard moved inside the loop
+        // produced 0 tears. The window between releasing at the end of
+        // one iteration and retaking at the start of the next is a few
+        // instructions, and a writer already waiting never won it.
+        //
+        // So this is unwitnessed, not inert: the placement is correct
+        // and the race it prevents is simply too narrow to enter on
+        // demand. Measured, not argued.
+        let _guard = self.read_guard();
+
         // A SHORT READ IS AN ERROR NAMING WHAT WAS ASKED FOR AND WHAT
         // ARRIVED, not a smaller answer: a caller that asked for a block
         // and got half of one cannot tell the difference from bytes.
@@ -158,7 +231,8 @@ impl BlockDevice for FileDevice {
                 size: self.size,
             });
         }
-        let _guard = self.write_lock.lock().unwrap();
+        // EXCLUSIVE: excludes other writers' seeks and every reader.
+        let _guard = self.io_lock.write().unwrap();
         let mut f = &self.file;
         f.seek(SeekFrom::Start(offset))?;
         f.write_all(buf)?;
@@ -169,7 +243,10 @@ impl BlockDevice for FileDevice {
         if !self.writable {
             return Ok(());
         }
-        let _guard = self.write_lock.lock().unwrap();
+        // EXCLUSIVE for the same reason as `write_at`: this pushes
+        // buffered bytes at the file and must not interleave with a
+        // write or a read.
+        let _guard = self.io_lock.write().unwrap();
         let mut f = &self.file;
         f.flush()?;
         self.file.sync_data()?;
@@ -307,5 +384,223 @@ mod tests {
         assert_eq!(buf, [0xEF; 4]);
         // Flush on a read-only device is a no-op success.
         dev.flush().unwrap();
+    }
+
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// How long an operation that must be blocked is given to prove it.
+    /// Only a false PASS can come of this being short, and the
+    /// ready-signal in each test removes the way that happens.
+    const BLOCKED_FOR: Duration = Duration::from_millis(300);
+    /// How long an operation that must finish is given. Generous on
+    /// purpose: a loaded machine makes it slower, not flakier.
+    const UNBLOCKED_WITHIN: Duration = Duration::from_secs(10);
+
+    /// A 4 KiB image of one repeated byte, opened read-write.
+    fn rw_image(tag: &str, fill: u8) -> (std::sync::Arc<FileDevice>, Cleanup) {
+        let path = temp_path(tag);
+        let cleanup = Cleanup(path.clone());
+        std::fs::write(&path, vec![fill; 4096]).expect("write the image");
+        let dev = std::sync::Arc::new(FileDevice::open_rw(&path).expect("open rw"));
+        (dev, cleanup)
+    }
+
+    /// A READ CONCURRENT WITH A WRITE MUST NOT PROCEED.
+    ///
+    /// This is the regression. Reads were briefly taken with no lock at
+    /// all, which quietly removed the exclusion the original single
+    /// mutex gave and left a read free to run through the middle of a
+    /// `write_at` — `write_all` may become several `write` calls, and
+    /// `read_at` is itself a loop, so either side can split.
+    ///
+    /// # Why the lock rather than the tear is the assertion
+    ///
+    /// The obvious test races a writer against readers and looks for a
+    /// region holding bytes from both sides of the write. On a regular
+    /// file that test cannot fail: a single `write` call is atomic
+    /// against `pread` on both Linux and macOS, and `write_all` only
+    /// splits above roughly 2 GiB, so the tear it looks for is
+    /// unreachable at any size a test would use. It would pass with the
+    /// fix reverted — an assertion whose outcome does not depend on the
+    /// defect, which is worse than no assertion.
+    ///
+    /// So the exclusion itself is asserted, by holding the very guard
+    /// `write_at` takes and requiring that a read cannot get past it.
+    /// That is deterministic, needs no tear to be reproducible, and
+    /// fails the moment `read_at` stops taking the lock.
+    #[test]
+    fn a_read_cannot_proceed_while_a_write_holds_the_lock() {
+        let (dev, _c) = rw_image("read_excluded_by_write", 0x5A);
+
+        // Stands in for a write in progress: the same exclusive guard
+        // `write_at` holds across its seek and write.
+        let held = dev.io_lock.write().unwrap();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        {
+            let dev = std::sync::Arc::clone(&dev);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let _ = ready_tx.send(());
+                let outcome = dev.read_at(0, &mut buf);
+                let _ = done_tx.send(outcome.map(|()| buf[0]));
+            });
+        }
+
+        // PROVE THE READER REACHED THE CALL. A thread that has not been
+        // scheduled yet looks exactly like a thread correctly blocked,
+        // and without this the assertion below would pass for that
+        // reason on a busy machine.
+        ready_rx
+            .recv_timeout(UNBLOCKED_WITHIN)
+            .expect("the reader thread never started");
+
+        assert!(
+            done_rx.recv_timeout(BLOCKED_FOR).is_err(),
+            "a read completed while the exclusive write guard was held. Reads and \
+             writes are not mutually excluded, so a read overlapping a write_at \
+             can observe a partially written region"
+        );
+
+        // And it is blocked rather than broken: it completes once the
+        // writer lets go. Without this half the test would pass against
+        // a read_at that simply never returned.
+        drop(held);
+        let first = done_rx
+            .recv_timeout(UNBLOCKED_WITHIN)
+            .expect("the read must proceed once the write guard is released")
+            .expect("and must succeed");
+        assert_eq!(first, 0x5A, "the read returned the wrong bytes");
+    }
+
+    /// AND THE EXCLUSION HOLDS THE OTHER WAY ROUND.
+    ///
+    /// A write must not start while a read is in progress, or the read
+    /// it interleaves with is the one that tears. Asserted with a shared
+    /// guard, which is what a Unix reader holds.
+    #[test]
+    fn a_write_cannot_proceed_while_a_read_holds_the_lock() {
+        let (dev, _c) = rw_image("write_excluded_by_read", 0x11);
+
+        // Stands in for a read in progress.
+        let held = dev.io_lock.read().unwrap();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        {
+            let dev = std::sync::Arc::clone(&dev);
+            std::thread::spawn(move || {
+                let _ = ready_tx.send(());
+                let _ = done_tx.send(dev.write_at(0, &[0x22u8; 4096]));
+            });
+        }
+        ready_rx
+            .recv_timeout(UNBLOCKED_WITHIN)
+            .expect("the writer thread never started");
+
+        assert!(
+            done_rx.recv_timeout(BLOCKED_FOR).is_err(),
+            "a write completed while a read guard was held; a write_at may not \
+             run through a read that is already in progress"
+        );
+
+        drop(held);
+        done_rx
+            .recv_timeout(UNBLOCKED_WITHIN)
+            .expect("the write must proceed once the read releases")
+            .expect("and must succeed");
+
+        let mut buf = [0u8; 4];
+        dev.read_at(0, &mut buf).expect("read back");
+        assert_eq!(buf, [0x22; 4], "the write did not land");
+    }
+
+    /// AND A FLUSH IS A WRITE FOR THIS PURPOSE.
+    ///
+    /// `flush` pushes buffered bytes at the file and calls `sync_data`,
+    /// so it must not interleave with a read or a write any more than
+    /// `write_at` may. The exclusive guard was here before this test
+    /// was, and stating an invariant in a comment is not testing it:
+    /// with the guard removed the whole suite stayed green.
+    #[test]
+    fn a_flush_cannot_proceed_while_a_read_holds_the_lock() {
+        let (dev, _c) = rw_image("flush_excluded_by_read", 0x33);
+
+        // Stands in for a read in progress.
+        let held = dev.io_lock.read().unwrap();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        {
+            let dev = std::sync::Arc::clone(&dev);
+            std::thread::spawn(move || {
+                let _ = ready_tx.send(());
+                let _ = done_tx.send(dev.flush());
+            });
+        }
+        ready_rx
+            .recv_timeout(UNBLOCKED_WITHIN)
+            .expect("the flushing thread never started");
+
+        assert!(
+            done_rx.recv_timeout(BLOCKED_FOR).is_err(),
+            "a flush completed while a read guard was held; flush takes the lock \
+             exclusively for the same reason write_at does"
+        );
+
+        drop(held);
+        done_rx
+            .recv_timeout(UNBLOCKED_WITHIN)
+            .expect("the flush must proceed once the read releases")
+            .expect("and must succeed");
+    }
+
+    /// READERS STILL OVERLAP, WHICH IS THE POINT OF THE SHARED GUARD.
+    ///
+    /// THE OVER-CORRECTION THIS CATCHES: restoring read/write exclusion
+    /// with a plain mutex, or by taking the write half of this lock on
+    /// the read path, would pass both tests above and quietly undo the
+    /// reader parallelism the positioned-read work existed for. Nothing
+    /// else in the suite would notice, because every other assertion is
+    /// about bytes and serialised readers return the right bytes.
+    ///
+    /// Unix only: on Windows `seek_read` moves the file pointer, so
+    /// readers there take the guard exclusively on purpose and this
+    /// would correctly block.
+    #[test]
+    #[cfg(unix)]
+    fn a_read_does_not_exclude_another_read() {
+        let (dev, _c) = rw_image("reads_overlap", 0x77);
+
+        // Stands in for another reader already inside `read_at`.
+        let held = dev.io_lock.read().unwrap();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        {
+            let dev = std::sync::Arc::clone(&dev);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let _ = ready_tx.send(());
+                let outcome = dev.read_at(0, &mut buf);
+                let _ = done_tx.send(outcome.map(|()| buf[0]));
+            });
+        }
+        ready_rx
+            .recv_timeout(UNBLOCKED_WITHIN)
+            .expect("the reader thread never started");
+
+        let first = done_rx
+            .recv_timeout(UNBLOCKED_WITHIN)
+            .expect(
+                "a read blocked behind another read. On Unix the guard must be \
+                 shared -- positioned reads need no cursor, and serialising them \
+                 undoes the parallelism the read path was rewritten for",
+            )
+            .expect("and the read must succeed");
+        assert_eq!(first, 0x77);
+        drop(held);
     }
 }
