@@ -41,6 +41,23 @@ impl BlockDevice for CountingDev {
     }
 }
 
+/// A device with no bytes behind it and no lock in front of it.
+///
+/// `CountingDev` above holds its contents in a `Vec` behind a `Mutex`,
+/// which is right for the eviction tests and wrong for the timing one:
+/// a 32 MiB allocation and a mutex acquisition per read would be a
+/// large part of what got measured. This one answers from nothing.
+struct Zeros(u64);
+impl BlockRead for Zeros {
+    fn read_at(&self, _offset: u64, buf: &mut [u8]) -> Result<()> {
+        buf.fill(0xAB);
+        Ok(())
+    }
+    fn size_bytes(&self) -> u64 {
+        self.0
+    }
+}
+
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
@@ -163,4 +180,102 @@ fn forwards_size_bytes_and_is_writable_from_inner() {
     let cache = CachingDevice::new(inner_d, 4096, 2);
     assert_eq!(cache.size_bytes(), 4096);
     assert!(cache.is_writable());
+}
+
+/// A BIGGER CACHE MUST NOT BE A SLOWER ONE.
+///
+/// The defect this pins: the LRU was a `VecDeque` scanned linearly and
+/// promoted with `VecDeque::remove`, so every hit cost about
+/// `capacity/2` comparisons and `capacity/2` tuple moves under the
+/// mutex. The cost per read was linear in the capacity, which means
+/// there was a capacity beyond which asking for more cache made the
+/// driver slower, and no way for a caller to know where it was.
+///
+/// # Why a RATIO and not a wall-clock budget
+///
+/// An absolute threshold would encode this machine's speed and the
+/// build profile, and would have to be loose enough for the slowest
+/// runner -- at which point it stops failing on the defect. The two
+/// capacities are measured in the SAME process and the SAME build, so
+/// constant factors divide out and what is left is the shape of the
+/// curve. Measured with the identical harness:
+///
+/// ```text
+///                 us/read at 64   us/read at 4096   ratio
+/// VecDeque, release      0.0387            1.5933     41x
+/// VecDeque, debug        0.0661            3.6798     56x
+/// index+list, release    0.0386            0.0459    1.19x
+/// index+list, debug      0.0419            0.0613    1.46x
+/// ```
+///
+/// The threshold sits at 8x: about five times above the worst passing
+/// measurement and about five times below the best failing one, in
+/// either profile. It is deliberately not tight -- this is a guard
+/// against a return to O(n), not a benchmark.
+///
+/// The working set equals the capacity so the steady state is all
+/// hits, and `CountingDevice` underneath asserts no device reads
+/// happen during the timed section: without that, a change in miss
+/// rate could pay for the whole difference and the test would be
+/// measuring the wrong thing entirely.
+#[test]
+fn the_cost_of_a_cached_read_does_not_grow_with_the_capacity() {
+    use fs_core::CountingDevice;
+    use std::time::Instant;
+
+    const BS: u64 = 4096;
+    const BLOCKS: u64 = 8192;
+    const READS: usize = 100_000;
+
+    fn per_read_micros(capacity: usize) -> f64 {
+        let counting = Arc::new(CountingDevice::new(Arc::new(Zeros(BS * BLOCKS))));
+        let cache = CachingDevice::read_only(counting.clone(), BS, capacity);
+        let mut buf = vec![0u8; 512];
+        // Warm the whole working set, then measure only hits.
+        for b in 0..capacity as u64 {
+            cache.read_at(b * BS, &mut buf).unwrap();
+        }
+        let device_reads_after_warm = counting.reads();
+        let (h0, m0) = cache.stats();
+
+        let sweeps = READS / capacity.max(1);
+        let reads = sweeps * capacity;
+        let started = Instant::now();
+        for _ in 0..sweeps {
+            for b in 0..capacity as u64 {
+                cache.read_at(b * BS, &mut buf).unwrap();
+            }
+        }
+        let elapsed = started.elapsed().as_secs_f64() * 1e6;
+
+        let (h1, m1) = cache.stats();
+        assert_eq!(
+            m1, m0,
+            "capacity {capacity}: the timed section must be all hits, or this measures \
+             device traffic rather than the cache's own bookkeeping"
+        );
+        assert_eq!(
+            counting.reads(),
+            device_reads_after_warm,
+            "capacity {capacity}: no device read may happen during the timed section"
+        );
+        assert_eq!(
+            h1 - h0,
+            reads as u64,
+            "capacity {capacity}: every read a hit"
+        );
+        elapsed / reads as f64
+    }
+
+    let small = per_read_micros(64);
+    let large = per_read_micros(4096);
+    let ratio = large / small.max(f64::MIN_POSITIVE);
+    assert!(
+        ratio < 8.0,
+        "a cached read at capacity 4096 cost {large:.4} us against {small:.4} us at \
+         capacity 64 -- {ratio:.1}x. The per-read cost is growing with the capacity, \
+         which is the O(n) LRU this test exists to keep out: measured at 41x (release) \
+         and 56x (debug) with a linearly-scanned VecDeque, and 1.2x-1.5x with an index \
+         plus an intrusive recency list."
+    );
 }
