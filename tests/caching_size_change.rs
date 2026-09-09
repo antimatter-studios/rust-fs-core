@@ -17,8 +17,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// A device holding 64 real bytes whose *reported* size is whatever was
-/// last stored in the atomic. `BlockRead::size_bytes` carries no stability
-/// contract, so this is a legal implementation of the trait.
+/// last stored in the atomic.
+///
+/// THIS DEVICE BREAKS THE CONTRACT ON PURPOSE. `BlockRead::size_bytes`
+/// does carry a stability contract — see the trait's own documentation,
+/// which this comment used to contradict outright by claiming there was
+/// none — and the point of this fixture is that `CachingDevice` catches a
+/// device violating it rather than trusting it. `caching_device.rs` puts
+/// it the right way round: "this is the device breaking its promise being
+/// caught rather than believed". A device like this one in a real driver
+/// is a defect; here it is the test subject.
 struct ResizingDevice {
     data: Vec<u8>,
     reported: AtomicU64,

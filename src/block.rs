@@ -33,8 +33,35 @@ pub trait BlockRead: Send + Sync {
     ///
     /// An implementation whose length genuinely changes — a file being
     /// appended to, a volume being grown — should be reopened rather than
-    /// reporting a new number through the same handle. Every implementation
-    /// in this crate takes its size once, at construction, for this reason.
+    /// reporting a new number through the same handle.
+    ///
+    /// # What the implementations here actually do
+    ///
+    /// This used to say "every implementation in this crate takes its size
+    /// once, at construction". That was not true of any of the three
+    /// shapes below, and it is the sentence an implementer in a sibling
+    /// crate reads before deciding their own device may report a live
+    /// length. [`crate::caching_device`]'s resizing path and
+    /// `tests/caching_size_change.rs` both used to describe this
+    /// differently again, so the crate said three incompatible things
+    /// about one contract.
+    ///
+    /// - [`crate::FileDevice`] and the slice devices in
+    ///   [`crate::slice`] do take their size once, at construction.
+    /// - [`crate::ReadOnlyDevice`], [`crate::CountingDevice`] and
+    ///   [`crate::CachingDevice`] FORWARD the question to the device they
+    ///   wrap, on every call, and so are exactly as stable as it is. They
+    ///   cannot be more: a wrapper has no way to hold a moving device
+    ///   still. The `Arc<T>`, `Box<T>` and `&T` blanket impls below
+    ///   forward the same way.
+    /// - [`crate::CallbackDevice`] keeps its size in a PUBLIC field, so
+    ///   nothing stops a caller moving it after construction. Stability
+    ///   there is the caller's to keep, not the type's to enforce.
+    ///
+    /// So the contract binds the implementer; it is not something this
+    /// crate's types guarantee on their behalf. `tests/
+    /// size_stability_contract.rs` tests each of these behaviours rather
+    /// than leaving this paragraph to be believed.
     fn size_bytes(&self) -> u64;
 }
 
