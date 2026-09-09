@@ -28,6 +28,7 @@ crate-type = ["staticlib", "rlib"]
 # reaches a consumer of this crate. Same version as the siblings, so the
 # four copies of this guard family stay one answer rather than two.
 saphyr = "0.0.12"
+toml = "1.1.5"
 
 [profile.release]
 lto = true
