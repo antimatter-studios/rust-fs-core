@@ -549,6 +549,12 @@ impl BlockDevice for CachingDevice {
     /// costs a re-read, while keeping them past a write that half
     /// succeeded serves bytes the device no longer holds.
     ///
+    /// That applies to a write the device refused, not to one this type
+    /// refused on the device's behalf. A write rejected because there is
+    /// no writable half, or because the block size is unusable, never
+    /// reaches the device and so cannot have staled anything — those
+    /// return above both sweeps and leave the cache exactly as it was.
+    ///
     /// # AND IT IS INVALIDATED TWICE, ONCE EITHER SIDE OF THE DEVICE
     ///
     /// One sweep before the write is not enough. Between it and the
@@ -566,6 +572,30 @@ impl BlockDevice for CachingDevice {
     /// counter agrees with it and only the second sweep drops what it
     /// inserted.
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
+        // NO WRITABLE HALF IS ANSWERED FIRST, ABOVE EVERY OTHER REFUSAL.
+        //
+        // This used to sit below the block-size check and below the first
+        // sweep, and both positions were wrong for their own reason.
+        //
+        // Below the block-size check, a read-only cache whose block size
+        // came off a damaged disk answered a write with `Error::Custom`
+        // rather than the `Error::ReadOnly` this type's own documentation
+        // promises. That is not a cosmetic difference in the variant name:
+        // `stream.rs` maps `ReadOnly` to `PermissionDenied` and `Custom` to
+        // `io::Error::other`, so a caller branching on `PermissionDenied`
+        // to say "this volume is read-only" reported an uncategorised
+        // failure instead — on a read-only mount of a damaged image, which
+        // is exactly the configuration where a bad block size turns up.
+        //
+        // Below the first sweep, every refused write emptied the region it
+        // was refused for, so a read-only cache paid a re-read for a write
+        // that could never have staled anything.
+        //
+        // The block-size check does NOT move down to meet it. See below.
+        let Some(writable) = self.writable.as_ref() else {
+            return Err(crate::error::Error::ReadOnly);
+        };
+
         // BEFORE EITHER SWEEP, AND THAT ORDERING IS LOAD-BEARING.
         //
         // A sweep cannot be done correctly with a block size of zero:
@@ -576,19 +606,18 @@ impl BlockDevice for CachingDevice {
         // afterwards would therefore do the one thing this type must never
         // do, on the way to reporting an error.
         //
-        // Refusing here is also the only position that cannot break the
-        // two-sweep guarantee above. The invariant that guarantee rests on
-        // is "if the device was written, both sweeps ran" — and returning
-        // at this point means the device is never reached, so nothing was
-        // written and nothing needs sweeping. An early return anywhere
-        // below would skip the second sweep after a write that may have
-        // landed, which is exactly the window that fix closed.
+        // Refusing here is also a position that cannot break the two-sweep
+        // guarantee above. The invariant that guarantee rests on is "if the
+        // device was written, both sweeps ran" — and returning at this point
+        // means the device is never reached, so nothing was written and
+        // nothing needs sweeping. An early return anywhere BELOW would skip
+        // the second sweep after a write that may have landed, which is
+        // exactly the window that fix closed. The read-only refusal above
+        // is safe for the same reason and no other: it too returns before
+        // either sweep and touches neither the cache nor the device.
         self.check_block_size()?;
         let end = offset.saturating_add(buf.len() as u64);
         self.invalidate_for_write(offset, end);
-        let Some(writable) = self.writable.as_ref() else {
-            return Err(crate::error::Error::ReadOnly);
-        };
         let result = writable.write_at(offset, buf);
         // Unconditionally, for the same reason the first sweep is
         // unconditional: a write that failed may still have landed.
