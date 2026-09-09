@@ -75,6 +75,23 @@ const char *fs_core_last_error_message(void);
 
 /* -------------------------------------------------------------------------
  * Device operations. NULL handle → `FS_CORE_NULL_ARG`.
+ *
+ * A NULL argument stashes its own message naming the argument, so the
+ * message never describes an earlier call. That matters most for
+ * `fs_core_device_size_bytes` and `fs_core_device_is_writable`, whose
+ * return values (0, false) are also legitimate answers: the message is
+ * the only thing separating "empty" or "read-only" from "you passed NULL".
+ *
+ * `fs_core_device_close` is the exception, and deliberately: it returns
+ * void, so it can never report anything, and it PRESERVES the current
+ * message rather than clearing it. A caller may therefore free the handle
+ * before reading the error that sent it down the cleanup path:
+ *
+ *     if (fs_core_device_read_at(h, off, buf, len) != FS_CORE_OK) goto fail;
+ *     ...
+ *   fail:
+ *     fs_core_device_close(h);
+ *     log("%s", fs_core_last_error_message());
  * ------------------------------------------------------------------------- */
 
 void              fs_core_device_close(FsCoreDevice *handle);

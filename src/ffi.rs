@@ -78,7 +78,7 @@ pub enum FsCoreErrorCode {
     /// Reserved. Never returned.
     ///
     /// It was meant for a path that is not valid UTF-8, but the one
-    /// function that meets that case — `fs_core_open_file` — returns a
+    /// function that meets that case — `fs_core_file_open` — returns a
     /// POINTER, not a code, so it reports the failure as NULL plus a
     /// message and cannot return this. No other entry point takes a
     /// path.
@@ -211,6 +211,42 @@ where
     }
 }
 
+/// Run a cleanup body — a `close`, a `free` — catching a panic so it
+/// cannot unwind into C, and **leaving the error slot untouched**.
+///
+/// # Why a third guard rather than one of the two above
+///
+/// The other two own the slot, because they have something to say
+/// through it: a status code to explain, or a fallback value that needs
+/// separating from a legitimate answer. A cleanup function that returns
+/// `void` has neither. Running it through [`ffi_guard_or`] therefore
+/// cleared a slot it could never fill, and destroyed the diagnostic in
+/// the ordinary C shape where the free comes before the log — see
+/// [`fs_core_device_close`].
+///
+/// So the rule this restores is that the slot's lifecycle belongs to the
+/// call that can report through it, rather than to whichever helper
+/// happened to wrap the body.
+///
+/// # A panic here is caught and NOT reported, deliberately
+///
+/// There is nowhere to report it. The return type is `()`, so a caller
+/// learns nothing from the call itself, and the slot is the one thing it
+/// is about to read for the *earlier* failure that sent it down the
+/// cleanup path. Overwriting that with a message about the free would
+/// destroy the very diagnostic this exists to preserve, and it is the
+/// earlier error a caller is looking for. Swallowing the panic is the
+/// lesser loss of the two, and it is a choice rather than an oversight.
+///
+/// `AssertUnwindSafe` for the same reason as [`ffi_guard_or`]: the body
+/// touches a handle the caller owns and is not read again on this path.
+pub fn ffi_guard_cleanup<F>(body: F)
+where
+    F: FnOnce(),
+{
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(body));
+}
+
 /// What a caught panic actually said.
 ///
 /// PUBLIC BECAUSE THE OTHER ELEVEN CRATES NEED IT. Each of them guards
@@ -264,12 +300,30 @@ impl FsCoreDevice {
 }
 
 /// Free a device handle. Safe to call with NULL (no-op).
+///
+/// # THIS PRESERVES THE LAST ERROR MESSAGE
+///
+/// It returns `void`, so it can never report anything through the error
+/// slot — and it used to clear the slot anyway, because it went through
+/// [`ffi_guard_or`]. That destroyed the diagnostic in the ordinary C
+/// cleanup shape, where the close comes before the log:
+///
+/// ```c
+/// if (fs_core_device_read_at(h, off, buf, len) != FS_CORE_OK) goto fail;
+/// ...
+/// fail:
+///     fs_core_device_close(h);
+///     log("%s", fs_core_last_error_message());   /* was NULL */
+/// ```
+///
+/// A caller may now close before reading the message. Nothing on this
+/// path reads or writes the slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fs_core_device_close(handle: *mut FsCoreDevice) {
     if handle.is_null() {
         return;
     }
-    ffi_guard_or((), || unsafe {
+    ffi_guard_cleanup(|| unsafe {
         drop(Box::from_raw(handle));
     });
 }
@@ -278,6 +332,11 @@ pub unsafe extern "C" fn fs_core_device_close(handle: *mut FsCoreDevice) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fs_core_device_size_bytes(handle: *const FsCoreDevice) -> u64 {
     if handle.is_null() {
+        // 0 is also what an empty device reports, so the message is the
+        // only thing that separates the two -- and leaving the previous
+        // call's message here explained this answer with something that
+        // happened somewhere else.
+        set_last_error("fs_core_device_size_bytes: handle is null");
         return 0;
     }
     ffi_guard_or(0, || unsafe { (*handle).inner.size_bytes() })
@@ -287,6 +346,8 @@ pub unsafe extern "C" fn fs_core_device_size_bytes(handle: *const FsCoreDevice) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fs_core_device_is_writable(handle: *const FsCoreDevice) -> bool {
     if handle.is_null() {
+        // `false` is also what a perfectly good read-only device reports.
+        set_last_error("fs_core_device_is_writable: handle is null");
         return false;
     }
     ffi_guard_or(false, || unsafe { (*handle).inner.is_writable() })
@@ -306,7 +367,12 @@ pub unsafe extern "C" fn fs_core_device_read_at(
     // so `(NULL, 0)` was undefined behaviour rather than the no-op it
     // looks like -- in a crate that otherwise denies
     // `unsafe_op_in_unsafe_fn`.
-    if handle.is_null() || buf.is_null() {
+    if handle.is_null() {
+        set_last_error("fs_core_device_read_at: handle is null");
+        return FsCoreErrorCode::NullArg;
+    }
+    if buf.is_null() {
+        set_last_error("fs_core_device_read_at: buf is null");
         return FsCoreErrorCode::NullArg;
     }
     ffi_guard(|| {
@@ -325,7 +391,12 @@ pub unsafe extern "C" fn fs_core_device_write_at(
     len: usize,
 ) -> FsCoreErrorCode {
     // Null is refused whatever the length; see `fs_core_device_read_at`.
-    if handle.is_null() || buf.is_null() {
+    if handle.is_null() {
+        set_last_error("fs_core_device_write_at: handle is null");
+        return FsCoreErrorCode::NullArg;
+    }
+    if buf.is_null() {
+        set_last_error("fs_core_device_write_at: buf is null");
         return FsCoreErrorCode::NullArg;
     }
     ffi_guard(|| {
@@ -338,6 +409,7 @@ pub unsafe extern "C" fn fs_core_device_write_at(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fs_core_device_flush(handle: *const FsCoreDevice) -> FsCoreErrorCode {
     if handle.is_null() {
+        set_last_error("fs_core_device_flush: handle is null");
         return FsCoreErrorCode::NullArg;
     }
     ffi_guard(|| unsafe { (*handle).inner.flush() })
@@ -919,6 +991,145 @@ mod panic_message_tests {
             "a call that worked must not leave the previous panic's message in place"
         );
         unsafe { fs_core_device_close(h2) };
+    }
+
+    // ---------------------------------------------------------------------
+    // A null argument explains itself, rather than inheriting whatever the
+    // previous call left behind.
+    //
+    // Every null check returned ABOVE the guard, and the guard is the only
+    // thing that touches the error slot -- so a null-argument call left the
+    // previous call's message readable and a caller attributed something
+    // that happened elsewhere to this call.
+    //
+    // Worst for `size_bytes` and `is_writable`, whose fallbacks are both
+    // legitimate answers: the caller got `0` or `false` AND a confident
+    // explanation of it belonging to a different operation. That is not
+    // "the evidence was thrown away", which this file already argues
+    // against -- it is evidence about something else, substituted.
+    //
+    // The slot is seeded with `set_last_error` rather than by provoking a
+    // real failure. That is exactly what a failed call does to it --
+    // `ffi_guard` sets it the same way -- and it makes "not the earlier
+    // message" an exact comparison rather than a fuzzy one.
+    // ---------------------------------------------------------------------
+
+    /// Distinctive enough that finding it in a message is unambiguous.
+    const SEEDED: &str = "SEEDED-earlier-failure-belonging-to-another-call";
+
+    /// Assert the slot names a null argument and has lost the seed.
+    fn assert_named_null(msg: Option<String>, expect: &str) {
+        let msg = msg.expect("a null argument must leave a message of its own");
+        assert!(
+            msg.contains(expect),
+            "the message must name the null argument ({expect}), got: {msg}"
+        );
+        assert!(
+            !msg.contains(SEEDED),
+            "the previous call's message must not survive to explain this one, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_null_handle_to_size_bytes_names_the_argument() {
+        set_last_error(SEEDED);
+        let size = unsafe { fs_core_device_size_bytes(std::ptr::null()) };
+        assert_eq!(size, 0, "the fallback value is still returned");
+        assert_named_null(last_error(), "fs_core_device_size_bytes: handle is null");
+    }
+
+    #[test]
+    fn a_null_handle_to_is_writable_names_the_argument() {
+        set_last_error(SEEDED);
+        let writable = unsafe { fs_core_device_is_writable(std::ptr::null()) };
+        assert!(!writable, "the fallback value is still returned");
+        assert_named_null(last_error(), "fs_core_device_is_writable: handle is null");
+    }
+
+    #[test]
+    fn a_null_handle_to_flush_names_the_argument() {
+        set_last_error(SEEDED);
+        let rc = unsafe { fs_core_device_flush(std::ptr::null()) };
+        assert_eq!(rc, FsCoreErrorCode::NullArg, "the code is still NullArg");
+        assert_named_null(last_error(), "fs_core_device_flush: handle is null");
+    }
+
+    /// `read_at` has two null arguments, and the message says which.
+    ///
+    /// A code of `NullArg` is honest but says nothing about *what* was
+    /// null, and `fs_core.h` promises a human-readable message for every
+    /// fallible call. Two arms, so neither can pass on the other's back.
+    #[test]
+    fn a_null_argument_to_read_at_names_which_one() {
+        let mut buf = [0u8; 8];
+
+        set_last_error(SEEDED);
+        let rc = unsafe { fs_core_device_read_at(std::ptr::null(), 0, buf.as_mut_ptr(), 8) };
+        assert_eq!(rc, FsCoreErrorCode::NullArg);
+        assert_named_null(last_error(), "fs_core_device_read_at: handle is null");
+
+        // A real handle, a null buffer: the other arm.
+        set_last_error(SEEDED);
+        let h = handle();
+        let rc = unsafe { fs_core_device_read_at(h, 0, std::ptr::null_mut(), 8) };
+        assert_eq!(rc, FsCoreErrorCode::NullArg);
+        assert_named_null(last_error(), "fs_core_device_read_at: buf is null");
+        unsafe { fs_core_device_close(h) };
+    }
+
+    /// Same for `write_at`.
+    #[test]
+    fn a_null_argument_to_write_at_names_which_one() {
+        let buf = [0u8; 8];
+
+        set_last_error(SEEDED);
+        let rc = unsafe { fs_core_device_write_at(std::ptr::null(), 0, buf.as_ptr(), 8) };
+        assert_eq!(rc, FsCoreErrorCode::NullArg);
+        assert_named_null(last_error(), "fs_core_device_write_at: handle is null");
+
+        set_last_error(SEEDED);
+        let h = handle();
+        let rc = unsafe { fs_core_device_write_at(h, 0, std::ptr::null(), 8) };
+        assert_eq!(rc, FsCoreErrorCode::NullArg);
+        assert_named_null(last_error(), "fs_core_device_write_at: buf is null");
+        unsafe { fs_core_device_close(h) };
+    }
+
+    /// CLOSE MUST NOT DESTROY THE MESSAGE A CALLER IS ABOUT TO READ.
+    ///
+    /// `close` returns `void`, so it can never fill the error slot — and it
+    /// used to clear it anyway, by going through the guard that owns the
+    /// slot for calls that *can* report. That breaks the ordinary C cleanup
+    /// shape, where the free comes before the log:
+    ///
+    /// ```c
+    /// fail:
+    ///     fs_core_device_close(h);
+    ///     log("%s", fs_core_last_error_message());   /* was NULL */
+    /// ```
+    #[test]
+    fn close_preserves_the_message_a_caller_is_about_to_read() {
+        set_last_error(SEEDED);
+        let h = handle();
+        unsafe { fs_core_device_close(h) };
+        let msg = last_error().expect("close must not destroy the last error");
+        assert!(
+            msg.contains(SEEDED),
+            "the diagnostic a caller closes before reading must survive, got: {msg}"
+        );
+    }
+
+    /// The control for the one above: closing NULL is a no-op and always
+    /// preserved the slot, because it returns before any guard. It passes
+    /// before and after the fix, and it is here so that
+    /// `close_preserves_...` failing points at the guard rather than at
+    /// something about handles.
+    #[test]
+    fn closing_null_also_preserves_the_message() {
+        set_last_error(SEEDED);
+        unsafe { fs_core_device_close(std::ptr::null_mut()) };
+        let msg = last_error().expect("a no-op must not clear the slot");
+        assert!(msg.contains(SEEDED));
     }
 }
 
