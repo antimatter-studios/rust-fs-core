@@ -120,9 +120,43 @@ impl BlockRead for FileDevice {
 }
 
 impl BlockDevice for FileDevice {
+    /// A write past the end is refused, not an extension.
+    ///
+    /// `write_all` at a seeked offset EXTENDS a file, and this method
+    /// had no bound of its own, so a write straddling the end grew the
+    /// backing store while `size_bytes` went on reporting the length
+    /// taken at construction -- measured on a 4096-byte file:
+    /// `write_at(4094, 8 bytes)` returned `Ok`, the file became 4102
+    /// bytes, `size_bytes()` stayed 4096, and `read_at(4096, 6)` then
+    /// handed those bytes back. The two halves of one device disagreed
+    /// about where it ended, and a caller bounding its reads by
+    /// `size_bytes` -- which is what [`crate::CachingDevice`] does,
+    /// clamping every block it fetches -- could never reach them.
+    ///
+    /// `RwBytes` in this crate's own test devices already refuses the
+    /// same operation, commenting "a device is not a `Vec`", and the
+    /// slice adapters in [`crate::slice`] clamp their window
+    /// specifically because this method did not:
+    /// `slice_rw_length_is_clamped_and_a_write_past_it_does_not_grow_the_image`
+    /// names the file's length on disk as its oracle. This is the same
+    /// rule one layer down, where it was missing.
+    ///
+    /// The alternative -- letting the size move and reopening -- is
+    /// what [`BlockRead::size_bytes`]'s contract forbids. See
+    /// rust-fs-core#70.
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         if !self.writable {
             return Err(Error::ReadOnly);
+        }
+        // `checked_add` because a caller-supplied offset near `u64::MAX`
+        // would otherwise wrap and land back inside the device.
+        let end = offset.checked_add(buf.len() as u64);
+        if end.is_none_or(|end| end > self.size) {
+            return Err(Error::OutOfBounds {
+                offset,
+                len: buf.len() as u64,
+                size: self.size,
+            });
         }
         let _guard = self.write_lock.lock().unwrap();
         let mut f = &self.file;
