@@ -10,7 +10,15 @@ driver and disk-image reader plugs into.
 - `FileDevice` — backed by a regular file, optional read-only
 - `CallbackDevice` — backed by host-process-owned callbacks (FFI from
   Swift / Go / C++)
-- `CachingDevice` — LRU read-cache decorator wrapping any `BlockDevice`
+- `CachingDevice` — LRU read-cache decorator over a `BlockRead`, and over a
+  `BlockDevice` when the caller has one to give (`new` vs `read_only`)
+- `CountingDevice` — counts the reads and the bytes a driver asks its device
+  for, so drivers can be compared against each other and against themselves
+  later by one instrument rather than several look-alike ones
+- `ReadOnlyDevice` — rejects writes whatever the inner type allows
+- `SliceReader` / `OwnedSlice` / `OwnedRwSlice` — a sub-range of a device
+  presented as a device, for partition walkers and container readers
+- `BlockReadStreamer` — `std::io::Read + Seek` over any `BlockRead`
 - A unified `Error` type with a `Custom(String)` escape hatch so each
   driver can lift its own internal errors to the trait boundary
 
@@ -39,6 +47,7 @@ src/
   file_device.rs      FileDevice (backed by std::fs::File)
   callback_device.rs  CallbackDevice (FFI-friendly)
   caching_device.rs   CachingDevice (LRU decorator)
+  counting_device.rs  CountingDevice (counts reads + bytes asked for)
   slice.rs            SliceReader / OwnedSlice / OwnedRwSlice
   readonly.rs         ReadOnlyDevice (rejects writes whatever the inner type allows)
   stream.rs           BlockReadStreamer (std::io::Read + Seek over a BlockRead)
@@ -54,9 +63,12 @@ Planned additions (not yet implemented):
 - `Logger` hook — pluggable `set_logger(callback)` so consuming crates
   can route diagnostics to a host-provided sink without each crate
   hard-coding a logging dependency.
-- `IoStats` hook — counters for reads/writes, bytes-read/bytes-written,
-  cache hit rate. `CachingDevice` already exposes some of these
-  internally; the plan is to generalise across every adapter.
+- `IoStats` hook — the **write** side of the counters, and a hit rate
+  generalised beyond `CachingDevice::stats`. The read side has shipped:
+  `CountingDevice` counts reads and bytes-read for any `BlockRead`, and
+  `CachingDevice::stats` reports its own hits and misses. What is left is
+  writes/bytes-written, and one accessor that reads the same way across
+  every adapter rather than per type.
 
 ## License
 
