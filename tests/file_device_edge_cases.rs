@@ -143,15 +143,66 @@ fn open_ro_then_flush_is_noop() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// RENAMED, BECAUSE IT NEVER TESTED THE FALLBACK.
+///
+/// `tmp_image` creates a fresh writable file, so `open_rw` succeeds and the
+/// fallback arm is never entered. Under its old name —
+/// `open_best_effort_falls_back_to_readonly`, one underscore away from the
+/// real `open_best_effort_falls_back_to_read_only` in `src/file_device.rs`
+/// — it passed with the fallback arm deleted outright, so a reader
+/// scanning names for coverage of that branch found two matches and the
+/// misleading one first.
+///
+/// What it actually checks is that the best-effort open returns a usable
+/// device for an ordinary writable file, which is worth keeping under a
+/// name that says so. The fallback itself is covered by
+/// `open_best_effort_falls_back_to_read_only_on_an_unwritable_file` below.
 #[test]
-fn open_best_effort_falls_back_to_readonly() {
-    // For a brand-new file, both rw and ro will succeed; the contract is
-    // that open_best_effort returns something usable.
+fn open_best_effort_returns_a_usable_device() {
     let path = tmp_image(&[42u8; 16]);
     let dev = FileDevice::open_best_effort(&path).unwrap();
     let mut buf = [0u8; 1];
     dev.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, [42]);
+    // The device is writable, which is why this is NOT the fallback case.
+    assert!(
+        dev.is_writable(),
+        "a fresh file opens read-write, so this exercises the rw arm"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// THE FALLBACK, ACTUALLY EXERCISED.
+///
+/// `open_rw` has to fail for the fallback to run, and the only portable way
+/// to make it fail on a file that exists is to take away write permission.
+/// `src/file_device.rs` has a unit test doing exactly this; this is the
+/// integration-level counterpart, in the file a reader looks in first for
+/// end-to-end behaviour.
+///
+/// Unix only, because the 0o444 mode is what makes `open_rw` fail.
+#[test]
+#[cfg(unix)]
+fn open_best_effort_falls_back_to_read_only_on_an_unwritable_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = tmp_image(&[7u8; 16]);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    let dev = FileDevice::open_best_effort(&path).unwrap();
+
+    // The assertion the old test never made, and the one that fails if the
+    // fallback arm is removed.
+    assert!(
+        !dev.is_writable(),
+        "an unwritable file must come back through the read-only fallback"
+    );
+    // And the fallback still yields a device that works.
+    let mut buf = [0u8; 4];
+    dev.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, [7; 4]);
+    assert!(matches!(dev.write_at(0, &[0u8; 4]), Err(Error::ReadOnly)));
+
     let _ = std::fs::remove_file(&path);
 }
 

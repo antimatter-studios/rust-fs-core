@@ -139,11 +139,23 @@ fn stream_over_readonly_over_file_reads_match_writes_denied() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// RENAMED, BECAUSE THE OLD NAME CLAIMED SOMETHING NOTHING ASSERTED — AND
+/// SOMETHING THAT WOULD BE A DEFECT IF IT WERE TRUE.
+///
+/// It was `multi_slice_partition_walk_does_not_share_cache_entries_across_slices`,
+/// and the body never called `stats()`, never counted a device read, and
+/// never looked at the cache at all. Both slices sit on ONE cache over ONE
+/// device, so sharing entries is correct and desirable: a test that
+/// succeeded in proving they do not share would be proving a bug.
+///
+/// The two claims worth making are both made here. Sharing is asserted
+/// through `stats()` — a second slice over the same window reads no new
+/// blocks from the device — and window isolation is asserted through the
+/// bytes, which is what the original body actually checked.
 #[test]
-fn multi_slice_partition_walk_does_not_share_cache_entries_across_slices() {
-    // Simulate partition-walker: cached file as the bottom, then two
-    // OwnedSlice windows pointing at disjoint regions. Each slice should
-    // read its region correctly without confusing the cache.
+fn slices_over_one_cache_share_its_entries_and_read_only_their_own_window() {
+    // Simulate a partition walker: a cached file at the bottom, then
+    // OwnedSlice windows over it.
     let bytes: Vec<u8> = (0..(16 * 1024)).map(|i| (i % 211) as u8).collect();
     let path = tmp_image(&bytes);
 
@@ -153,15 +165,47 @@ fn multi_slice_partition_walk_does_not_share_cache_entries_across_slices() {
     let cached_read: Arc<dyn BlockRead> = cached.clone();
 
     let p1 = OwnedSlice::new(cached_read.clone(), 0, 4 * 1024);
-    let p2 = OwnedSlice::new(cached_read, 8 * 1024, 4 * 1024);
+    let p2 = OwnedSlice::new(cached_read.clone(), 8 * 1024, 4 * 1024);
 
     let mut buf1 = vec![0u8; 4 * 1024];
     let mut buf2 = vec![0u8; 4 * 1024];
     p1.read_at(0, &mut buf1).unwrap();
     p2.read_at(0, &mut buf2).unwrap();
 
+    // ISOLATION: each window returns its own region and not the other's.
     assert_eq!(buf1, &bytes[..4 * 1024]);
     assert_eq!(buf2, &bytes[8 * 1024..12 * 1024]);
+
+    // AND THE READS WENT THROUGH THE CACHE AT ALL. Without this the
+    // sharing assertion below could be satisfied by a stack that never
+    // cached anything: zero new misses is also what bypassing looks like.
+    let (hits, misses) = cached.stats();
+    assert_eq!(
+        (hits, misses),
+        (0, 8),
+        "two 4 KiB reads over 1 KiB blocks are 8 first-time misses and no \
+         hits; got {hits} hits and {misses} misses"
+    );
+
+    // SHARING: a third slice over the SAME window as p1 must be served
+    // entirely from entries p1 brought in. This is the assertion the old
+    // name denied, and the behaviour that is actually correct here.
+    let p3 = OwnedSlice::new(cached_read, 0, 4 * 1024);
+    let mut buf3 = vec![0u8; 4 * 1024];
+    p3.read_at(0, &mut buf3).unwrap();
+    assert_eq!(buf3, &bytes[..4 * 1024]);
+
+    let (hits_after, misses_after) = cached.stats();
+    assert_eq!(
+        misses_after, misses,
+        "a slice over an already-cached window must reach the device for \
+         nothing; misses went {misses} -> {misses_after}"
+    );
+    assert_eq!(
+        hits_after,
+        hits + 4,
+        "and its four blocks must all be hits; hits went {hits} -> {hits_after}"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
