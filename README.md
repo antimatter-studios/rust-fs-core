@@ -70,6 +70,36 @@ Planned additions (not yet implemented):
   writes/bytes-written, and one accessor that reads the same way across
   every adapter rather than per type.
 
+## Git hooks
+
+Install once per clone:
+
+```sh
+./scripts/install-hooks.sh
+```
+
+`core.hooksPath` is local-only config, so it does not travel with a clone and
+every fresh checkout needs this again.
+
+### Why the dependency-pinning guard looks half-idle here
+
+`.githooks/pre-commit.d/rust-deps-pinned.sh` is the same file every sibling
+project runs, and part of it has nothing to do in this one. That is expected
+rather than a misconfiguration, and it is recorded here so nobody has to work
+it out twice.
+
+The guard does two jobs. It refuses a workflow that clones a **sibling
+project** at a floating ref instead of a tag — and this crate sits at the
+bottom of the dependency graph with an empty `[dependencies]`, so there is no
+sibling to pin and that half never fires. It also refuses a missing or drifted
+`Cargo.lock` and runs `cargo metadata --locked` as a stale-lock check, and
+that half applies in full, because this crate does track its lockfile.
+
+The file is kept byte-identical to the siblings deliberately. The value of a
+shared guard is that one audit covers every repository, so a local edit to
+trim the idle half would cost more than the idle half does. If the guard is
+updated, copy the new version across wholesale rather than merging it here.
+
 ## License
 
 MIT.
