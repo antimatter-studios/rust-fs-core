@@ -58,8 +58,10 @@ pub enum FsCoreErrorCode {
     /// A request refused up front because its range lies outside the
     /// device's declared size; nothing was transferred.
     ///
-    /// This crate returns it only for a **write** past the end of an RW
-    /// slice. It reaches **reads** from sister crates whose container
+    /// This crate returns it for a **write** past the end of an RW
+    /// slice, and for a write past the end of a file-backed device --
+    /// both refused up front, nothing transferred. It reaches **reads**
+    /// from sister crates whose container
     /// declares a virtual size (the `img-*` readers), and from this
     /// crate's caching / read-only / slice wrappers when they forward
     /// such a parent's error. A C consumer that only wants to know "the
