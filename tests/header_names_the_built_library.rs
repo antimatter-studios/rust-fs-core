@@ -1,20 +1,30 @@
 //! The header names the library the build actually produces.
 //!
-//! `include/fs_core.h` said "Link with libam_fs_core.a" for as long as
-//! the file existed, and cargo has never produced that name: `[lib]
-//! name` is `fs_core`, so the artefact is `libfs_core.a`. A C consumer
-//! following the first paragraph of the first file they read got a
-//! linker error for a library nobody builds.
+//! `include/fs_core.h` said "Link with libam_fs_core.a" for as long as the file
+//! existed, and cargo has never produced that name: `[lib] name` is
+//! `fs_core`, so the artefact is `libfs_core.a` — which is exactly what
+//! `chores.yml` copies. A C consumer following the header got a linker
+//! error for a library nobody builds.
 //!
-//! Six of the twelve constellation repositories had the same mismatch
-//! while five had it right and one named no library at all, so it is
-//! not a naming rule anybody can apply once — it is a thing that drifts
-//! and therefore wants a check.
-//!
-//! **The expected name is DERIVED, not written down here.** It comes
-//! from `Cargo.toml`'s `[lib] name`, which is what decides the artefact
-//! name, so renaming the library fails this test instead of silently
+//! **The expected name is DERIVED from `Cargo.toml`, not written down
+//! here**, so renaming the library fails this test rather than silently
 //! making the header wrong again.
+//!
+//! # Why `toml` and not a hand parse
+//!
+//! The first version of this file hand-parsed `Cargo.toml` by scanning
+//! lines, and rejected three spellings cargo accepts: `name = 'fs_core'`
+//! in single quotes, `name = "fs_core" # comment` with a trailing
+//! comment, and `[lib] # comment` — the last making the test claim the
+//! manifest declares no library at all. A guard that a legal edit to the file it
+//! guards can break is one somebody deletes rather than fixes.
+//!
+//! A guard asserting something about a structured file must PARSE it.
+//! `toml` is a dev-dependency only, so nothing reaches a consumer.
+//!
+//! The C header is the exception, and deliberately: there is no parser
+//! for it here, so `libraries_named` scans. That is a stated limit
+//! rather than a quiet one.
 
 use std::path::Path;
 
@@ -23,30 +33,14 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// `[lib] name` out of `Cargo.toml`.
-///
-/// A hand parse rather than a toml dependency: this crate deliberately
-/// has none, and a test is not a reason to acquire one.
+/// `[lib] name`, parsed.
 fn lib_name(cargo_toml: &str) -> Option<String> {
-    let mut in_lib = false;
-    for line in cargo_toml.lines() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            in_lib = t == "[lib]";
-            continue;
-        }
-        if !in_lib {
-            continue;
-        }
-        if let Some(rest) = t.strip_prefix("name") {
-            let rest = rest.trim_start().strip_prefix('=')?.trim();
-            return Some(rest.trim_matches('"').to_owned());
-        }
-    }
-    None
+    let doc: toml::Value = toml::from_str(cargo_toml).ok()?;
+    Some(doc.get("lib")?.get("name")?.as_str()?.to_owned())
 }
 
-/// Every `lib<something>.a` the header mentions.
+/// Every `lib<something>.a` the header mentions. A scan, because a C
+/// header has no parser here — see the module note.
 fn libraries_named(header: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in header.lines() {
@@ -72,12 +66,23 @@ fn the_header_tells_consumers_to_link_the_library_that_is_built() {
     let name = lib_name(&cargo).expect("Cargo.toml declares [lib] name");
     let want = format!("lib{name}.a");
 
-    let header = read(&format!("include/{name}.h"));
+    // Named explicitly: a missing header here almost always means the
+    // manifest and the shipped files have drifted apart, and "No such
+    // file" on its own does not say so.
+    let header_path = format!("include/{name}.h");
+    let full = Path::new(env!("CARGO_MANIFEST_DIR")).join(&header_path);
+    assert!(
+        full.exists(),
+        "Cargo.toml declares [lib] name {name:?}, so the build produces {want} and \
+         the C header for it should be {header_path} -- which does not exist. The \
+         manifest and the shipped headers have drifted apart."
+    );
+    let header = read(&header_path);
     let named = libraries_named(&header);
 
-    // Asserted before it is compared: a parse that found nothing would
-    // otherwise make the loop below pass over an empty list, which is
-    // the shape of defect this file exists for.
+    // Asserted before it is compared: a scan that found nothing would
+    // make the loop below pass over an empty list, which is the shape
+    // of defect this file exists for.
     assert!(
         !named.is_empty(),
         "include/{name}.h names no lib*.a at all, so it gives a C consumer no link \
@@ -94,30 +99,55 @@ fn the_header_tells_consumers_to_link_the_library_that_is_built() {
     }
 }
 
-/// The `[lib] name` parse reads the right section.
+/// THE SPELLINGS A HAND PARSE GOT WRONG.
+///
+/// Every one of these is valid TOML that cargo accepts, and every one
+/// of them broke the previous version of this file — two by reading a
+/// mangled name, one by concluding there was no `[lib]` section. They
+/// are here as acceptance cases rather than rejection cases, because
+/// the fix has to be shown to ACCEPT what it used to refuse; a parser
+/// that merely still handles the plain spelling proves nothing.
+#[test]
+fn the_lib_name_is_parsed_rather_than_scanned() {
+    let plain = "[package]\nname = \"am-fs-core\"\n\n[lib]\nname = \"fs_core\"\n";
+    let single_quoted = "[package]\nname = \"am-fs-core\"\n\n[lib]\nname = 'fs_core'\n";
+    let trailing_comment =
+        "[package]\nname = \"am-fs-core\"\n\n[lib]\nname = \"fs_core\" # the exported ABI name\n";
+    let commented_section =
+        "[package]\nname = \"am-fs-core\"\n\n[lib] # the staticlib consumers link\nname = \"fs_core\"\n";
+
+    for (what, toml) in [
+        ("the plain spelling", plain),
+        ("a single-quoted string", single_quoted),
+        ("a trailing comment", trailing_comment),
+        ("a comment on the section header", commented_section),
+    ] {
+        assert_eq!(
+            lib_name(toml).as_deref(),
+            Some("fs_core"),
+            "{what} is valid TOML and cargo accepts it, so this guard must too"
+        );
+    }
+}
+
+/// The package name is not the library name.
 #[test]
 fn the_lib_name_comes_from_the_lib_section_and_not_the_package() {
-    let toml = "\
-[package]
-name = \"am-fs-core\"
-version = \"0.2.10\"
-
-[lib]
-name = \"fs_core\"
-crate-type = [\"staticlib\", \"rlib\"]
-";
+    let toml = "[package]\nname = \"am-fs-core\"\nversion = \"0.2.10\"\n\n\
+                [lib]\nname = \"fs_core\"\ncrate-type = [\"staticlib\", \"rlib\"]\n";
     assert_eq!(
         lib_name(toml).as_deref(),
         Some("fs_core"),
-        "the package name is not the library name, and using it would look for \
-         libam-fs-core.a"
+        "using the package name would look for libam-fs-core.a"
     );
+    // And a manifest with no [lib] section has no library name to give.
+    assert_eq!(lib_name("[package]\nname = \"am-fs-core\"\n"), None);
 }
 
 /// The header scan finds a library name wherever it sits in a line.
 #[test]
 fn the_header_scan_finds_library_names_in_prose() {
-    let header = " * Link with libfs_core.a (or its sister-crate equivalent)\n";
+    let header = " * Link with libfs_core.a (or its sister-crate equivalent that\n";
     assert_eq!(libraries_named(header), vec!["libfs_core.a"]);
 
     // The exact defect, and the near-miss that has to stay distinct.
