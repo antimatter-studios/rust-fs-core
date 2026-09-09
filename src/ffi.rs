@@ -881,6 +881,162 @@ mod tests {
         let _ = StdArc::new(StdMutex::new(0u8));
     }
 
+    /// The last error as text, or `None`. Read directly rather than
+    /// through `panic_message_tests::last_error`, which is a different
+    /// module.
+    fn cb_last_error() -> Option<String> {
+        let p = fs_core_last_error_message();
+        if p.is_null() {
+            return None;
+        }
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    /// THE THIRD COPY OF THE BOUNDS RULE, AND THE ONE NOTHING HELD.
+    ///
+    /// `tests/common/mod.rs` states the standard this crate works to:
+    /// the rule is written twice, so both copies carry a test that pins
+    /// it. #84 fixed a THIRD copy -- these two trampolines -- and gave
+    /// it none. Reverting both to the pre-fix arithmetic left
+    /// `cargo test --locked --lib` at 92 passed, 0 failed, and `--lib`
+    /// is the complete check: they are `#[cfg(test)]` items in the lib
+    /// target, so no integration test can reach them.
+    ///
+    /// # What the reverted arithmetic actually does, measured
+    ///
+    /// Not what I first wrote here. `ffi_guard` wraps the call in
+    /// `catch_unwind`, so the obvious expectation is that an overflow
+    /// panic returns `FsCoreErrorCode::Panic`. It does not: a
+    /// trampoline is `extern "C"`, panicking out of one is
+    /// non-unwinding, and the process aborts before any code is
+    /// returned. With `t_read` reverted, `cargo test --locked --lib`
+    /// gives
+    ///
+    /// ```text
+    /// thread caused non-unwinding panic. aborting.
+    /// process didn't exit successfully: ... (signal: 6, SIGABRT)
+    /// EXIT=101, and NO `... FAILED` line for any test
+    /// ```
+    ///
+    /// So the control produces a crash rather than a failure, which is
+    /// why the exit status is the thing to read: counting `test
+    /// result:` lines cannot see an aborted binary.
+    ///
+    /// # Why the assertion is still about the MESSAGE
+    ///
+    /// The abort makes the revert impossible to miss, but it is not
+    /// what these assertions are for. `ffi_guard` turns any refusal
+    /// into a non-`Ok` code, so "not Ok" alone would also be satisfied
+    /// by the wrapper refusing before the trampoline was ever called --
+    /// a test that passes without exercising the copy it exists to
+    /// pin. `callback read returned 5` is the trampoline's own
+    /// out-of-bounds path and nothing else produces it. `Panic` is
+    /// excluded too, for the case where a future edit makes the
+    /// unwinding reachable.
+    #[test]
+    fn a_callback_read_at_a_wild_offset_is_refused_rather_than_panicking() {
+        let mut st = Box::new(CbState {
+            data: vec![0x5Au8; 32],
+            flushed: 0,
+        });
+        let ctx = &mut *st as *mut CbState as *mut c_void;
+        let cfg = FsCoreCallbackCfg {
+            read: Some(t_read),
+            write: Some(t_write),
+            flush: Some(t_flush),
+            ctx,
+            size: 32,
+        };
+        let h = unsafe { fs_core_device_from_callbacks(&cfg) };
+        assert!(!h.is_null());
+
+        // Three shapes, and the first two are the ones the arithmetic
+        // used to get wrong: an offset that is itself past every
+        // addressable byte, and an offset whose sum with the length
+        // wraps. The third is the ordinary past-end read, which the
+        // pre-fix code also handled -- it is here so a guard that
+        // refused everything would not look like a pass.
+        for (what, offset, want) in [
+            ("the very top of the address space", u64::MAX, 8usize),
+            ("an offset whose sum with len wraps", u64::MAX - 2, 8usize),
+            ("an ordinary past-end read", 64u64, 8usize),
+        ] {
+            let mut buf = [0u8; 8];
+            let rc = unsafe { fs_core_device_read_at(h, offset, buf.as_mut_ptr(), want) };
+            assert_ne!(
+                rc,
+                FsCoreErrorCode::Panic,
+                "{what}: the trampoline panicked instead of refusing; \
+                 last error was {:?}",
+                cb_last_error()
+            );
+            assert_ne!(rc, FsCoreErrorCode::Ok, "{what}: must not succeed");
+            let msg = cb_last_error().unwrap_or_default();
+            assert!(
+                msg.contains("callback read returned 5"),
+                "{what}: the refusal must come from the trampoline's own \
+                 out-of-bounds path, not from a panic caught by ffi_guard. \
+                 last error was {msg:?}"
+            );
+        }
+        unsafe { fs_core_device_close(h) };
+    }
+
+    /// The write half. `t_write` is the copy most easily forgotten, and
+    /// the one that would corrupt rather than merely panic.
+    #[test]
+    fn a_callback_write_at_a_wild_offset_is_refused_rather_than_panicking() {
+        let mut st = Box::new(CbState {
+            data: vec![0x5Au8; 32],
+            flushed: 0,
+        });
+        let ctx = &mut *st as *mut CbState as *mut c_void;
+        let cfg = FsCoreCallbackCfg {
+            read: Some(t_read),
+            write: Some(t_write),
+            flush: Some(t_flush),
+            ctx,
+            size: 32,
+        };
+        let h = unsafe { fs_core_device_from_callbacks(&cfg) };
+        assert!(!h.is_null());
+
+        let payload = [0xEEu8; 8];
+        for (what, offset) in [
+            ("the very top of the address space", u64::MAX),
+            ("an offset whose sum with len wraps", u64::MAX - 2),
+            ("an ordinary past-end write", 64u64),
+        ] {
+            let rc = unsafe { fs_core_device_write_at(h, offset, payload.as_ptr(), payload.len()) };
+            assert_ne!(
+                rc,
+                FsCoreErrorCode::Panic,
+                "{what}: the trampoline panicked instead of refusing; \
+                 last error was {:?}",
+                cb_last_error()
+            );
+            assert_ne!(rc, FsCoreErrorCode::Ok, "{what}: must not succeed");
+            let msg = cb_last_error().unwrap_or_default();
+            assert!(
+                msg.contains("callback write returned 5"),
+                "{what}: the refusal must come from the trampoline's own \
+                 out-of-bounds path, not from a panic caught by ffi_guard. \
+                 last error was {msg:?}"
+            );
+        }
+        unsafe { fs_core_device_close(h) };
+        // Nothing was written anywhere: a refused write must not have
+        // narrowed a wild offset into a plausible one on the way out.
+        assert!(
+            st.data.iter().all(|b| *b == 0x5A),
+            "a refused write modified the backing buffer"
+        );
+    }
+
     #[test]
     fn callback_device_null_cfg_returns_null() {
         let h = unsafe { fs_core_device_from_callbacks(ptr::null()) };
