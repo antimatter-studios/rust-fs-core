@@ -15,6 +15,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+mod common;
+
 /// A device that parks, once, inside whichever operation it was armed for,
 /// after announcing that it has got that far.
 ///
@@ -43,16 +45,7 @@ impl BlockRead for ParkingDevice {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         {
             let d = self.data.lock().unwrap();
-            let start = offset as usize;
-            let end = start + buf.len();
-            if end > d.len() {
-                return Err(Error::ShortRead {
-                    offset,
-                    want: buf.len(),
-                    got: d.len().saturating_sub(start),
-                });
-            }
-            buf.copy_from_slice(&d[start..end]);
+            common::read_into(&d, offset, buf)?;
         }
         // The data lock is released before parking, so the writer below can
         // still reach the device.
@@ -76,17 +69,15 @@ impl BlockDevice for ParkingDevice {
             self.park();
         }
         let mut d = self.data.lock().unwrap();
-        let start = offset as usize;
-        let end = start + buf.len();
-        if end > d.len() {
-            return Err(Error::OutOfBounds {
-                offset,
-                len: buf.len() as u64,
-                size: d.len() as u64,
-            });
-        }
-        d[start..end].copy_from_slice(buf);
-        Ok(())
+        // This one keeps its own error variant -- a past-end write here
+        // is `OutOfBounds`, not `ShortRead` -- but not its own
+        // arithmetic, which is what overflowed.
+        let size = d.len() as u64;
+        common::write_from(&mut d, offset, buf).map_err(|_| Error::OutOfBounds {
+            offset,
+            len: buf.len() as u64,
+            size,
+        })
     }
 
     fn is_writable(&self) -> bool {

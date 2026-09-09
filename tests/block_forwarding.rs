@@ -3,6 +3,8 @@
 use fs_core::{BlockDevice, BlockRead, Error, Result};
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 struct Tracker {
     bytes: Mutex<Vec<u8>>,
     reads: Mutex<u64>,
@@ -25,9 +27,7 @@ impl BlockRead for Tracker {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         *self.reads.lock().unwrap() += 1;
         let b = self.bytes.lock().unwrap();
-        let s = offset as usize;
-        buf.copy_from_slice(&b[s..s + buf.len()]);
-        Ok(())
+        common::read_into(&b, offset, buf)
     }
     fn size_bytes(&self) -> u64 {
         self.bytes.lock().unwrap().len() as u64
@@ -40,9 +40,7 @@ impl BlockDevice for Tracker {
         }
         *self.writes.lock().unwrap() += 1;
         let mut b = self.bytes.lock().unwrap();
-        let s = offset as usize;
-        b[s..s + buf.len()].copy_from_slice(buf);
-        Ok(())
+        common::write_from(&mut b, offset, buf)
     }
     fn flush(&self) -> Result<()> {
         *self.flushes.lock().unwrap() += 1;

@@ -17,32 +17,7 @@ use fs_core::CachingDevice;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-mod common {
-    use fs_core::block::BlockRead;
-    use fs_core::error::{Error, Result};
-
-    pub struct Bytes(pub Vec<u8>);
-
-    impl BlockRead for Bytes {
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            let start = usize::try_from(offset).unwrap_or(usize::MAX);
-            let end = start.saturating_add(buf.len());
-            if end > self.0.len() {
-                return Err(Error::ShortRead {
-                    offset,
-                    want: buf.len(),
-                    got: self.0.len().saturating_sub(start),
-                });
-            }
-            buf.copy_from_slice(&self.0[start..end]);
-            Ok(())
-        }
-
-        fn size_bytes(&self) -> u64 {
-            self.0.len() as u64
-        }
-    }
-}
+mod common;
 
 fn backing() -> Arc<common::Bytes> {
     Arc::new(common::Bytes((0..4096u32).map(|i| i as u8).collect()))
@@ -95,17 +70,7 @@ struct CountingRw {
 impl BlockRead for CountingRw {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::error::Result<()> {
         let d = self.data.lock().unwrap();
-        let start = offset as usize;
-        let end = start.saturating_add(buf.len());
-        if end > d.len() {
-            return Err(fs_core::error::Error::ShortRead {
-                offset,
-                want: buf.len(),
-                got: d.len().saturating_sub(start),
-            });
-        }
-        buf.copy_from_slice(&d[start..end]);
-        Ok(())
+        common::read_into(&d, offset, buf)
     }
 
     fn size_bytes(&self) -> u64 {
@@ -117,9 +82,7 @@ impl BlockDevice for CountingRw {
     fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::error::Result<()> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         let mut d = self.data.lock().unwrap();
-        let start = offset as usize;
-        d[start..start + buf.len()].copy_from_slice(buf);
-        Ok(())
+        common::write_from(&mut d, offset, buf)
     }
 
     fn is_writable(&self) -> bool {
@@ -195,17 +158,7 @@ struct CountingRo {
 impl BlockRead for CountingRo {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::error::Result<()> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        let start = offset as usize;
-        let end = start.saturating_add(buf.len());
-        if end > self.data.len() {
-            return Err(fs_core::error::Error::ShortRead {
-                offset,
-                want: buf.len(),
-                got: self.data.len().saturating_sub(start),
-            });
-        }
-        buf.copy_from_slice(&self.data[start..end]);
-        Ok(())
+        common::read_into(&self.data, offset, buf)
     }
 
     fn size_bytes(&self) -> u64 {
