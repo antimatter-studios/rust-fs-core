@@ -770,10 +770,13 @@ mod tests {
     /// Trampoline that pulls a `*mut CbState` out of the opaque ctx.
     unsafe extern "C" fn t_read(ctx: *mut c_void, offset: u64, buf: *mut u8, len: usize) -> c_int {
         let st = unsafe { &mut *(ctx as *mut CbState) };
-        let off = offset as usize;
-        if off + len > st.data.len() {
+        // `off + len` was computed BEFORE the bounds check that exists
+        // to refuse a past-end range, so a wild offset panicked here
+        // instead of returning 5 -- the same pair of lines, and the
+        // same defect, as the doubles in `test_device`.
+        let Ok((off, _)) = crate::test_device::range_within(st.data.len(), offset, len) else {
             return 5; // out of bounds
-        }
+        };
         unsafe {
             std::ptr::copy_nonoverlapping(st.data.as_ptr().add(off), buf, len);
         }
@@ -786,10 +789,9 @@ mod tests {
         len: usize,
     ) -> c_int {
         let st = unsafe { &mut *(ctx as *mut CbState) };
-        let off = offset as usize;
-        if off + len > st.data.len() {
+        let Ok((off, _)) = crate::test_device::range_within(st.data.len(), offset, len) else {
             return 5;
-        }
+        };
         unsafe {
             std::ptr::copy_nonoverlapping(buf, st.data.as_mut_ptr().add(off), len);
         }

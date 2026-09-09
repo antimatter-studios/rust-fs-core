@@ -30,6 +30,8 @@ use fs_core::{BlockRead, CachingDevice, Result};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+mod common;
+
 const BS: u64 = 8;
 /// The block every racer asks for.
 const TARGET: u64 = 24;
@@ -141,11 +143,10 @@ impl BlockRead for GatedDevice {
         if offset == self.target {
             self.gate.park();
         }
-        let start = offset as usize;
-        let end = start + buf.len();
-        assert!(end <= self.bytes.len(), "the test never reads past the end");
-        buf.copy_from_slice(&self.bytes[start..end]);
-        Ok(())
+        // A past-end read is a `ShortRead` rather than a panic here;
+        // `read_block` turns it into one at the call site, which is
+        // where the offset that caused it can be printed.
+        common::read_into(&self.bytes, offset, buf)
     }
 
     fn size_bytes(&self) -> u64 {
@@ -299,9 +300,7 @@ fn a_fetch_that_fails_releases_the_block_it_was_holding() {
                 });
             }
             drop(failed);
-            let start = offset as usize;
-            buf.copy_from_slice(&self.bytes[start..start + buf.len()]);
-            Ok(())
+            common::read_into(&self.bytes, offset, buf)
         }
         fn size_bytes(&self) -> u64 {
             self.bytes.len() as u64
@@ -394,9 +393,7 @@ fn a_device_that_re_enters_the_cache_reads_again_instead_of_waiting_for_itself()
                     "the re-entrant read returned the wrong bytes"
                 );
             }
-            let start = offset as usize;
-            buf.copy_from_slice(&self.bytes[start..start + buf.len()]);
-            Ok(())
+            common::read_into(&self.bytes, offset, buf)
         }
         fn size_bytes(&self) -> u64 {
             self.bytes.len() as u64
@@ -573,9 +570,7 @@ fn two_threads_re_entering_into_each_others_fetches_do_not_deadlock() {
                 );
             }
 
-            let start = offset as usize;
-            buf.copy_from_slice(&self.bytes[start..start + buf.len()]);
-            Ok(())
+            common::read_into(&self.bytes, offset, buf)
         }
 
         fn size_bytes(&self) -> u64 {

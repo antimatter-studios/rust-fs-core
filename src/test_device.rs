@@ -75,15 +75,9 @@ impl BlockDevice for RwBytes {
     /// have taken — a device is not a `Vec`.
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         let mut b = self.0.lock().unwrap();
-        let start = offset as usize;
-        let end = start + buf.len();
-        if end > b.len() {
-            return Err(Error::ShortRead {
-                offset,
-                want: buf.len(),
-                got: b.len().saturating_sub(start),
-            });
-        }
+        // The same arithmetic as the read, from the same place: this
+        // pair of lines carried the identical overflow.
+        let (start, end) = range_within(b.len(), offset, buf.len())?;
         b[start..end].copy_from_slice(buf);
         Ok(())
     }
@@ -93,17 +87,45 @@ impl BlockDevice for RwBytes {
     }
 }
 
+/// Where `offset` lands in a buffer of `len` bytes, and how much is
+/// actually there — or the [`Error::ShortRead`] that says it does not
+/// fit.
+///
+/// ONE PLACE DOES THE ARITHMETIC, because the arithmetic is what went
+/// wrong. `offset as usize` followed by `start + buf.len()` computed
+/// the end BEFORE the bounds check meant to catch a past-end range, so
+/// `u64::MAX` panicked with "attempt to add with overflow" in a debug
+/// build — which is every `cargo test` run. This module exists because
+/// four hand-rolled doubles disagreed about exactly this, one of them
+/// by panicking; the consolidated version still panicked, for a larger
+/// past-end than the one the header discusses.
+///
+/// The width is the other half of it. Everything here is `u64`, and
+/// the narrowing to `usize` happens only *after* the bounds check has
+/// proved the range fits inside `len` — which is a `usize` — rather
+/// than before it, where a cast would turn a wild offset into a
+/// plausible one instead of refusing it.
+pub(crate) fn range_within(len: usize, offset: u64, want: usize) -> Result<(usize, usize)> {
+    let len64 = len as u64;
+    let short = || Error::ShortRead {
+        offset,
+        want,
+        // What is actually available from `offset` — nothing at all,
+        // once `offset` is itself past the end.
+        got: len64.saturating_sub(offset) as usize,
+    };
+    let end = offset.checked_add(want as u64).ok_or_else(short)?;
+    if end > len64 {
+        return Err(short());
+    }
+    // `offset <= end <= len`, and `len` is a `usize`, so both of these
+    // narrowings are exact.
+    Ok((offset as usize, end as usize))
+}
+
 /// The one read implementation both share.
 fn read_into(b: &[u8], offset: u64, buf: &mut [u8]) -> Result<()> {
-    let start = offset as usize;
-    let end = start + buf.len();
-    if end > b.len() {
-        return Err(Error::ShortRead {
-            offset,
-            want: buf.len(),
-            got: b.len().saturating_sub(start),
-        });
-    }
+    let (start, end) = range_within(b.len(), offset, buf.len())?;
     buf.copy_from_slice(&b[start..end]);
     Ok(())
 }
@@ -111,6 +133,73 @@ fn read_into(b: &[u8], offset: u64, buf: &mut [u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A WILD OFFSET IS A SHORT READ, NOT A CRASH -- the same rule as
+    /// the test above, at an offset large enough that the arithmetic
+    /// used to panic before the bounds check could refuse it.
+    ///
+    /// This is the device every bounds test in `slice.rs`,
+    /// `stream.rs`, `readonly.rs` and `caching_device.rs` is asserted
+    /// against, and the wild-offset guards in `caching_device.rs` and
+    /// `slice.rs` cannot be tested with a device that dies on the
+    /// input. The failure mode was "the test you needed to write is
+    /// the one this device cannot support".
+    #[test]
+    fn a_read_at_a_wild_offset_is_a_short_read_not_a_panic() {
+        let dev = Bytes::new(vec![0xAB; 8]);
+        for offset in [u64::MAX, u64::MAX - 7, 1 << 40, 9] {
+            let mut buf = [0u8; 8];
+            match dev.read_at(offset, &mut buf).expect_err("past the end") {
+                Error::ShortRead {
+                    offset: o,
+                    want,
+                    got,
+                } => {
+                    assert_eq!((o, want), (offset, 8));
+                    assert_eq!(got, 0, "nothing is available at {offset}");
+                }
+                other => panic!("expected ShortRead at {offset}, got {other:?}"),
+            }
+            assert_eq!(buf, [0u8; 8], "a refused read leaves the buffer alone");
+        }
+    }
+
+    /// And the write, which carried the identical pair of lines.
+    #[test]
+    fn a_write_at_a_wild_offset_is_refused_rather_than_panicking() {
+        let dev = RwBytes::new(vec![0u8; 8]);
+        for offset in [u64::MAX, u64::MAX - 7, 1 << 40, 9] {
+            match dev.write_at(offset, &[1u8; 8]).expect_err("past the end") {
+                Error::ShortRead {
+                    offset: o, want, ..
+                } => {
+                    assert_eq!((o, want), (offset, 8))
+                }
+                other => panic!("expected ShortRead at {offset}, got {other:?}"),
+            }
+        }
+        let mut buf = [0u8; 8];
+        dev.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, [0u8; 8], "no refused write touched the buffer");
+    }
+
+    /// An offset that DOES fit, of a length that would overflow when
+    /// added to it. The bounds check alone cannot catch this -- the sum
+    /// is what wraps -- so it is the case `checked_add` is there for
+    /// rather than `try_from`.
+    #[test]
+    fn a_length_that_overflows_when_added_to_the_offset_is_refused() {
+        let dev = Bytes::new(vec![0xAB; 8]);
+        let mut buf = vec![0u8; 16];
+        let offset = (usize::MAX - 8) as u64;
+        match dev.read_at(offset, &mut buf).expect_err("cannot fit") {
+            Error::ShortRead { want, got, .. } => {
+                assert_eq!(want, 16);
+                assert_eq!(got, 0);
+            }
+            other => panic!("expected ShortRead, got {other:?}"),
+        }
+    }
 
     /// The behaviour the four copies were supposed to share, and one
     /// did not.

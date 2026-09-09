@@ -11,10 +11,12 @@
 //! caller would otherwise have seen".
 
 use fs_core::block::BlockRead;
-use fs_core::error::{Error, Result};
+use fs_core::error::Result;
 use fs_core::CachingDevice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+mod common;
 
 /// A device holding 64 real bytes whose *reported* size is whatever was
 /// last stored in the atomic.
@@ -34,21 +36,7 @@ struct ResizingDevice {
 
 impl BlockRead for ResizingDevice {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        let start = offset as usize;
-        let end = start.checked_add(buf.len()).ok_or(Error::ShortRead {
-            offset,
-            want: buf.len(),
-            got: 0,
-        })?;
-        if end > self.data.len() {
-            return Err(Error::ShortRead {
-                offset,
-                want: buf.len(),
-                got: self.data.len().saturating_sub(start),
-            });
-        }
-        buf.copy_from_slice(&self.data[start..end]);
-        Ok(())
+        common::read_into(&self.data, offset, buf)
     }
 
     fn size_bytes(&self) -> u64 {

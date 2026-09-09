@@ -4,6 +4,8 @@
 use fs_core::{BlockDevice, BlockRead, Error, OwnedRwSlice, OwnedSlice, Result, SliceReader};
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 struct Bytes {
     storage: Mutex<Vec<u8>>,
     flushes: Mutex<u32>,
@@ -21,17 +23,7 @@ impl Bytes {
 impl BlockRead for Bytes {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         let b = self.storage.lock().unwrap();
-        let s = offset as usize;
-        let end = s + buf.len();
-        if end > b.len() {
-            return Err(Error::ShortRead {
-                offset,
-                want: buf.len(),
-                got: b.len().saturating_sub(s),
-            });
-        }
-        buf.copy_from_slice(&b[s..end]);
-        Ok(())
+        common::read_into(&b, offset, buf)
     }
     fn size_bytes(&self) -> u64 {
         self.storage.lock().unwrap().len() as u64
@@ -43,9 +35,7 @@ impl BlockDevice for Bytes {
             return Err(Error::ReadOnly);
         }
         let mut b = self.storage.lock().unwrap();
-        let s = offset as usize;
-        b[s..s + buf.len()].copy_from_slice(buf);
-        Ok(())
+        common::write_from(&mut b, offset, buf)
     }
     fn flush(&self) -> Result<()> {
         *self.flushes.lock().unwrap() += 1;

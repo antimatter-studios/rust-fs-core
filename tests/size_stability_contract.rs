@@ -24,6 +24,8 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+mod common;
+
 fn tmp_image(bytes: &[u8]) -> String {
     static C: AtomicU32 = AtomicU32::new(0);
     let n = C.fetch_add(1, Ordering::Relaxed);
@@ -61,17 +63,7 @@ impl Movable {
 
 impl BlockRead for Movable {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
-        let start = offset as usize;
-        let end = start + buf.len();
-        if end > self.data.len() {
-            return Err(fs_core::Error::ShortRead {
-                offset,
-                want: buf.len(),
-                got: self.data.len().saturating_sub(start),
-            });
-        }
-        buf.copy_from_slice(&self.data[start..end]);
-        Ok(())
+        common::read_into(&self.data, offset, buf)
     }
     fn size_bytes(&self) -> u64 {
         self.reported.load(Ordering::SeqCst)

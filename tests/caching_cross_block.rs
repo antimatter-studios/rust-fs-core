@@ -8,6 +8,8 @@
 use fs_core::{BlockDevice, BlockRead, CachingDevice, Result};
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 struct Mem {
     bytes: Mutex<Vec<u8>>,
 }
@@ -21,9 +23,7 @@ impl Mem {
 impl BlockRead for Mem {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         let b = self.bytes.lock().unwrap();
-        let s = offset as usize;
-        buf.copy_from_slice(&b[s..s + buf.len()]);
-        Ok(())
+        common::read_into(&b, offset, buf)
     }
     fn size_bytes(&self) -> u64 {
         self.bytes.lock().unwrap().len() as u64
@@ -32,9 +32,7 @@ impl BlockRead for Mem {
 impl BlockDevice for Mem {
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         let mut b = self.bytes.lock().unwrap();
-        let s = offset as usize;
-        b[s..s + buf.len()].copy_from_slice(buf);
-        Ok(())
+        common::write_from(&mut b, offset, buf)
     }
     fn is_writable(&self) -> bool {
         true

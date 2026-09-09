@@ -6,6 +6,8 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 fn tmp_image(bytes: &[u8]) -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -80,10 +82,7 @@ impl BlockRead for CountingDev {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
         *self.read_calls.lock().unwrap() += 1;
         let b = self.bytes.lock().unwrap();
-        let start = offset as usize;
-        let end = start + buf.len();
-        buf.copy_from_slice(&b[start..end]);
-        Ok(())
+        common::read_into(&b, offset, buf)
     }
     fn size_bytes(&self) -> u64 {
         self.size
@@ -92,10 +91,7 @@ impl BlockRead for CountingDev {
 impl BlockDevice for CountingDev {
     fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
         let mut b = self.bytes.lock().unwrap();
-        let start = offset as usize;
-        let end = start + buf.len();
-        b[start..end].copy_from_slice(buf);
-        Ok(())
+        common::write_from(&mut b, offset, buf)
     }
     fn is_writable(&self) -> bool {
         true

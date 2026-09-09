@@ -3,6 +3,8 @@
 use fs_core::{BlockDevice, BlockRead, CachingDevice, Result};
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 struct CountingDev {
     size: u64,
     read_calls: Mutex<u64>,
@@ -21,9 +23,7 @@ impl BlockRead for CountingDev {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         *self.read_calls.lock().unwrap() += 1;
         let b = self.bytes.lock().unwrap();
-        let s = offset as usize;
-        buf.copy_from_slice(&b[s..s + buf.len()]);
-        Ok(())
+        common::read_into(&b, offset, buf)
     }
     fn size_bytes(&self) -> u64 {
         self.size
@@ -32,9 +32,7 @@ impl BlockRead for CountingDev {
 impl BlockDevice for CountingDev {
     fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         let mut b = self.bytes.lock().unwrap();
-        let s = offset as usize;
-        b[s..s + buf.len()].copy_from_slice(buf);
-        Ok(())
+        common::write_from(&mut b, offset, buf)
     }
     fn is_writable(&self) -> bool {
         true
