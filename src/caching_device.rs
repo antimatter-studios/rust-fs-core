@@ -4,7 +4,7 @@
 
 use crate::block::{BlockDevice, BlockRead};
 use crate::error::Result;
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::ThreadId;
 
@@ -72,11 +72,259 @@ pub struct CachingDevice {
     fetched: Condvar,
 }
 
+/// One cached block, and its neighbours in recency order.
+///
+/// `newer`/`older` are indices into [`Lru::slots`], not pointers, so
+/// the list is intrusive without being unsafe. A slot's index is stable
+/// for as long as the node lives, which is what lets the index map
+/// point at it.
+struct Node {
+    block_start: u64,
+    data: Arc<Vec<u8>>,
+    /// Toward the head: more recently used. `None` at the head.
+    newer: Option<usize>,
+    /// Toward the tail: less recently used. `None` at the tail.
+    older: Option<usize>,
+}
+
+/// The cached blocks, in recency order, with O(1) lookup AND O(1)
+/// promotion.
+///
+/// # Why not a `VecDeque` any more
+///
+/// It was one, and a hit cost `iter().position(...)` -- a linear scan
+/// comparing offsets -- followed by `VecDeque::remove(pos)`, which
+/// shifts every element on the shorter side of `pos` to close the gap.
+/// Both halves are linear in the number of entries, so the cache got
+/// slower the larger it was asked to be. Measured on this crate under
+/// `--release`, working set equal to capacity so the steady state is
+/// ~100% hits, with a `CountingDevice` underneath proving no device
+/// traffic at all (`device_reads = 0` at every capacity, so the whole
+/// difference is the cache's own bookkeeping):
+///
+/// ```text
+/// capacity   us/read   vs capacity 8
+///        8    0.0157             1x
+///       64    0.0319           2.0x
+///      512    0.1924          12.3x
+///     4096    1.3306            85x
+/// ```
+///
+/// A cached read at capacity 4096 cost 85 times what the same cached
+/// read cost at capacity 8, and 8x more capacity from 512 to 4096 cost
+/// 6.9x more per read -- linear, which is what `capacity/2` comparisons
+/// plus `capacity/2` tuple moves predicts.
+///
+/// The capacities that matter are already past the knee, which is what
+/// ruled out the other candidate fix of documenting a ceiling:
+/// `am-fs-erofs` defaults to 512 metadata blocks, and one 3 MiB file
+/// read there touches 768 blocks -- about a millisecond of pure
+/// scanning to deliver bytes already in memory.
+///
+/// # Why not a `HashMap` alone
+///
+/// A map fixes the lookup and leaves the promotion: the entry still has
+/// to move to the head of a recency order, and in a `VecDeque` that is
+/// still `remove` plus `push_front`, still O(n), and it invalidates
+/// every index the map is holding. The recency order has to be a linked
+/// list for the promotion to be O(1), and then the map indexes into it.
+struct Lru {
+    /// Slab. `None` is a free slot, kept rather than compacted so live
+    /// indices stay valid.
+    slots: Vec<Option<Node>>,
+    /// Slots to reuse before growing `slots`.
+    free: Vec<usize>,
+    index: HashMap<u64, usize>,
+    /// Most recently used.
+    newest: Option<usize>,
+    /// Least recently used: the eviction end.
+    oldest: Option<usize>,
+}
+
+impl Lru {
+    fn with_capacity(capacity: usize) -> Self {
+        Lru {
+            slots: Vec::with_capacity(capacity),
+            free: Vec::new(),
+            index: HashMap::with_capacity(capacity),
+            newest: None,
+            oldest: None,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Take `i` out of the recency order, leaving the node in its slot.
+    fn unlink(&mut self, i: usize) {
+        let (newer, older) = {
+            let n = self.slots[i].as_ref().expect("unlink of a free slot");
+            (n.newer, n.older)
+        };
+        match newer {
+            Some(j) => self.slots[j].as_mut().expect("newer is live").older = older,
+            None => self.newest = older,
+        }
+        match older {
+            Some(j) => self.slots[j].as_mut().expect("older is live").newer = newer,
+            None => self.oldest = newer,
+        }
+        let n = self.slots[i].as_mut().expect("unlink of a free slot");
+        n.newer = None;
+        n.older = None;
+    }
+
+    /// Put `i` at the head of the recency order. It must not be linked.
+    fn link_newest(&mut self, i: usize) {
+        let old_head = self.newest;
+        {
+            let n = self.slots[i].as_mut().expect("link of a free slot");
+            n.newer = None;
+            n.older = old_head;
+        }
+        if let Some(j) = old_head {
+            self.slots[j].as_mut().expect("head is live").newer = Some(i);
+        } else {
+            self.oldest = Some(i);
+        }
+        self.newest = Some(i);
+    }
+
+    /// The block's data, promoted to most-recently-used. Two hash
+    /// lookups and a constant number of pointer writes, whatever the
+    /// capacity.
+    fn get(&mut self, block_start: u64) -> Option<Arc<Vec<u8>>> {
+        let i = *self.index.get(&block_start)?;
+        let data = self.slots[i]
+            .as_ref()
+            .expect("indexed slot is live")
+            .data
+            .clone();
+        if self.newest != Some(i) {
+            self.unlink(i);
+            self.link_newest(i);
+        }
+        Some(data)
+    }
+
+    /// Drop one block if it is held. Returns whether it was.
+    fn remove(&mut self, block_start: u64) -> bool {
+        let Some(i) = self.index.remove(&block_start) else {
+            return false;
+        };
+        self.unlink(i);
+        self.slots[i] = None;
+        self.free.push(i);
+        true
+    }
+
+    /// Insert at the head, evicting the least recently used first if
+    /// the cache is already at `capacity`.
+    ///
+    /// EVICT-THEN-INSERT UNCONDITIONALLY, which is the sequence the
+    /// `VecDeque` version used (`pop_back` under `len() >= capacity`,
+    /// then `push_front`). It matters at `capacity == 0`, where both
+    /// spellings leave exactly one entry held rather than none: a
+    /// behaviour worth preserving deliberately rather than changing
+    /// while moving house.
+    fn insert(&mut self, block_start: u64, data: Arc<Vec<u8>>, capacity: usize) {
+        // A RE-INSERT REPLACES RATHER THAN DUPLICATING. No caller does
+        // this today -- `block()` consults `get` under the same lock
+        // immediately before -- but a second slot for one block would
+        // leave the first linked in the recency list and unreachable
+        // through the index: a leak that also makes the list longer
+        // than the index, which is the kind of drift that shows up
+        // later as an eviction of something still held.
+        self.remove(block_start);
+        if self.len() >= capacity {
+            if let Some(oldest) = self.oldest {
+                let victim = self.slots[oldest]
+                    .as_ref()
+                    .expect("oldest is live")
+                    .block_start;
+                self.remove(victim);
+            }
+        }
+        let node = Node {
+            block_start,
+            data,
+            newer: None,
+            older: None,
+        };
+        let i = match self.free.pop() {
+            Some(i) => {
+                self.slots[i] = Some(node);
+                i
+            }
+            None => {
+                self.slots.push(Some(node));
+                self.slots.len() - 1
+            }
+        };
+        self.index.insert(block_start, i);
+        self.link_newest(i);
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.free.clear();
+        self.index.clear();
+        self.newest = None;
+        self.oldest = None;
+    }
+
+    /// Drop every block for which `keep` is false.
+    ///
+    /// Linear in the number of entries, like the `retain` it replaces,
+    /// and deliberately so: this runs per WRITE, not per read, and the
+    /// blocks to drop have to be found by looking at all of them.
+    fn retain_blocks(&mut self, keep: impl Fn(u64) -> bool) {
+        let doomed: Vec<u64> = self.index.keys().copied().filter(|b| !keep(*b)).collect();
+        for b in doomed {
+            self.remove(b);
+        }
+    }
+
+    /// Most-recently-used first. Tests only: the recency ORDER is the
+    /// thing a linked list can get wrong in ways a hit rate cannot see.
+    #[cfg(test)]
+    fn recency_order(&self) -> Vec<u64> {
+        let mut out = Vec::with_capacity(self.len());
+        let mut cur = self.newest;
+        while let Some(i) = cur {
+            let n = self.slots[i].as_ref().expect("live");
+            out.push(n.block_start);
+            cur = n.older;
+        }
+        out
+    }
+
+    /// Least-recently-used first, walked the other way. Tests only, and
+    /// the reason it exists is that a singly-consistent list passes
+    /// every forward walk while being broken backwards -- which is the
+    /// half eviction uses.
+    #[cfg(test)]
+    fn recency_order_reversed(&self) -> Vec<u64> {
+        let mut out = Vec::with_capacity(self.len());
+        let mut cur = self.oldest;
+        while let Some(i) = cur {
+            let n = self.slots[i].as_ref().expect("live");
+            out.push(n.block_start);
+            cur = n.newer;
+        }
+        out
+    }
+}
+
 struct CacheState {
     /// Fixed-capacity LRU; head is most-recently used. The capacity
     /// itself is [`CachingDevice::capacity`] — it never changes, so it
     /// is not kept under the lock.
-    entries: VecDeque<(u64, Arc<Vec<u8>>)>,
+    ///
+    /// An index plus an intrusive recency list rather than a
+    /// `VecDeque`: see [`Lru`] for the measurement that decided it.
+    entries: Lru,
     hits: u64,
     misses: u64,
     /// Bumped by every invalidation. A miss records it before it lets go
@@ -126,7 +374,7 @@ impl CachingDevice {
             block_size,
             capacity,
             state: Mutex::new(CacheState {
-                entries: VecDeque::with_capacity(capacity),
+                entries: Lru::with_capacity(capacity),
                 hits: 0,
                 misses: 0,
                 generation: 0,
@@ -153,7 +401,7 @@ impl CachingDevice {
             block_size,
             capacity,
             state: Mutex::new(CacheState {
-                entries: VecDeque::with_capacity(capacity),
+                entries: Lru::with_capacity(capacity),
                 hits: 0,
                 misses: 0,
                 generation: 0,
@@ -175,9 +423,9 @@ impl CachingDevice {
     }
 
     fn invalidate_range(state: &mut CacheState, start: u64, end: u64, block_size: u64) {
-        state.entries.retain(|(off, _)| {
+        state.entries.retain_blocks(|off| {
             let block_end = off.saturating_add(block_size);
-            *off >= end || block_end <= start
+            off >= end || block_end <= start
         });
         // BUMPED WHETHER OR NOT ANYTHING WAS DROPPED. The counter is not a
         // record of what this sweep removed; it is a fence a concurrent
@@ -329,10 +577,7 @@ impl CachingDevice {
         let generation_at_miss = {
             let mut s = self.state.lock().unwrap();
             loop {
-                if let Some(pos) = s.entries.iter().position(|(o, _)| *o == block_start) {
-                    let entry = s.entries.remove(pos).expect("position just found it");
-                    let data = entry.1.clone();
-                    s.entries.push_front(entry);
+                if let Some(data) = s.entries.get(block_start) {
                     s.hits += 1;
                     return Ok(data);
                 }
@@ -391,17 +636,11 @@ impl CachingDevice {
             // it a re-entrant read puts two entries in for one block,
             // which is the defect this commit exists to remove, in a
             // new place.
-            if let Some(pos) = s.entries.iter().position(|(o, _)| *o == block_start) {
-                let entry = s.entries.remove(pos).expect("position just found it");
-                let held = entry.1.clone();
-                s.entries.push_front(entry);
+            if let Some(held) = s.entries.get(block_start) {
                 return Ok(held);
             }
             if s.generation == generation_at_miss {
-                if s.entries.len() >= self.capacity {
-                    s.entries.pop_back();
-                }
-                s.entries.push_front((block_start, data.clone()));
+                s.entries.insert(block_start, data.clone(), self.capacity);
             }
         }
         Ok(data)
@@ -879,5 +1118,152 @@ mod tests {
         // And flushing is not an error: a caller that flushes
         // defensively must not fail on a volume it never wrote.
         assert!(cache.flush().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod lru_tests {
+    use super::*;
+
+    fn block(n: u8) -> Arc<Vec<u8>> {
+        Arc::new(vec![n; 4])
+    }
+
+    /// The list has to be walkable BOTH WAYS and agree with itself.
+    ///
+    /// A singly-consistent list passes every forward walk while being
+    /// broken backwards -- and backwards is the half eviction uses, so
+    /// the failure would surface as evicting the wrong block rather
+    /// than as anything a hit rate could show.
+    fn assert_consistent(lru: &Lru) {
+        let forward = lru.recency_order();
+        let mut backward = lru.recency_order_reversed();
+        backward.reverse();
+        assert_eq!(
+            forward, backward,
+            "the recency list disagrees with itself walked the other way"
+        );
+        assert_eq!(
+            forward.len(),
+            lru.len(),
+            "the list holds {} nodes and the index {} -- they have drifted",
+            forward.len(),
+            lru.len()
+        );
+    }
+
+    #[test]
+    fn a_hit_promotes_to_most_recently_used() {
+        let mut lru = Lru::with_capacity(4);
+        for i in 0..4u64 {
+            lru.insert(i * 100, block(i as u8), 4);
+        }
+        assert_eq!(lru.recency_order(), vec![300, 200, 100, 0]);
+        assert!(lru.get(100).is_some());
+        assert_eq!(lru.recency_order(), vec![100, 300, 200, 0]);
+        assert_consistent(&lru);
+
+        // Promoting what is already newest must not corrupt the ends.
+        assert!(lru.get(100).is_some());
+        assert_eq!(lru.recency_order(), vec![100, 300, 200, 0]);
+        assert_consistent(&lru);
+
+        // Nor must promoting the oldest.
+        assert!(lru.get(0).is_some());
+        assert_eq!(lru.recency_order(), vec![0, 100, 300, 200]);
+        assert_consistent(&lru);
+    }
+
+    #[test]
+    fn the_least_recently_used_is_what_gets_evicted() {
+        let mut lru = Lru::with_capacity(3);
+        for i in 0..3u64 {
+            lru.insert(i * 100, block(i as u8), 3);
+        }
+        // Touch the oldest so it is no longer the victim.
+        assert!(lru.get(0).is_some());
+        lru.insert(999, block(9), 3);
+        assert_eq!(lru.len(), 3);
+        assert_eq!(
+            lru.recency_order(),
+            vec![999, 0, 200],
+            "100 was least recently used and is the one that should be gone"
+        );
+        assert!(lru.get(100).is_none());
+        assert_consistent(&lru);
+    }
+
+    #[test]
+    fn evicted_slots_are_reused_rather_than_growing_the_slab() {
+        let mut lru = Lru::with_capacity(2);
+        for i in 0..20u64 {
+            lru.insert(i, block(i as u8), 2);
+            assert_consistent(&lru);
+        }
+        assert_eq!(lru.len(), 2);
+        assert!(
+            lru.slots.len() <= 3,
+            "twenty inserts at capacity 2 left {} slots: freed slots are not being \
+             reused, so the slab grows without bound",
+            lru.slots.len()
+        );
+    }
+
+    #[test]
+    fn a_re_insert_replaces_and_does_not_leave_the_old_node_linked() {
+        let mut lru = Lru::with_capacity(4);
+        lru.insert(10, block(1), 4);
+        lru.insert(20, block(2), 4);
+        lru.insert(10, block(3), 4);
+        assert_eq!(lru.len(), 1 + 1, "one entry per block, not one per insert");
+        assert_eq!(lru.recency_order(), vec![10, 20]);
+        assert_eq!(
+            lru.get(10).as_deref().map(|v| v[0]),
+            Some(3),
+            "the newer data wins"
+        );
+        assert_consistent(&lru);
+    }
+
+    #[test]
+    fn removing_and_retaining_keep_the_list_consistent() {
+        let mut lru = Lru::with_capacity(8);
+        for i in 0..8u64 {
+            lru.insert(i, block(i as u8), 8);
+        }
+        assert!(lru.remove(0), "the tail");
+        assert_consistent(&lru);
+        assert!(lru.remove(7), "the head");
+        assert_consistent(&lru);
+        assert!(lru.remove(4), "the middle");
+        assert_consistent(&lru);
+        assert!(!lru.remove(4), "already gone");
+
+        lru.retain_blocks(|b| b % 2 == 0);
+        assert_consistent(&lru);
+        assert_eq!(lru.recency_order(), vec![6, 2]);
+
+        lru.clear();
+        assert_eq!(lru.len(), 0);
+        assert!(lru.recency_order().is_empty());
+        assert_consistent(&lru);
+    }
+
+    /// `capacity == 0` holds exactly one entry, not none.
+    ///
+    /// That is what the `VecDeque` version did -- `pop_back` on an
+    /// empty deque is a no-op, then `push_front` -- and it is
+    /// preserved deliberately rather than changed while moving house.
+    /// Pinned so the next person to touch `insert` finds out from a
+    /// test rather than from a caller.
+    #[test]
+    fn capacity_zero_behaves_as_it_did_before() {
+        let mut lru = Lru::with_capacity(0);
+        lru.insert(1, block(1), 0);
+        assert_eq!(lru.len(), 1);
+        lru.insert(2, block(2), 0);
+        assert_eq!(lru.len(), 1);
+        assert_eq!(lru.recency_order(), vec![2]);
+        assert_consistent(&lru);
     }
 }
