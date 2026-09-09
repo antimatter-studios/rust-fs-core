@@ -76,15 +76,36 @@ fn is_construction(line: &str) -> bool {
 /// in this crate's dev-dependencies and adding one to find a `mod` is
 /// not a trade worth making. The two tests below pin both directions.
 fn production_half(text: &str) -> &str {
+    /// A line WITH its terminator, so its length is its span in `text`.
+    ///
+    /// This was `lines()` plus `offset += line.len() + 1`, which
+    /// assumes a one-byte line ending. `lines()` strips a trailing
+    /// `\r`, so on a CRLF checkout the length excludes it while the
+    /// `+ 1` counts only the `\n`, and the cut point falls one byte
+    /// further behind the truth with every preceding line. The
+    /// production half is then TRUNCATED — the scan covers less source
+    /// than it claims to and still passes, which is the defect this
+    /// file exists to catch, in the file catching it. A drifted offset
+    /// can also land inside a multi-byte character, where slicing
+    /// panics.
+    ///
+    /// `split_inclusive` removes the arithmetic rather than correcting
+    /// it: the offsets are sums of real slice lengths, so they are
+    /// exact for either line ending and always on a character
+    /// boundary. Nothing here depends on which one the checkout used.
+    fn strip_ending(raw: &str) -> &str {
+        raw.trim_end_matches(['\n', '\r'])
+    }
+
     let mut offset = 0usize;
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
+    let mut lines = text.split_inclusive('\n').peekable();
+    while let Some(raw) = lines.next() {
         let start = offset;
-        offset += line.len() + 1;
-        if line != "#[cfg(test)]" {
+        offset += raw.len();
+        if strip_ending(raw) != "#[cfg(test)]" {
             continue;
         }
-        let next = lines.peek().copied().unwrap_or("");
+        let next = lines.peek().copied().map(strip_ending).unwrap_or("");
         let opens_a_module = (next.starts_with("mod ")
             || next.starts_with("pub mod ")
             || next.starts_with("pub(crate) mod "))
@@ -139,6 +160,63 @@ mod tests {
         1,
         "exactly the production constructor, and not the one inside mod tests"
     );
+}
+
+/// THE CUT IS A BYTE OFFSET IN THE TEXT, NOT A COUNT OF LINES.
+///
+/// The first version added `line.len() + 1` per line. `lines()` strips
+/// a trailing `\r`, so on CRLF that is one byte short per line and the
+/// returned slice ends progressively before the boundary it names —
+/// the production half silently truncated, the scan covering less than
+/// it claims, and passing. The runner checks out LF, so nothing was
+/// firing; that is the reason it needs a fixture rather than a
+/// `.gitattributes`, which would hide it and leave the function wrong
+/// for any caller that passes CRLF text of its own.
+///
+/// The assertion is on the CUT rather than on what the slice contains:
+/// the remainder must begin exactly at the test module's attribute. A
+/// containment check passes while the offset is a few bytes out, which
+/// is the whole failure mode.
+///
+/// The em dash is deliberate. A drifted offset that lands inside a
+/// multi-byte character does not truncate, it PANICS, and this
+/// module's real sources are full of them.
+#[test]
+fn the_boundary_is_a_byte_offset_and_survives_either_line_ending() {
+    const LINES: &[&str] = &[
+        "// a comment with an em dash — as the real sources have",
+        "#[cfg(test)]",
+        "struct Witness;",
+        "",
+        "fn write_at() {",
+        "    return Err(Error::OutOfBounds {",
+        "        offset,",
+        "    });",
+        "}",
+        "",
+        "#[cfg(test)]",
+        "mod tests {",
+        "}",
+        "",
+    ];
+
+    for (what, ending) in [("LF", "\n"), ("CRLF", "\r\n")] {
+        let text = LINES.join(ending);
+        let production = production_half(&text);
+        assert!(
+            production.contains("fn write_at()"),
+            "{what}: the production constructor fell outside the production half"
+        );
+        let rest = &text[production.len()..];
+        assert!(
+            rest.starts_with("#[cfg(test)]"),
+            "{what}: the cut landed {} bytes in, and the text there begins {:?} \
+             rather than at the test module's attribute. An offset computed from a \
+             line count is wrong by one byte per line whenever the ending is two.",
+            production.len(),
+            &rest[..rest.len().min(24)]
+        );
+    }
 }
 
 /// AND THE FILE ON DISK, not only the sample above. A hand-written
