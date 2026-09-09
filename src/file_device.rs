@@ -66,7 +66,7 @@ impl FileDevice {
     /// Open read-only.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
-        let size = file.metadata()?.len();
+        let size = measure_size(&file)?;
         Ok(Self {
             file,
             io_lock: RwLock::new(()),
@@ -78,7 +78,7 @@ impl FileDevice {
     /// Open read-write. Errors if the path is not writable.
     pub fn open_rw<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
-        let size = file.metadata()?.len();
+        let size = measure_size(&file)?;
         Ok(Self {
             file,
             io_lock: RwLock::new(()),
@@ -95,6 +95,171 @@ impl FileDevice {
             Err(_) => Self::open(p),
         }
     }
+}
+
+/// How many bytes the opened handle addresses.
+///
+/// For a **regular file** this is the metadata length, and 0 is a
+/// legitimate answer: an empty file is empty.
+///
+/// For a **device node** it is not an answer at all. `st_size` is 0 for
+/// every block and character device on the platforms this crate ships
+/// to, so the size has to be asked for directly. Measured against an
+/// 8 MiB backing store:
+///
+/// | source                    | `metadata().len()` | `lseek(SEEK_END)` | ioctl     |
+/// |---------------------------|--------------------|-------------------|-----------|
+/// | macOS `/dev/disk9` (blk)  | 0                  | 0                 | 8388608   |
+/// | macOS `/dev/rdisk9` (chr) | 0                  | 0                 | 8388608   |
+/// | Linux `/dev/loop0` (blk)  | 0                  | 8388608           | 8388608   |
+///
+/// **`lseek(SEEK_END)` is not the portable fallback it looks like.** It
+/// answers 0 on macOS for both node types, so a device opened there
+/// would still report itself empty. The ioctl is the only mechanism that
+/// answered on both platforms, and it happens to avoid the objection to
+/// the seek as well: it does not move the file cursor. That matters
+/// here, because `read_once` uses `pread` specifically so reads need no
+/// lock -- see this type's own note.
+///
+/// When the size cannot be measured this returns an error rather than 0,
+/// because **a device reporting 0 is not inert, it is invisible.**
+/// `read_at` keeps serving real bytes, while
+/// [`BlockReadStreamer::read`] returns `Ok(0)` on its first call,
+/// [`CachingDevice`] treats every read as past-the-end and caches
+/// nothing, and every slice cut from it inherits a parent claiming to be
+/// empty. Each of those four failures is silent, which is the one
+/// outcome worth refusing outright.
+///
+/// [`BlockReadStreamer::read`]: crate::BlockReadStreamer
+/// [`CachingDevice`]: crate::CachingDevice
+#[cfg(unix)]
+fn measure_size(file: &File) -> Result<u64> {
+    use std::os::unix::fs::FileTypeExt;
+    let meta = file.metadata()?;
+    let ft = meta.file_type();
+    if !ft.is_block_device() && !ft.is_char_device() {
+        return Ok(meta.len());
+    }
+    device_size_bytes(file)
+}
+
+/// Windows keeps the metadata length, because no equivalent measurement
+/// has been made there. `\\.\PhysicalDriveN` is therefore still subject
+/// to the defect this function exists to fix; saying so is better than
+/// shipping an untested `DeviceIoControl` and implying otherwise.
+#[cfg(not(unix))]
+fn measure_size(file: &File) -> Result<u64> {
+    Ok(file.metadata()?.len())
+}
+
+// The crate has no dependencies and this is not worth acquiring one for:
+// `ioctl` is in libc, which is already linked into every std target.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+unsafe extern "C" {
+    fn ioctl(fd: std::os::raw::c_int, request: std::os::raw::c_ulong, ...) -> std::os::raw::c_int;
+}
+
+/// macOS: `<sys/disk.h>` gives the block size and the block count
+/// separately, and neither alone is the answer.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn device_size_bytes(file: &File) -> Result<u64> {
+    use std::io;
+    use std::os::fd::AsRawFd;
+    // _IOR('d', 24, u32) and _IOR('d', 25, u64).
+    const DKIOCGETBLOCKSIZE: std::os::raw::c_ulong = 0x4004_6418;
+    const DKIOCGETBLOCKCOUNT: std::os::raw::c_ulong = 0x4008_6419;
+
+    let fd = file.as_raw_fd();
+    let mut block_size: u32 = 0;
+    let mut block_count: u64 = 0;
+    // SAFETY: `fd` is open for as long as `file` is borrowed, and each
+    // request writes exactly the width its own encoding names into a
+    // local of precisely that type.
+    unsafe {
+        if ioctl(fd, DKIOCGETBLOCKSIZE, &raw mut block_size) < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        if ioctl(fd, DKIOCGETBLOCKCOUNT, &raw mut block_count) < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
+    block_count
+        .checked_mul(u64::from(block_size))
+        .ok_or_else(|| {
+            Error::Io(io::Error::other(format!(
+                "device reports {block_count} blocks of {block_size} bytes, \
+                 whose product does not fit in u64"
+            )))
+        })
+}
+
+/// `BLKGETSIZE64` as `_IOR(0x12, 114, size_t)`, for a given pointer
+/// width.
+///
+/// THE SIZE FIELD OF AN IOCTL REQUEST IS `sizeof(size_t)` -- the
+/// USERSPACE POINTER WIDTH, not the width of the value the kernel
+/// writes back. The payload is a `u64` on both, but the request NUMBER
+/// differs: `0x8008_1272` where a pointer is 8 bytes, `0x8004_1272`
+/// where it is 4. A literal for one width is rejected by the kernel on
+/// the other.
+///
+/// That is a regression this change would have INTRODUCED rather than
+/// inherited. Before it, an unmeasurable device node gave `Ok` with a
+/// size of 0; now it is an error, so a 64-bit-only constant would make
+/// [`FileDevice::open`] fail for EVERY block device on a 32-bit target.
+///
+/// Taking the width as a parameter is what makes it testable: nothing
+/// available here runs 32-bit, and `cargo check --target` compiles a
+/// wrong literal perfectly happily, so the only witness possible is to
+/// compute both encodings and compare them with the two numbers the
+/// kernel headers actually define.
+///
+/// Available in every TEST build rather than on Linux alone, because a
+/// test that cannot run is not a witness: gated to Linux it would be
+/// compiled and never executed on the machine the work is done on, and
+/// the arithmetic is the same arithmetic everywhere.
+#[cfg(any(target_os = "linux", test))]
+const fn blkgetsize64_for(pointer_width: usize) -> std::os::raw::c_ulong {
+    /// `_IOC_READ << _IOC_DIRSHIFT`.
+    const READ: std::os::raw::c_ulong = 0x8000_0000;
+    /// `_IOC_TYPESHIFT` is 8, `_IOC_SIZESHIFT` is 16.
+    const TYPE: std::os::raw::c_ulong = 0x12;
+    const NR: std::os::raw::c_ulong = 114;
+    READ | ((pointer_width as std::os::raw::c_ulong) << 16) | (TYPE << 8) | NR
+}
+
+/// Linux: `<linux/fs.h>` answers in bytes in one call.
+#[cfg(target_os = "linux")]
+fn device_size_bytes(file: &File) -> Result<u64> {
+    use std::io;
+    use std::os::fd::AsRawFd;
+    // _IOR(0x12, 114, size_t), encoded for THIS target -- see
+    // `blkgetsize64_for`. Identical to the familiar 0x8008_1272 on a
+    // 64-bit target and correct on a 32-bit one.
+    const BLKGETSIZE64: std::os::raw::c_ulong = blkgetsize64_for(std::mem::size_of::<usize>());
+
+    let mut size: u64 = 0;
+    // SAFETY: as above -- one call, writing one u64 into a u64.
+    let rc = unsafe { ioctl(file.as_raw_fd(), BLKGETSIZE64, &raw mut size) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(size)
+}
+
+/// Every other Unix: refuse rather than guess. `lseek` is measured wrong
+/// on one of the two platforms tested, so extending it here on the
+/// strength of that would be picking the silent failure.
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "linux"))
+))]
+fn device_size_bytes(_file: &File) -> Result<u64> {
+    use std::io;
+    Err(Error::Io(io::Error::other(
+        "no measured way to read a device node's size on this platform; \
+         open the backing image file rather than the device node",
+    )))
 }
 
 impl FileDevice {
@@ -260,6 +425,41 @@ impl BlockDevice for FileDevice {
 
 #[cfg(test)]
 mod tests {
+    /// THE TWO NUMBERS THE KERNEL HEADERS DEFINE, and the pointer
+    /// widths they belong to. External knowledge, not a restatement of
+    /// the formula -- a test that recomputed the encoding on both sides
+    /// would agree with itself whatever the encoding was.
+    ///
+    /// This cannot prove the ioctl works on 32-bit; nothing available
+    /// here runs 32-bit, and `cargo check --target` compiles a wrong
+    /// literal happily. What it does is stop the encoding quietly
+    /// reverting to a single hardcoded number, which is the way this
+    /// defect arrived.
+    #[test]
+    fn blkgetsize64_is_encoded_for_the_pointer_width() {
+        const KNOWN: &[(usize, u64)] = &[(4, 0x8004_1272), (8, 0x8008_1272)];
+        for (width, want) in KNOWN {
+            assert_eq!(
+                super::blkgetsize64_for(*width) as u64,
+                *want,
+                "_IOR(0x12, 114, size_t) with a {width}-byte size_t is {want:#010x}"
+            );
+        }
+    }
+
+    /// And the one this build will actually issue is the one for THIS
+    /// target, rather than whichever happened to be written down.
+    #[test]
+    fn this_target_issues_its_own_encoding() {
+        let width = std::mem::size_of::<usize>();
+        let expected = if width == 8 {
+            0x8008_1272u64
+        } else {
+            0x8004_1272u64
+        };
+        assert_eq!(super::blkgetsize64_for(width) as u64, expected);
+    }
+
     use super::*;
 
     /// Concurrent readers do not serialise, and none of them sees

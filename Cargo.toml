@@ -14,6 +14,20 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 
 [dev-dependencies]
+# YAML parser for tests/ci_acknowledges_the_privilege_gap.rs, which reads
+# .github/workflows/ci.yml and refuses if a job runs the test suite
+# without acknowledging that tests/device_node_size.rs cannot build a
+# loop device unprivileged. The first version of that guard scanned the
+# file's lines; a quoted key, a flow mapping and a `run: |` block whose
+# CONTENTS look like a job key are all ordinary YAML that a line scan
+# reads wrongly, and a guard that misreads its input is a guard that
+# reports protection it is not providing. Pure Rust, YAML 1.2 (so
+# GitHub's `on:` key stays the string `on` rather than folding into a
+# boolean), MIT/Apache-2.0, and no C to transpile -- unlike serde_yaml,
+# which is deprecated and wraps unsafe-libyaml. Dev-only: it never
+# reaches a consumer of this crate. Same version as the siblings, so the
+# four copies of this guard family stay one answer rather than two.
+saphyr = "0.0.12"
 
 [profile.release]
 lto = true
