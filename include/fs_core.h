@@ -3,8 +3,13 @@
  * across am-fs-core, am-img-qcow2, am-partitions, am-fs-ext4, and
  * future am-fs-* / am-img-* sibling crates.
  *
- * Link with libam_fs_core.a (or its sister-crate equivalent that
+ * Link with libfs_core.a (or its sister-crate equivalent that
  * re-exports the same symbols) and include this header.
+ *
+ * `chore staticlib` builds that library and copies this header beside
+ * it; `chore artifact` prints the absolute path of the directory
+ * holding both. That contract lives in chores.yml, which is not
+ * anywhere a C consumer would think to look, so it is repeated here.
  *
  * MIT license. (c) 2026 Antimatter Studios.
  */

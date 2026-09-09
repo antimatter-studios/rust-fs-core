@@ -60,6 +60,34 @@ tasks:
       - '{{.OUT}}/include/{{.LIBNAME}}.h'
 
     cmds:
+      # THE HEADER MUST NAME THE LIBRARY THIS TASK ACTUALLY BUILDS,
+      # and it is checked FIRST so a mismatch costs no build.
+      #
+      # include/fs_core.h said `libam_fs_core.a` for as long as the file
+      # existed, and cargo has never produced that name -- `[lib] name`
+      # is fs_core, so the artefact is libfs_core.a. A C consumer
+      # following the first paragraph of the first file they read got a
+      # linker error for a library nobody builds. Six of the twelve
+      # constellation repositories had the same mismatch and five had it
+      # right, so it is not a rule anyone can apply once; it drifts, and
+      # a check is the only thing that holds.
+      #
+      # The empty case fails too. One sibling names no lib*.a at all,
+      # which leaves a consumer with no link guidance and would
+      # otherwise pass a comparison over nothing.
+      - >-
+        named=$(grep -oE 'lib[A-Za-z0-9_]+\.a' include/{{.LIBNAME}}.h | sort -u);
+        want='lib{{.LIBNAME}}.a';
+        if [ -z "$named" ]; then
+          echo "include/{{.LIBNAME}}.h names no lib*.a; it must tell a consumer to link $want" >&2;
+          exit 1;
+        fi;
+        for n in $named; do
+          if [ "$n" != "$want" ]; then
+            echo "include/{{.LIBNAME}}.h says link $n, but this task builds $want" >&2;
+            exit 1;
+          fi;
+        done
       # Idempotent: rustup answers "up to date" without touching the network
       # when the target is already installed. It runs here rather than in the
       # consumer because the triple is ours.
