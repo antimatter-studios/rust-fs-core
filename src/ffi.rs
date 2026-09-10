@@ -425,6 +425,7 @@ pub unsafe extern "C" fn fs_core_device_flush(handle: *const FsCoreDevice) -> Fs
 /// Open `path` (NUL-terminated UTF-8) as a `FileDevice` and return a
 /// handle. Pass `writable=true` for RW. On failure returns NULL and the
 /// thread-local last-error has detail.
+#[cfg(any(unix, windows))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fs_core_file_open(
     path: *const c_char,

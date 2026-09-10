@@ -17,6 +17,7 @@ pub mod callback_device;
 pub mod counting_device;
 pub mod error;
 pub mod ffi;
+#[cfg(any(unix, windows))]
 pub mod file_device;
 pub mod readonly;
 pub mod slice;
@@ -27,6 +28,7 @@ pub use caching_device::CachingDevice;
 pub use callback_device::{CallbackDevice, FlushCb, ReadCb, WriteCb};
 pub use counting_device::CountingDevice;
 pub use error::{Error, Result};
+#[cfg(any(unix, windows))]
 pub use file_device::FileDevice;
 pub use readonly::ReadOnlyDevice;
 pub use slice::{OwnedRwSlice, OwnedSlice, SliceReader};
