@@ -78,12 +78,13 @@ Install once per clone:
 ./scripts/install-hooks.sh
 ```
 
-`core.hooksPath` is local-only config, so it does not travel with a clone and
-every fresh checkout needs this again.
+Nothing is committed by the installer: a hook inside the working tree is a
+hook a branch checkout can replace, which is what moving them out of it
+prevented.
 
 ### Why the dependency-pinning guard looks half-idle here
 
-`.githooks/pre-commit.d/rust-deps-pinned.sh` is the same file every sibling
+`pre-commit.d/rust-deps-pinned.sh` is the same file every sibling
 project runs, and part of it has nothing to do in this one. That is expected
 rather than a misconfiguration, and it is recorded here so nobody has to work
 it out twice.
