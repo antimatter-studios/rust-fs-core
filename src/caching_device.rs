@@ -367,6 +367,9 @@ impl CachingDevice {
     /// `block_size` must be non-zero and no larger than
     /// [`MAX_BLOCK_SIZE`]; see [`CachingDevice::read_only`] for why that
     /// is enforced at first use rather than here.
+    ///
+    /// `capacity` is documented on [`CachingDevice::read_only`]; it means
+    /// the same here, including that `0` still caches one block.
     pub fn new(inner: Arc<dyn BlockDevice>, block_size: u64, capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             inner: inner.clone(),
@@ -394,6 +397,48 @@ impl CachingDevice {
     /// `Arc<Self>`, not `Result` — so a block size outside that range is
     /// refused by every read and every write instead, with an error
     /// naming the offending size.
+    ///
+    /// `capacity` is a count of **blocks**, not bytes: at most that many
+    /// entries of up to `block_size` bytes each are held, so the memory
+    /// bound is their product and is the caller's to choose. There is no
+    /// ceiling; promotion and eviction are O(1) at any capacity.
+    ///
+    /// **`capacity = 0` does not disable the cache.** It holds one entry,
+    /// so a repeated single-block read is still served as a hit, and two
+    /// alternating blocks thrash it (#124). The behaviour is deliberate
+    /// and pinned, not an oversight. A caller that wants no cache at zero
+    /// should not construct one, and this constructor cannot do that for
+    /// it because it returns `Arc<Self>`:
+    ///
+    /// ```text
+    /// let dev: Arc<dyn BlockRead> = if blocks == 0 {
+    ///     dev
+    /// } else {
+    ///     CachingDevice::read_only(dev, block_size, blocks)
+    /// };
+    /// ```
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use fs_core::{BlockRead, CachingDevice, CountingDevice};
+    /// # struct Mem(Vec<u8>);
+    /// # impl BlockRead for Mem {
+    /// #     fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+    /// #         let o = offset as usize;
+    /// #         buf.copy_from_slice(&self.0[o..o + buf.len()]);
+    /// #         Ok(())
+    /// #     }
+    /// #     fn size_bytes(&self) -> u64 { self.0.len() as u64 }
+    /// # }
+    /// let device = Arc::new(CountingDevice::new(Arc::new(Mem(vec![7; 512 * 8]))));
+    /// let cache = CachingDevice::read_only(device.clone(), 512, 0);
+    /// let mut buf = [0u8; 16];
+    /// cache.read_at(0, &mut buf).unwrap();
+    /// cache.read_at(8, &mut buf).unwrap();
+    /// // A capacity of zero served the second read from the cache.
+    /// assert_eq!(device.reads(), 1);
+    /// assert_eq!(cache.stats(), (1, 1));
+    /// ```
     pub fn read_only(inner: Arc<dyn BlockRead>, block_size: u64, capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             inner,
@@ -411,6 +456,49 @@ impl CachingDevice {
         })
     }
 
+    /// `(hits, misses)`, in that order.
+    ///
+    /// Both count **block lookups inside the cache**, not reads of this
+    /// device and not reads of `inner` (#123):
+    ///
+    /// - a hit is a block served from the cache, including one that was
+    ///   waiting on another thread's fetch of the same block;
+    /// - a miss is a block this cache fetched from `inner`, so `misses` is
+    ///   the number of fetches the cache itself made.
+    ///
+    /// A read the cache declines to serve moves **neither** counter. A
+    /// read reaching past the end of `inner`, and a read spanning enough
+    /// blocks that caching it would sweep the cache (more than one block,
+    /// and more than half of `capacity`), go straight to `inner`; an empty
+    /// read, or one refused for its block size, touches nothing. So `hits + misses` is not the number of `read_at` calls,
+    /// `misses` is a lower bound on the reads `inner` saw, and
+    /// `hits / (hits + misses)` is a rate over the reads the cache served,
+    /// which leaves out every read it chose not to. To count what reached
+    /// the device, put a [`CountingDevice`](crate::CountingDevice) under
+    /// the cache.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use fs_core::{BlockRead, CachingDevice, CountingDevice};
+    /// # struct Mem(Vec<u8>);
+    /// # impl BlockRead for Mem {
+    /// #     fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+    /// #         let o = offset as usize;
+    /// #         buf.copy_from_slice(&self.0[o..o + buf.len()]);
+    /// #         Ok(())
+    /// #     }
+    /// #     fn size_bytes(&self) -> u64 { self.0.len() as u64 }
+    /// # }
+    /// let device = Arc::new(CountingDevice::new(Arc::new(Mem(vec![7; 512 * 32]))));
+    /// let cache = CachingDevice::read_only(device.clone(), 512, 8);
+    /// let mut one = [0u8; 16];
+    /// cache.read_at(0, &mut one).unwrap(); // miss: fetched
+    /// cache.read_at(8, &mut one).unwrap(); // hit
+    /// let mut big = vec![0u8; 512 * 6];
+    /// cache.read_at(0, &mut big).unwrap(); // 6 blocks > capacity / 2: bypassed
+    /// assert_eq!(cache.stats(), (1, 1));
+    /// assert_eq!(device.reads(), 2); // the bypassed read is not a miss
+    /// ```
     pub fn stats(&self) -> (u64, u64) {
         let s = self.state.lock().unwrap();
         (s.hits, s.misses)

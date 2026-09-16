@@ -11,6 +11,12 @@ reaches all of them.
 
 ### Fixed
 
+- `CachingDevice::stats()` and the constructors' `capacity` are
+  documented. `stats()` is `(hits, misses)` over block lookups inside the
+  cache: a read the cache bypasses (past the end, or spanning more than
+  half the cache) moves neither, so `misses` is a lower bound on device
+  reads (#123). `capacity` counts blocks, and `0` still caches one block
+  rather than disabling the cache; doctests pin both (#124).
 - A slice can no longer report more device than its parent holds. All
   three constructors — `SliceReader::new`, `OwnedSlice::new`,
   `OwnedRwSlice::new` — now ask the parent its size and clamp `length`
