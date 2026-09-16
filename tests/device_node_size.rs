@@ -258,6 +258,46 @@ mod linux {
         unsafe { geteuid() == 0 }
     }
 
+    /// Whether this process can attach a loop device.
+    ///
+    /// What `losetup` needs is `CAP_SYS_ADMIN`, not uid 0. A container
+    /// running as root with its capabilities dropped (`--cap-drop=ALL`,
+    /// gVisor, a hardened base image) has euid 0 and cannot, and gating on
+    /// the uid sent it past the opt-out below into a bare losetup failure
+    /// (#110). So the effective capability set is read instead; where
+    /// `/proc` cannot say, the uid is the best guess left.
+    fn can_attach_loop_devices() -> bool {
+        match std::fs::read_to_string("/proc/self/status") {
+            Ok(status) => cap_eff_has_sys_admin(&status).unwrap_or_else(is_root),
+            Err(_) => is_root(),
+        }
+    }
+
+    /// `CAP_SYS_ADMIN` (bit 21) in a `/proc/<pid>/status` `CapEff:` line,
+    /// or `None` when there is no such line to read.
+    fn cap_eff_has_sys_admin(status: &str) -> Option<bool> {
+        const CAP_SYS_ADMIN: u32 = 21;
+        let hex = status
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:"))?
+            .trim();
+        let bits = u64::from_str_radix(hex, 16).ok()?;
+        Some(bits & (1 << CAP_SYS_ADMIN) != 0)
+    }
+
+    #[test]
+    fn the_loop_capability_is_read_from_cap_eff_not_the_uid() {
+        let root_without_caps = "Name:\ttest\nUid:\t0\t0\t0\t0\nCapEff:\t0000000000000000\n";
+        assert_eq!(cap_eff_has_sys_admin(root_without_caps), Some(false));
+        let full = "CapEff:\t000001ffffffffff\n";
+        assert_eq!(cap_eff_has_sys_admin(full), Some(true));
+        let sys_admin_only = "CapEff:\t0000000000200000\n";
+        assert_eq!(cap_eff_has_sys_admin(sys_admin_only), Some(true));
+        let everything_but = "CapEff:\t000001ffffdfffff\n";
+        assert_eq!(cap_eff_has_sys_admin(everything_but), Some(false));
+        assert_eq!(cap_eff_has_sys_admin("Name:\ttest\n"), None);
+    }
+
     unsafe extern "C" {
         fn geteuid() -> u32;
     }
@@ -304,7 +344,7 @@ mod linux {
     /// it: `BLKGETSIZE64` rather than the pair of macOS calls.
     #[test]
     fn a_loop_device_reports_its_real_length() {
-        if !is_root() {
+        if !can_attach_loop_devices() {
             // THIS DOES NOT eprintln! AND RETURN, WHICH IS WHAT IT USED
             // TO DO. libtest captures stdout AND stderr of a PASSING
             // test and discards them, so the "loud" line was written
@@ -321,9 +361,10 @@ mod linux {
             assert!(
                 std::env::var_os("AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP").is_some(),
                 "the Linux device-size probe's SUCCESS path was NOT exercised: \
-                 losetup needs root and euid is not 0. Run the suite as root \
-                 (`cargo test --test device_node_size`) to cover it, or set \
-                 AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 to accept the gap. \
+                 losetup needs CAP_SYS_ADMIN, which this process does not have \
+                 (as root with capabilities dropped, or not as root). Run the suite \
+                 with it (`cargo test --test device_node_size` as root) to cover it, \
+                 or set AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 to accept the gap. \
                  Note the FAILURE path of the same probe IS covered here \
                  unprivileged, by a_device_whose_size_cannot_be_measured_refuses_to_open."
             );
