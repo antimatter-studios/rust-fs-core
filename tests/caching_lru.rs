@@ -193,87 +193,172 @@ fn forwards_size_bytes_and_is_writable_from_inner() {
 ///
 /// An absolute threshold would encode this machine's speed and the
 /// build profile, and would have to be loose enough for the slowest
-/// runner -- at which point it stops failing on the defect. The two
-/// capacities are measured in the SAME process and the SAME build, so
-/// constant factors divide out and what is left is the shape of the
-/// curve. Measured with the identical harness:
+/// runner -- at which point it stops failing on the defect. Both arms
+/// are measured in the SAME process and the SAME build, so constant
+/// factors divide out and what is left is the shape of the curve.
+///
+/// # Why the two arms hold THE SAME NUMBER OF BLOCKS (#99)
+///
+/// This used to time one cache of 64 blocks against one cache of 4096.
+/// A ratio only cancels what both arms share, and those two did not
+/// share their working set: 256 KiB, resident in L2 throughout, against
+/// 16 MiB, which any other process on the machine evicts. Under load the
+/// large arm slowed 6.9x and the small one 1.4x, and correct code
+/// measured 8.4x -- then 22x-26x at load 40 -- against an 8x threshold
+/// whose weakest true positive was 18.2x. No threshold separated them.
+///
+/// So now both arms hold 4096 blocks and every sampled read touches a
+/// different one. The large arm is one cache of capacity 4096; the
+/// small arm is 64 caches of capacity 64, read round-robin. What the
+/// memory hierarchy does to one it does to the other, and the only thing
+/// left to differ is how many entries one cache's bookkeeping has to
+/// deal with.
+///
+/// # Why the MINIMUM of many short samples
+///
+/// A pre-emption only ever adds time, so the fastest of many samples is
+/// the estimate least touched by whatever else the machine is doing. A
+/// sample is 4096 reads -- a fraction of a millisecond at O(1), shorter
+/// than a scheduler slice -- and the arms are interleaved, so a burst of
+/// load lands on both rather than on whichever ran second. A single
+/// long run per arm, which this used to be, is inflated by every slice
+/// the thread lost during it.
+///
+/// # The threshold
+///
+/// Measured on a 4-core Cortex-A76, debug build, nine runs per row: at
+/// ambient load 11, and with six and then eight extra processes copying
+/// 64 MiB buffers in a loop (load 14 and 21):
 ///
 /// ```text
-///                 us/read at 64   us/read at 4096   ratio
-/// VecDeque, release      0.0387            1.5933     41x
-/// VecDeque, debug        0.0661            3.6798     56x
-/// index+list, release    0.0386            0.0459    1.19x
-/// index+list, debug      0.0419            0.0613    1.46x
+///                                                   ratio, lowest .. highest
+/// index + recency list (this crate)                          0.7 .. 1.0
+/// O(n) contiguous scan of the slab to find the entry        16.7 .. 32.5
+/// O(1) lookup, O(n) list walk to promote it                 38.1 .. 74.6
 /// ```
 ///
-/// The threshold sits at 8x: about five times above the worst passing
-/// measurement and about five times below the best failing one, in
-/// either profile. It is deliberately not tight -- this is a guard
-/// against a return to O(n), not a benchmark.
+/// The contiguous scan is the cheapest O(n) there is -- sequential
+/// memory, no pointer chasing -- so it is the weakest true positive.
+/// The threshold sits at 3x: three times the worst passing measurement
+/// and more than five times below the weakest failing one. Under the
+/// same eight-process load the previous two-capacity version of this
+/// test failed correct code in 6 of 10 runs (11.1x-35.0x); this one
+/// passed 10 of 10. It is a guard against a return to O(n), not a
+/// benchmark.
 ///
-/// The working set equals the capacity so the steady state is all
-/// hits, and `CountingDevice` underneath asserts no device reads
-/// happen during the timed section: without that, a change in miss
-/// rate could pay for the whole difference and the test would be
-/// measuring the wrong thing entirely.
+/// Every sampled read must be a hit, and `CountingDevice` underneath
+/// asserts no device read happens while sampling: without that, a
+/// change in miss rate could pay for the whole difference and the test
+/// would be measuring the wrong thing entirely.
 #[test]
 fn the_cost_of_a_cached_read_does_not_grow_with_the_capacity() {
     use fs_core::CountingDevice;
     use std::time::Instant;
 
-    const BS: u64 = 4096;
-    const BLOCKS: u64 = 8192;
-    const READS: usize = 100_000;
+    const BS: u64 = 512;
+    const READ_LEN: usize = 64;
+    /// Blocks held by each arm, and reads per sample.
+    const ENTRIES: usize = 4096;
+    const SMALL: usize = 64;
+    const SAMPLES: usize = 50;
 
-    fn per_read_micros(capacity: usize) -> f64 {
-        let counting = Arc::new(CountingDevice::new(Arc::new(Zeros(BS * BLOCKS))));
-        let cache = CachingDevice::read_only(counting.clone(), BS, capacity);
-        let mut buf = vec![0u8; 512];
-        // Warm the whole working set, then measure only hits.
-        for b in 0..capacity as u64 {
-            cache.read_at(b * BS, &mut buf).unwrap();
+    /// `ENTRIES` blocks held across `ENTRIES / capacity` caches of
+    /// `capacity` each, warmed.
+    struct Arm {
+        capacity: usize,
+        caches: Vec<(Arc<CountingDevice>, Arc<CachingDevice>)>,
+        buf: Vec<u8>,
+    }
+
+    impl Arm {
+        fn new(capacity: usize) -> Self {
+            let caches: Vec<_> = (0..ENTRIES / capacity)
+                .map(|_| {
+                    let counting = Arc::new(CountingDevice::new(Arc::new(Zeros(BS * 8192))));
+                    let cache = CachingDevice::read_only(counting.clone(), BS, capacity);
+                    (counting, cache)
+                })
+                .collect();
+            let mut arm = Arm {
+                capacity,
+                caches,
+                buf: vec![0u8; READ_LEN],
+            };
+            arm.sweep();
+            arm
         }
-        let device_reads_after_warm = counting.reads();
-        let (h0, m0) = cache.stats();
 
-        let sweeps = READS / capacity.max(1);
-        let reads = sweeps * capacity;
-        let started = Instant::now();
-        for _ in 0..sweeps {
-            for b in 0..capacity as u64 {
-                cache.read_at(b * BS, &mut buf).unwrap();
+        /// One read of every held block, each on a different block from
+        /// the read before it. Round-robin across the caches, so the
+        /// small arm moves through memory the way the large one does.
+        fn sweep(&mut self) {
+            let n = self.caches.len();
+            for i in 0..ENTRIES {
+                let (_, cache) = &self.caches[i % n];
+                cache.read_at((i / n) as u64 * BS, &mut self.buf).unwrap();
             }
         }
-        let elapsed = started.elapsed().as_secs_f64() * 1e6;
 
-        let (h1, m1) = cache.stats();
+        fn device_reads(&self) -> u64 {
+            self.caches.iter().map(|(c, _)| c.reads()).sum()
+        }
+
+        fn stats(&self) -> (u64, u64) {
+            self.caches.iter().fold((0, 0), |(h, m), (_, cache)| {
+                let (ch, cm) = cache.stats();
+                (h + ch, m + cm)
+            })
+        }
+
+        /// Microseconds per read over one sweep.
+        fn sample(&mut self) -> f64 {
+            let started = Instant::now();
+            self.sweep();
+            started.elapsed().as_secs_f64() * 1e6 / ENTRIES as f64
+        }
+    }
+
+    let mut small = Arm::new(SMALL);
+    let mut large = Arm::new(ENTRIES);
+    let before = [
+        (small.device_reads(), small.stats()),
+        (large.device_reads(), large.stats()),
+    ];
+
+    let (mut small_best, mut large_best) = (f64::MAX, f64::MAX);
+    for _ in 0..SAMPLES {
+        small_best = small_best.min(small.sample());
+        large_best = large_best.min(large.sample());
+    }
+
+    for (arm, (reads, (h0, m0))) in [&small, &large].into_iter().zip(before) {
+        let capacity = arm.capacity;
+        let (h1, m1) = arm.stats();
         assert_eq!(
             m1, m0,
-            "capacity {capacity}: the timed section must be all hits, or this measures \
+            "capacity {capacity}: sampling must be all hits, or this measures \
              device traffic rather than the cache's own bookkeeping"
         );
         assert_eq!(
-            counting.reads(),
-            device_reads_after_warm,
-            "capacity {capacity}: no device read may happen during the timed section"
+            arm.device_reads(),
+            reads,
+            "capacity {capacity}: no device read may happen while sampling"
         );
         assert_eq!(
             h1 - h0,
-            reads as u64,
+            (SAMPLES * ENTRIES) as u64,
             "capacity {capacity}: every read a hit"
         );
-        elapsed / reads as f64
     }
 
-    let small = per_read_micros(64);
-    let large = per_read_micros(4096);
-    let ratio = large / small.max(f64::MIN_POSITIVE);
+    let ratio = large_best / small_best.max(f64::MIN_POSITIVE);
     assert!(
-        ratio < 8.0,
-        "a cached read at capacity 4096 cost {large:.4} us against {small:.4} us at \
-         capacity 64 -- {ratio:.1}x. The per-read cost is growing with the capacity, \
-         which is the O(n) LRU this test exists to keep out: measured at 41x (release) \
-         and 56x (debug) with a linearly-scanned VecDeque, and 1.2x-1.5x with an index \
-         plus an intrusive recency list."
+        ratio < 3.0,
+        "a cached read at capacity {ENTRIES} cost {large_best:.4} us against \
+         {small_best:.4} us at capacity {SMALL}, both holding {ENTRIES} blocks -- \
+         {ratio:.1}x. The per-read cost is growing with the capacity, which is the \
+         O(n) LRU this test exists to keep out: measured at 16.7x-32.5x with a \
+         contiguous linear scan, and 0.7x-1.0x with an index plus an intrusive \
+         recency list."
     );
 }
