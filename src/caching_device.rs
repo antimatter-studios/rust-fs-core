@@ -35,7 +35,7 @@ pub const MAX_BLOCK_SIZE: u64 = 64 * 1024 * 1024;
 /// the writable half only when the caller had one to give:
 /// [`CachingDevice::new`] for a device that can be written,
 /// [`CachingDevice::read_only`] for one that cannot. A write to a cache
-/// built the second way is [`Error::ReadOnly`], which is what the
+/// built the second way is [`crate::Error::ReadOnly`], which is what the
 /// underlying device would have said.
 pub struct CachingDevice {
     inner: Arc<dyn BlockRead>,

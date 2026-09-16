@@ -57,6 +57,13 @@ jobs:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
           EXPECT_OVERFLOW_CHECKS: "1"
       - run: cargo clippy --locked --all-targets -- -D warnings
+      # `cargo doc` EXITS 0 ON WARNINGS, so an unresolved intra-doc link
+      # reaches main unseen unless warnings are denied here. Two did (#88).
+      # Declared through `env:` rather than an inline `VAR=... cargo doc`
+      # because this job also runs on windows-latest.
+      - run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: "-D warnings"
   fmt:
     name: fmt
     runs-on: ubuntu-latest

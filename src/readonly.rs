@@ -2,7 +2,7 @@
 //!
 //! [`ReadOnlyDevice`] wraps any `BlockRead` and presents it as a
 //! [`BlockDevice`] whose write path is unconditionally
-//! [`Error::ReadOnly`] and whose `is_writable()` is always `false` —
+//! [`crate::Error::ReadOnly`] and whose `is_writable()` is always `false` —
 //! regardless of what the underlying device supports.
 //!
 //! Useful when the caller wants type-level certainty that no writes can
