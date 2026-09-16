@@ -160,6 +160,15 @@ fn open_ro_then_flush_is_noop() {
 #[test]
 fn open_best_effort_returns_a_usable_device() {
     let path = tmp_image(&[42u8; 16]);
+    // OWNER-WRITE IS SET HERE, NOT ASSUMED. `File::create` takes 0o666
+    // masked by the process umask, so under `umask 0222` the file is 0o444,
+    // `open_rw` fails, and the device below comes back read-only for a
+    // reason that has nothing to do with `open_best_effort` (#93).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
     let dev = FileDevice::open_best_effort(&path).unwrap();
     let mut buf = [0u8; 1];
     dev.read_at(0, &mut buf).unwrap();
