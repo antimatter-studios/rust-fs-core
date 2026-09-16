@@ -89,12 +89,16 @@ fn declared_module(line: &str) -> Option<String> {
     // `pub mod` only. `pub(crate) mod` and a bare `mod` are not public
     // API and have no business in a reader's inventory.
     let rest = rest.trim_start().strip_prefix("pub mod ")?;
+    // A raw identifier's file has no `r#`: `pub mod r#type;` is `type.rs`.
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("r#").unwrap_or(rest);
     // The name ends at whatever follows it -- `;`, `{`, or the space
-    // before a comment.
+    // before a comment -- and NOT at the first non-ASCII-word character.
+    // Allow-listing `[A-Za-z0-9_]` cut `café` to `caf` (#102); stopping
+    // at the line's own syntax keeps any identifier Rust accepts whole.
     let name: String = rest
-        .trim_start()
         .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take_while(|c| !c.is_whitespace() && !matches!(c, ';' | '{' | '/'))
         .collect();
     (!name.is_empty()).then_some(name)
 }
@@ -221,6 +225,30 @@ pub mod inline_body { pub fn f() {} }
         ],
         "a public module was dropped because of how its line is written, which is \
          how one skips the README check entirely"
+    );
+}
+
+/// THE WHOLE IDENTIFIER, NOT ITS ASCII-WORD PREFIX (#102).
+///
+/// The name used to be collected with `take_while` over ASCII
+/// alphanumerics and `_`, so `r#type` became `r` and `café` became
+/// `caf`, and the README was then searched for `r.rs` and `caf.rs`:
+/// a false "missing" for a documented module, or a match against some
+/// unrelated `r.rs` that passes without checking the real file. A raw
+/// identifier's file carries no `r#`, so neither does the name.
+#[test]
+fn the_parser_keeps_the_whole_identifier() {
+    let src = r#"
+pub mod r#type;
+pub mod café;
+pub mod naïve_io { pub fn f() {} }
+pub mod r#match; // raw, with a comment
+"#;
+    assert_eq!(
+        public_modules(src),
+        vec!["type", "café", "naïve_io", "match"],
+        "a raw or Unicode module name was truncated, so the README would be \
+         searched for a file that is not the module's"
     );
 }
 
