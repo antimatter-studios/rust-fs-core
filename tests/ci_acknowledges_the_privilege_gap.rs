@@ -30,8 +30,9 @@
 //!   with the `env:` deleted.
 //!
 //! Parsed, none of those is an edge case: they are the grammar, and the
-//! quoting and the comments are resolved before this file sees
-//! anything. And the question becomes the accurate one -- does the STEP
+//! quoting and the YAML comments are resolved before this file sees
+//! anything. (A `#` inside a `run: |` block is shell, not YAML, and
+//! reaches `runs_the_suite` as text; it strips those itself.) And the question becomes the accurate one -- does the STEP
 //! that runs the suite have the variable, on itself, on its job, or on
 //! the workflow -- which is the defeat the scan actually allowed.
 //!
@@ -74,10 +75,73 @@ fn env_declares(env: Option<&Yaml>, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether a `run:` script runs the test suite. `cargo llvm-cov` runs
-/// it too, which is the half that was missed.
+/// Whether a `run:` script runs the test suite.
+///
+/// `cargo test`, its `cargo t` alias, `cargo llvm-cov` and `cargo nextest`
+/// all run it. So does a script the step calls that runs one of those:
+/// a script path the step names that exists in this repository is read
+/// and asked the same question. This was a two-spelling substring match,
+/// so a suite run through `./scripts/ci-test.sh` or `cargo nextest` was
+/// exempt, and the controls below read the extra, unguarded jobs as a
+/// healthier ratio (#125).
+///
+/// Shell comments are removed first: a `run: |` block is shell, and
+/// `# see also cargo test` in it runs nothing. (YAML comments never reach
+/// here; the parser drops them.)
 fn runs_the_suite(run: &str) -> bool {
-    run.contains("cargo test") || run.contains("cargo llvm-cov")
+    runs_the_suite_within(run, 3)
+}
+
+fn runs_the_suite_within(script: &str, depth: u8) -> bool {
+    let code: String = script
+        .lines()
+        .map(strip_shell_comment)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let words: Vec<&str> = code
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`'))
+        .filter(|w| !w.is_empty())
+        .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
+        .collect();
+    let direct = words
+        .windows(2)
+        .any(|pair| pair[0] == "cargo" && matches!(pair[1], "test" | "t" | "llvm-cov" | "nextest"));
+    direct
+        || (depth > 0
+            && words.iter().any(|word| {
+                repository_script(word)
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .is_some_and(|body| runs_the_suite_within(&body, depth - 1))
+            }))
+}
+
+/// `line` up to a `#` that begins a word, which is where a shell comment
+/// starts. Quotes are not tracked: a `#` inside a quoted string that
+/// follows a space is cut too, which can only make a step look like it
+/// runs less, and a quoted `cargo test` is not a run anyway.
+fn strip_shell_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+            return &line[..i];
+        }
+    }
+    line
+}
+
+/// `word` as a file in this repository, if it names one: `scripts/x.sh`,
+/// `./scripts/x.sh`, or an absolute path.
+fn repository_script(word: &str) -> Option<PathBuf> {
+    if !(word.contains('/') || word.ends_with(".sh")) {
+        return None;
+    }
+    let path = PathBuf::from(word);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(word.trim_start_matches("./"))
+    };
+    path.is_file().then_some(path)
 }
 
 fn parse(text: &str) -> Yaml<'_> {
@@ -270,6 +334,64 @@ jobs:
             unacknowledged(&yaml).len(),
             1,
             "the variable is named in prose and set nowhere"
+        );
+    }
+
+    /// THE SPELLINGS A SUBSTRING MISSED (#125): a script that runs the
+    /// suite, and `cargo nextest`. Each is reported when nothing
+    /// acknowledges the gap.
+    #[test]
+    fn a_suite_run_under_another_spelling_is_reported() {
+        let dir = std::env::temp_dir().join(format!("core-ci-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("ci-test.sh");
+        std::fs::write(&script, "#!/bin/sh\nset -e\ncargo test --locked \"$@\"\n").unwrap();
+        let quiet = dir.join("lint.sh");
+        std::fs::write(
+            &quiet,
+            "#!/bin/sh\n# cargo test runs elsewhere\ncargo fmt --check\n",
+        )
+        .unwrap();
+
+        for run in [
+            format!("{} --test device_node_size", script.display()),
+            format!("bash {}", script.display()),
+            "cargo nextest run --locked".to_string(),
+            "cargo t --locked".to_string(),
+        ] {
+            let yaml =
+                format!("on:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: {run}\n");
+            assert_eq!(unacknowledged(&yaml).len(), 1, "{run:?} runs the suite");
+        }
+        // A quoted `cargo test` still counts -- `bash -c "cargo test"` is a
+        // run -- so the only refusal here is a script that does not run it.
+        // Over-asking for the acknowledgement is the harmless direction.
+        let run = quiet.display();
+        let yaml =
+            format!("on:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: {run}\n");
+        assert!(
+            unacknowledged(&yaml).is_empty(),
+            "{run} does not run the suite"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A shell comment inside a `run:` block runs nothing (#125).
+    #[test]
+    fn a_shell_comment_in_a_run_block_is_not_a_run() {
+        let yaml = "\
+on:
+  pull_request:
+jobs:
+  lint:
+    steps:
+      - run: |
+          # see also cargo test --locked, in the test job
+          cargo fmt --check
+";
+        assert!(
+            unacknowledged(yaml).is_empty(),
+            "a comment names the suite and runs nothing"
         );
     }
 
