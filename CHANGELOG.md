@@ -11,6 +11,11 @@ reaches all of them.
 
 ### Fixed
 
+- The release workflow now runs the suite under `--release` as well as
+  debug, so the profile that gets published is tested (#111). It also
+  sets `AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP`, as `ci.yml` does. Without it
+  the next tag's test job would have failed in
+  `tests/device_node_size.rs`, which was added after v0.2.10.
 - `CachingDevice::stats()` and the constructors' `capacity` are
   documented. `stats()` is `(hits, misses)` over block lookups inside the
   cache: a read the cache bypasses (past the end, or spanning more than
