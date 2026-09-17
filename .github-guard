@@ -1,3 +1,8 @@
+# .github-guard — declarations github-guard reads (see the github-guard skill:
+# https://github.com/antimatter-studios/agent-skills/blob/main/.claude/skills/github-guard/README.md).
+# git-config format: check with `git config -f .github-guard --list`, and
+# double-quote any value containing # or ;.
+
 # Required status checks for main. A declaration beats discovery exactly.
 #
 # Discovery requires checks BY JOB NAME, which is a guess at the PR gate and
@@ -14,8 +19,9 @@
 #
 # Names must match the check-run names GitHub reports, including the
 # "test / <os>" job-matrix spelling.
-fmt
-coverage
-test / ubuntu-latest
-test / macos-latest
-test / windows-latest
+[checks]
+	required = fmt
+	required = coverage
+	required = test / ubuntu-latest
+	required = test / macos-latest
+	required = test / windows-latest
