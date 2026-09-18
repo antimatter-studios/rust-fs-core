@@ -72,15 +72,17 @@ Planned additions (not yet implemented):
 
 ## Git hooks
 
-Install once per clone:
+The guards are [github-guard](https://github.com/antimatter-studios/agent-skills)'s,
+installed once per clone into `.git/hooks`:
 
 ```sh
-./scripts/install-hooks.sh
+~/.claude/skills/github-guard/install.sh .
 ```
 
-Nothing is committed by the installer: a hook inside the working tree is a
-hook a branch checkout can replace, which is what moving them out of it
-prevented.
+Nothing is committed for them: a hook inside the working tree is a hook a
+branch checkout can replace, which is what moving them out of it prevented.
+The one tracked file is `.github-guard`, which declares the checks `main`
+requires.
 
 ### Why the dependency-pinning guard looks half-idle here
 
@@ -96,10 +98,10 @@ sibling to pin and that half never fires. It also refuses a missing or drifted
 `Cargo.lock` and runs `cargo metadata --locked` as a stale-lock check, and
 that half applies in full, because this crate does track its lockfile.
 
-The file is kept byte-identical to the siblings deliberately. The value of a
+The guard is the same in every repository deliberately. The value of a
 shared guard is that one audit covers every repository, so a local edit to
-trim the idle half would cost more than the idle half does. If the guard is
-updated, copy the new version across wholesale rather than merging it here.
+trim the idle half would cost more than the idle half does. It is updated by
+re-running github-guard's installer, never by editing the copy in `.git/hooks`.
 
 ## License
 
