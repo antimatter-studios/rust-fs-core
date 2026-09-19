@@ -6,6 +6,11 @@ license = "MIT"
 description = "Pure-Rust block-device framework — BlockRead/BlockDevice traits + FileDevice + CallbackDevice + LRU cache. Foundation crate for fs-* drivers and img-* containers."
 repository = "https://github.com/antimatter-studios/rust-fs-core"
 
+# The fuzz crate is its own package, on its own toolchain, and is not
+# part of this one. Without this, `cargo package` and `cargo publish`
+# try to include it and fail on the nightly-only dependency.
+exclude = ["fuzz"]
+
 [lib]
 # Published as `am-fs-core` on crates.io; consumers `use fs_core::...`.
 name = "fs_core"
