@@ -1,0 +1,40 @@
+[package]
+name = "fs-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# The explorer half of the fuzzing setup. The gate half is
+# tests/fuzz_decoders.rs in the parent crate, which replays and mutates
+# the same corpus on the stable toolchain.
+#
+# Fuzzing this crate is not like fuzzing the drivers: there is no
+# structure to mutate, because nothing here parses a filesystem. The
+# input is read as GEOMETRY, and each target asserts a property rather
+# than merely surviving -- see fuzz/shared/props.rs.
+#
+# Run one target:
+#   cargo +nightly fuzz run slice -- -max_total_time=60
+# Run all of them, which is what CI does:
+#   scripts/fuzz-all.sh 60
+
+[dependencies]
+libfuzzer-sys = "0.4"
+am-fs-core = { path = ".." }
+
+[[bin]]
+name = "slice"
+path = "fuzz_targets/slice.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache"
+path = "fuzz_targets/cache.rs"
+test = false
+doc = false
+bench = false

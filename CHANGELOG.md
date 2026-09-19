@@ -9,6 +9,32 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Added
+
+- **The geometry arithmetic is fuzzed, on two tiers.** Nothing here
+  parses a filesystem, so there is no structure to mutate: what this
+  crate does is arithmetic on offsets and lengths that ultimately came
+  from an image, in a release profile with `overflow-checks` off. So the
+  input is read as *geometry* and each target asserts a **property**
+  rather than merely surviving — a slice answers a read inside it with
+  the parent's bytes from `start + offset`, `SliceReader` and
+  `OwnedSlice` agree, and a cache answers exactly what the device under
+  it would, including on the second read of the same range.
+
+  That distinction is the point. "Arithmetic that wrapped in the release
+  profile and answered a read inside a slice's own declared length with
+  somebody else's bytes" is on the list of things the 2026-09-06 wave
+  fixed by hand, and a target that only checked for panics would sail
+  straight past it. Verified by injecting an off-by-one into `rebase`
+  and a widened bound: both are caught as *wrong answers*, not crashes.
+
+  The parent device is filled with a position hash rather than zeros,
+  because a slice reading from the wrong offset returns bytes that are
+  perfectly valid and belong somewhere else — only content that differs
+  per position can tell the two apart, and
+  `the_parent_pattern_distinguishes_every_offset` checks it actually
+  does (#146).
+
 ### Fixed
 
 - The release workflow now runs the suite under `--release` as well as
