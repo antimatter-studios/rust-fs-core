@@ -30,6 +30,14 @@ jobs:
           toolchain: 1.95.0
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: verify packaged output-budget script
+        shell: bash
+        run: |
+          files="$(cargo package --locked --list)"
+          grep -Fqx 'scripts/output-budget.sh' <<<"$files" || {
+            echo 'package omits scripts/output-budget.sh' >&2
+            exit 1
+          }
 
       - name: verify tag matches Cargo.toml version
         run: |
@@ -40,7 +48,10 @@ jobs:
             exit 1
           fi
 
-      - run: cargo test --locked --all-targets
+      - name: test (debug, quiet and budgeted)
+        run: |
+          bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets
+          bash scripts/test-floor.sh debug 330
       # A RELEASE-PROFILE RUN, DECIDED IN #111. The profile published is
       # the release one, and optimisation can change behaviour the debug
       # run never sees: `debug_assert!` bodies vanish, overflow wraps.
@@ -51,7 +62,18 @@ jobs:
       # meant to be off under --release, so the handshake would arm an
       # assertion that fails every green run. tests/ci_profile.rs refuses
       # that combination.
-      - run: cargo test --locked --release --all-targets
+      - name: test (release, quiet and budgeted)
+        run: |
+          bash scripts/tier.sh "test (release)" release 750 50000 -- cargo test --locked --release --all-targets
+          bash scripts/test-floor.sh release 330
+      - name: keep the full test transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-release
+          path: tmp/logs/
+          if-no-files-found: warn
+          retention-days: 14
       - run: cargo clippy --locked --all-targets -- -D warnings
 
   publish:

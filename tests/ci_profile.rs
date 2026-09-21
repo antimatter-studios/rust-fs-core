@@ -835,10 +835,13 @@ fn scan_shell(line: &str) -> ShellScan {
 /// Leading `NAME=value` assignments and an `env` prefix are stepped
 /// over, because `EXPECT_OVERFLOW_CHECKS=1 cargo test …` is exactly the
 /// spelling this guard is looking for; so is a `+toolchain` selector
-/// between `cargo` and its subcommand. A wrapper -- `sudo`, `xargs`, a
-/// script -- is not recognised and the command does not count, which is
-/// the strict direction.
+/// between `cargo` and its subcommand. The one wrapper recognised is this
+/// repository's `scripts/tier.sh ... -- cargo test ...`: it preserves the
+/// command's status and is behavior-tested by `tests/output_budget.rs`.
+/// Arbitrary wrappers such as `sudo` and `xargs` remain unrecognised, which
+/// is the strict direction.
 fn cargo_test_arguments(words: &[String]) -> Option<Vec<&str>> {
+    let words = budgeted_tier_payload(words).unwrap_or(words);
     let mut words = words
         .iter()
         .map(String::as_str)
@@ -868,6 +871,54 @@ fn cargo_test_arguments(words: &[String]) -> Option<Vec<&str>> {
         arguments.push(word);
     }
     Some(arguments)
+}
+
+/// Return the command after this repository's checked output-budget adapter.
+///
+/// The adapter's interface has a literal `--`, so this does not search an
+/// arbitrary command for the words `cargo test`. It accepts only `tier.sh`
+/// under a `scripts/` path, optionally launched through Bash, after ordinary
+/// environment assignments. That keeps the workflow guard coupled to the
+/// behavior-tested wrapper rather than teaching it to trust every script.
+fn budgeted_tier_payload(words: &[String]) -> Option<&[String]> {
+    let mut at = 0;
+    while words
+        .get(at)
+        .is_some_and(|word| word == "env" || (!word.starts_with('-') && word.contains('=')))
+    {
+        at += 1;
+    }
+    if words
+        .get(at)
+        .is_some_and(|word| word == "bash" || word.rsplit('/').next() == Some("bash"))
+    {
+        at += 1;
+    }
+    let adapter = words.get(at)?;
+    if adapter.rsplit('/').next() != Some("tier.sh")
+        || !adapter.split('/').any(|part| part == "scripts")
+    {
+        return None;
+    }
+    let delimiter = words[at + 1..].iter().position(|word| word == "--")? + at + 1;
+    Some(&words[delimiter + 1..])
+}
+
+#[test]
+fn the_checked_tier_wrapper_still_exposes_the_gating_cargo_test() {
+    let wrapped = shell_commands(
+        "bash scripts/tier.sh 'test (debug)' debug 750 50000 -- cargo test --locked --all-targets",
+    );
+    assert_eq!(wrapped.len(), 1);
+    assert_eq!(
+        cargo_test_arguments(&wrapped[0].0),
+        Some(vec!["--locked", "--all-targets"])
+    );
+
+    let arbitrary = shell_commands(
+        "bash scripts/not-the-checked-wrapper.sh -- cargo test --locked --all-targets",
+    );
+    assert_eq!(cargo_test_arguments(&arbitrary[0].0), None);
 }
 
 /// Cargo options that take their value as the NEXT argument.

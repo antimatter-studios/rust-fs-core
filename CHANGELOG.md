@@ -11,6 +11,13 @@ reaches all of them.
 
 ### Added
 
+- **The test-output budget is now a packaged, canonical family asset.**
+  `scripts/output-budget.sh` keeps passing test runs quiet while retaining
+  complete logs, and `scripts/test-floor.sh` rejects a green run that did not
+  execute the expected suite. The behavior is covered by tests, CI retains
+  the logs and coverage report, and consumers can resolve the script from the
+  published crate without cloning this repository.
+
 - **The geometry arithmetic is fuzzed, on two tiers.** Nothing here
   parses a filesystem, so there is no structure to mutate: what this
   crate does is arithmetic on offsets and lengths that ultimately came
@@ -261,7 +268,8 @@ reaches all of them.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.10...HEAD
+[0.2.11]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.10...v0.2.11
 [0.2.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.1...v0.2.2

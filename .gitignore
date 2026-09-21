@@ -4,3 +4,6 @@
 
 # chore writes its fingerprint cache here
 .chore/
+
+# Full transcripts retained by the output-budget test tiers.
+/tmp/

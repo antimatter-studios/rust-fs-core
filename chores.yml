@@ -26,6 +26,30 @@ chore_min_version: 0.6.0
 # differs from rust-blk-probe, whose single binary lets its `artifact` name a
 # file: this crate produces libfs_core.a AND include/fs_core.h, so there is
 # no single path to name.
+#
+# QUIET TEST TIERS, WITH MEASURED BUDGETS AND EXECUTED-TEST FLOORS.
+#
+# Each tier keeps its complete transcript in tmp/logs/, prints one verdict on
+# success, prints the tail on failure, and exits 65 when a passing run exceeds
+# either budget. `chore test -- --verbose` or AM_FS_CORE_VERBOSE=1 streams the
+# transcript without lifting the budget.
+#
+# Measured from a clean Linux checkout on 2026-09-21. Debug produced 557 lines
+# / 31,250 bytes and executed 365 tests; the 750-line / 50,000-byte ceiling
+# leaves room for cold-build and platform variation, while the floor of 330
+# catches a tier that silently stops running a material part of the suite.
+# Release uses the same selection and measured the same 557 lines / 31,295
+# bytes after its cold LTO build. Coverage measured 575 lines / 32,607 bytes
+# and executed the same 374 tests as the post-change debug run:
+#
+#   tier       measured locally       budget           floor
+#   debug      557 / 31,250 bytes      750 / 50,000     330
+#   release    557 / 31,295 bytes      750 / 50,000     330
+#   coverage   575 / 32,607 bytes      800 / 60,000     330
+#
+# scripts/output-budget.sh is the one canonical neutral family source. See
+# docs/output-budget.md; consumers invoke it through their pinned
+# ../rust-fs-core sibling and own their adapters, budgets, floors and artifacts.
 vars:
   TRIPLE: aarch64-apple-darwin
   LIBNAME: fs_core
@@ -136,9 +160,29 @@ tasks:
     desc: Debug build
     cmds: ['cargo build']
 
+  test:debug:
+    desc: Debug-profile suite, including every target
+    cmds:
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets'
+      - 'bash scripts/test-floor.sh debug 330'
+
+  test:release:
+    desc: Release-profile suite, including every target
+    cmds:
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 750 50000 -- cargo test --locked --release --all-targets'
+      - 'bash scripts/test-floor.sh release 330'
+
   test:
-    desc: Test suite
-    cmds: ['cargo test']
+    desc: Debug and release test tiers
+    cmds:
+      - task: test:debug
+      - task: test:release
+
+  coverage:
+    desc: Instrumented suite with the same 90% line-coverage gate as CI
+    cmds:
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --html --output-dir target/llvm-cov --fail-under-lines 90'
+      - 'bash scripts/test-floor.sh coverage 330'
 
   clean:
     desc: Remove this crate's cargo output
