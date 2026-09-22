@@ -74,3 +74,46 @@ A future mechanism outside both the driver and harness dependency graphs could
 also provide the runtime wrapper. Until then, the direction stays explicit:
 core owns the script, drivers own their tier policy, and harnesses only receive
 the staged runtime material.
+
+## Why the wrapper did not move into `am-ci-guard` (#156)
+
+`am-ci-guard` was added to this workspace to end the same kind of
+duplication one layer up: `tests/ci_aggregate_gate.rs` existed in eleven
+repositories as ten distinct files. The obvious next step is to move this
+script in there too, so one crate dependency delivers everything. It was
+considered and rejected, and this section is here so it is not reopened
+without a new argument.
+
+**The script has to run where the crate cannot reach.** `rust-fs-ext4`,
+`rust-fs-xfs` and `rust-fs-btrfs` run `chore test:vm`: the suite compiles
+and runs *inside the guest*, which has no cargo registry, no `CARGO_HOME`
+and no Rust toolchain of its own. #153 names this as the actual blocker —
+"the blocker is the guest, not the merge". A Rust entry point would have to
+be cross-compiled for the guest and shipped there, which is strictly more
+machinery than transferring one 94-line file that `bash` already runs. A
+shell script genuinely cannot be delivered by `[dev-dependencies]` alone,
+and that argument does not disappear by rewriting it in Rust — it moves to
+a harder place.
+
+**A crate already delivers it, and a second route would be the problem
+again.** This script is inside the published `am-fs-core` archive — `ci.yml`
+has a step that fails the build if `cargo package --list` stops naming it —
+and `rust-fs-ntfs/scripts/resolve-output-budget.sh` already resolves it
+through `cargo metadata`, verifying the API version and the SHA-256. Adding
+a second delivery path through `am-ci-guard` would give one file two ways to
+be reached, which is the shape of #153 ("sourced four different ways"), not
+the fix for it.
+
+**Moving the bytes is a cross-repo lockstep, not a refactor.** ntfs's
+resolver hard-fails on a digest of this exact file. Relocating it — even
+without changing a character — breaks the sibling branch of that resolver
+the moment a developer has both checkouts. That belongs with the consumer
+migration #153 sets out, in one deliberate sweep, not in the change that
+merely creates the crate.
+
+**So: this file stays the one canonical copy, at this path, byte for byte.**
+`am-ci-guard` owns the CI *gate*; `scripts/output-budget.sh` owns test
+*output*. The remaining divergent copies are all in consumer repositories —
+`fs-linux-test-harness`, `rust-img-vhd`, `rust-img-vhdx`, `rust-img-vmdk`
+and `rust-img-qcow2` — and deleting them is #153's migration, in the order
+it gives, ending with the harness's copy once nothing reads it.

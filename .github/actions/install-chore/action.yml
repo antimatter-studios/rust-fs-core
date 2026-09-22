@@ -1,0 +1,151 @@
+name: Install chore
+description: >-
+  Install the pinned `chore` binary from its release tarball, checksum-verified,
+  and put it on PATH. One copy of the asset-naming convention for the whole
+  constellation.
+
+# WHY THIS EXISTS (antimatter-studios/chore#52, rust-fs-core#156).
+#
+# `chore` publishes assets named `chore-{version}-{os}-{arch}.tar.gz`, and
+# until now every consumer re-implemented that convention plus the
+# `uname` -> arch mapping for itself, three different ways: a per-repo
+# `scripts/ci-install-chore.sh` in xfs/btrfs/ext4, sixteen lines of
+# asset-mapping `case` inlined FOUR TIMES in rust-fs-ntfs's ci.yml, and
+# nothing at all in the remaining eight.
+#
+# It has already cost an outage. A fifth hand-written copy in ntfs's fuzz
+# workflow asked for `chore-linux-amd64.tar.gz` -- wrong on both halves,
+# no version and `amd64` where the releases say `x86_64` -- and 404'd on
+# every scheduled run until someone noticed (rust-fs-ntfs#314). The same
+# file had the correct mapping four times over; there was simply nothing
+# forcing the fifth to agree.
+#
+# The convention belongs to whoever publishes the releases, so this action
+# is the one place that spells it. GitHub resolves `uses: owner/repo/path@ref`,
+# so a consumer reaches it without vendoring anything:
+#
+#   - uses: antimatter-studios/rust-fs-core/.github/actions/install-chore@main
+#     with:
+#       version: "0.11.0"
+#
+# PIN THE `@ref`. `@main` is this action changing under a repository with
+# no diff to review; a tag or a commit sha is what makes the version of the
+# installer as deliberate as the version it installs.
+#
+# WINDOWS. chore publishes linux and darwin builds only, and `uname -s`
+# under Git Bash reports `MINGW64_NT-*`, so there is nothing to install.
+# This action FAILS there rather than silently doing nothing -- a silent
+# no-op leaves the next step failing on `chore: command not found`, which
+# names the wrong cause. Consumers with a Windows leg guard the step:
+#
+#   - uses: .../install-chore@<ref>
+#     if: runner.os != 'Windows'
+#
+# A STEP-level `if:`, not a job-level one. A job-level `if:` makes the
+# whole job non-gating, which is a different decision with its own cost --
+# see the am-ci-guard crate docs.
+
+inputs:
+  version:
+    description: >-
+      The chore release to install, without the leading `v`. Pinned, because
+      an unpinned installer makes a workflow's behaviour depend on whatever
+      shipped that morning -- the opposite of what pinning the siblings is for.
+    required: false
+    default: "0.11.0"
+  destination:
+    description: Directory to install into. Added to PATH.
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: The version that was installed, as `chore --version` reports it.
+    value: ${{ steps.install.outputs.version }}
+  path:
+    description: Absolute path of the installed binary.
+    value: ${{ steps.install.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        CHORE_VERSION: ${{ inputs.version }}
+        CHORE_DESTINATION: ${{ inputs.destination }}
+      run: |
+        set -euo pipefail
+
+        case "$(uname -s)" in
+            Linux)  os=linux ;;
+            Darwin) os=darwin ;;
+            *)
+                echo "::error::chore publishes linux and darwin builds only, and this" \
+                     "runner reports $(uname -s). Guard the step with" \
+                     "\`if: runner.os != 'Windows'\` and do whatever it was going to do" \
+                     "another way." >&2
+                exit 1
+                ;;
+        esac
+        # The release names these `x86_64` and `arm64`. `uname -m` says
+        # `arm64` on darwin and `aarch64` on linux for the same machine,
+        # and `amd64` is what people type from memory -- getting this
+        # wrong is the 404 in chore#52.
+        case "$(uname -m)" in
+            x86_64 | amd64)  arch=x86_64 ;;
+            aarch64 | arm64) arch=arm64 ;;
+            *)
+                echo "::error::no chore build for $(uname -m)" >&2
+                exit 1
+                ;;
+        esac
+
+        tarball="chore-${CHORE_VERSION}-${os}-${arch}.tar.gz"
+        base="https://github.com/antimatter-studios/chore/releases/download/v${CHORE_VERSION}"
+        work="${RUNNER_TEMP:-$(mktemp -d)}/install-chore"
+        mkdir -p "$work"
+
+        # A 404 here is a version that was never released or an asset name
+        # that does not exist. `curl -f` turns it into a non-zero exit
+        # instead of a 9-byte "Not Found" that `tar` then fails to read,
+        # which is the failure that reads as a corrupt archive.
+        curl -fsSL --retry 3 --retry-delay 2 -o "$work/$tarball" "$base/$tarball" || {
+            echo "::error::cannot download $tarball from $base -- is v${CHORE_VERSION}" \
+                 "released, and does it publish ${os}-${arch}?" >&2
+            exit 1
+        }
+        curl -fsSL --retry 3 --retry-delay 2 -o "$work/checksums.txt" "$base/checksums.txt"
+
+        # macOS has no sha256sum; `shasum -a 256` reads the same format.
+        # Verified rather than trusted: the tarball is fetched over the
+        # network into a job that then runs it.
+        if command -v sha256sum >/dev/null 2>&1; then
+            check() { sha256sum -c -; }
+        else
+            check() { shasum -a 256 -c -; }
+        fi
+        line="$(grep " ${tarball}\$" "$work/checksums.txt" || true)"
+        [ -n "$line" ] || {
+            echo "::error::$tarball is not listed in checksums.txt for v${CHORE_VERSION}" >&2
+            exit 1
+        }
+        (cd "$work" && printf '%s\n' "$line" | check)
+
+        tar -xzf "$work/$tarball" -C "$work"
+        bin="$(find "$work" -type f -name chore -perm -u+x | head -1)"
+        [ -n "$bin" ] || {
+            echo "::error::no chore binary inside $tarball" >&2
+            exit 1
+        }
+
+        dest="${CHORE_DESTINATION:-$HOME/.local/bin}"
+        # mkdir THEN install, because BSD install has no -D: on macOS
+        # `install -D` is an unknown option, not a request to make the parent.
+        mkdir -p "$dest"
+        install -m 0755 "$bin" "$dest/chore"
+        echo "$dest" >> "$GITHUB_PATH"
+
+        echo "path=$dest/chore" >> "$GITHUB_OUTPUT"
+        echo "version=$("$dest/chore" --version | head -1)" >> "$GITHUB_OUTPUT"
+        "$dest/chore" --version | head -1

@@ -1,3 +1,21 @@
+# THE WORKSPACE EXISTS SO THE CI GUARD CAN SHIP WITHOUT am-fs-core (#156).
+#
+# Ten of the twelve drivers pin `am-fs-core = "0.2.10"` and cannot bump:
+# #147 removed the only way the four image crates allocate and has no
+# replacement yet. A guard shipped inside this package would inherit that
+# deadlock and nobody could adopt it. `crates/am-ci-guard` is versioned
+# independently and taken as a `[dev-dependencies]` entry, so a consumer
+# can be on `am-ci-guard 0.1` while still pinning `am-fs-core 0.2.10`.
+#
+# `fuzz` is excluded rather than a member: it is a nightly-only
+# cargo-fuzz package, and a member would drag it into `cargo build
+# --workspace` on stable. Excluding it here is also what keeps
+# `cargo +nightly fuzz run` working -- a nested package that is neither
+# a member nor excluded makes cargo refuse to build it at all.
+[workspace]
+members = ["crates/am-ci-guard"]
+exclude = ["fuzz"]
+
 [package]
 name = "am-fs-core"
 version = "0.2.11"
@@ -9,7 +27,14 @@ repository = "https://github.com/antimatter-studios/rust-fs-core"
 # The fuzz crate is its own package, on its own toolchain, and is not
 # part of this one. Without this, `cargo package` and `cargo publish`
 # try to include it and fail on the nightly-only dependency.
-exclude = ["fuzz"]
+#
+# `crates` is the same argument for `am-ci-guard`, and is belt and
+# braces: cargo already skips a subdirectory that is its own package.
+# Naming it means the published tarball cannot start carrying a second
+# crate's sources because someone changed how that skip works. The
+# `verify packaged output-budget script` step in ci.yml compares the
+# file list, so a regression here is caught rather than published.
+exclude = ["fuzz", "crates"]
 
 [lib]
 # Published as `am-fs-core` on crates.io; consumers `use fs_core::...`.
@@ -34,6 +59,14 @@ crate-type = ["staticlib", "rlib"]
 # four copies of this guard family stay one answer rather than two.
 saphyr = "0.0.12"
 toml = "1.1.5"
+# The shared CI gate (#156), the second crate in this workspace. This
+# repository is its first consumer as well as its home: tests/ci_aggregate_gate.rs
+# is the three-line file every driver gets, so the shape is proved here
+# before anyone else is asked to adopt it.
+#
+# Path with no version, which is what keeps am-fs-core's published
+# manifest unchanged: cargo strips a path-only dev-dependency on publish.
+am-ci-guard = { path = "crates/am-ci-guard" }
 
 [profile.release]
 lto = true

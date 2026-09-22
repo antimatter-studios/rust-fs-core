@@ -1,0 +1,7 @@
+# The am-ci-guard fixtures are verbatim copies of other repositories'
+# ci.yml and .github-guard, and its tests mutate them by matching exact
+# text containing `\n`. This repository's CI runs that suite on
+# windows-latest, where a CRLF checkout would stop every mutation
+# matching. Pin them to LF so the fixture a test reads is the fixture
+# that was committed, on every runner.
+crates/am-ci-guard/tests/fixtures/** text eol=lf

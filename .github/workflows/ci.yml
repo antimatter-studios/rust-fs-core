@@ -77,6 +77,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - run: cargo clippy --locked --all-targets -- -D warnings
+      # am-ci-guard is the OTHER package in this workspace (#156): the
+      # shared CI gate every driver takes as a dev-dependency. It is
+      # deliberately not a default workspace member -- `coverage` runs
+      # `--fail-under-lines 90` against this crate and the tier floors in
+      # the step above are measured on this crate's output, and neither
+      # should start meaning something else because a second package
+      # joined the run. So nothing above builds it, and this is where it
+      # is built, linted and proved.
+      #
+      # Its tests are the mutation suite: they take rust-fs-xfs's and
+      # rust-partitions' real ci.yml and .github-guard, break them one
+      # way at a time, and require the specific check to fire. That is
+      # the only evidence that distinguishes a working guard from one
+      # that reads nothing -- both are green otherwise.
+      - name: am-ci-guard (the shared gate, and the proof it fails when it should)
+        run: |
+          cargo clippy --locked -p am-ci-guard --all-targets -- -D warnings
+          cargo test --locked -p am-ci-guard
       # `cargo doc` EXITS 0 ON WARNINGS, so an unresolved intra-doc link
       # reaches main unseen unless warnings are denied here. Two did (#88).
       # Declared through `env:` rather than an inline `VAR=... cargo doc`

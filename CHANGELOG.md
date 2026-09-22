@@ -11,6 +11,37 @@ reaches all of them.
 
 ### Added
 
+- **`am-ci-guard`, and this repository is now a workspace.** The CI gate was
+  copied, not shared: `tests/ci_aggregate_gate.rs` existed in eleven
+  repositories as ten distinct files of 161-173 lines, and stripping the
+  module docs every one of them was the same code — fifty lines of
+  hand-rolled YAML scanning nobody had a reason to write eleven times. Three
+  of those copies were made on one day by three different agents, each told
+  to port it from a sibling. `crates/am-ci-guard` is that code once, taken as
+  a `[dev-dependencies]` entry, and a consumer's test file is three lines.
+
+  It is a **separate package with its own version line**, which is the whole
+  reason the workspace exists: ten of the twelve drivers pin
+  `am-fs-core = "0.2.10"` and cannot bump until #147 has a replacement, so a
+  guard shipped inside `am-fs-core` would have been unadoptable by everyone
+  who needs it.
+
+  **`am-fs-core` itself is unchanged** — same version, same `fs_core` lib,
+  same `staticlib`/`rlib`, same public API, same 65 files in the published
+  archive, and `path = "../rust-fs-core"` still resolves to it. The gate's
+  own tests prove it fails when it should, by mutating rust-fs-xfs's and
+  rust-partitions' real `ci.yml` and `.github-guard` one break at a time.
+  (#156)
+
+- **A composite action for installing `chore`.** Three repositories each had
+  a copy of `scripts/ci-install-chore.sh`, one had the asset-name mapping
+  inlined four times, and a fifth hand-written copy got the name wrong and
+  404'd on every scheduled run until someone noticed. The naming convention
+  belongs to whoever publishes the releases, so it is spelled once, in
+  `.github/actions/install-chore`, checksum-verified, for linux-x86_64,
+  linux-aarch64, darwin-arm64 and darwin-x86_64.
+  (antimatter-studios/chore#52, #156)
+
 - **One check gates a merge, and it stands for every job.** `ci.yml` grows an
   always-run `ci-ok` job that `needs:` every other job in the workflow and
   fails when any of them failed, was cancelled or was *skipped*, and
