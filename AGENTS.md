@@ -229,8 +229,8 @@ silent break in ten repositories rather than a failure here.
 ## What gates a merge
 
 **One required check: `ci-ok`.** It carries `if: always()`, `needs:` every
-other job in `ci.yml` — `test` (the ubuntu / macOS / Windows matrix), `fmt`,
-`coverage` and `gate` — and fails when any of them failed, was cancelled or was
+other job in `ci.yml` — `test` (the ubuntu / macOS / Windows matrix), `fmt`
+and `coverage` — and fails when any of them failed, was cancelled or was
 **skipped**. It runs no tests of its own, deliberately: it is a claim about the
 other jobs, so it must not be able to pass work of its own off as theirs.
 
@@ -249,11 +249,17 @@ in this constellation:
   *pending*, not failing. With `enforce_admins` on, nothing merges and there is
   no red check to point at.
 
-The `gate` job holds both halves mechanically by running **`chore ci:gate`**.
-Those rules were `tests/ci_aggregate_gate.rs` here, then an `am-ci-guard`
-dev-dependency (#156, #157); whether they belong back in this repository's
-`tests/` is open in **#159**. Read that pull request before touching `ci.yml`
-or the gate, and expect to rebase onto it.
+**`tests/ci_aggregate_gate.rs` holds both halves mechanically** — every job in
+`ci.yml` must appear in `ci-ok`'s `needs:`, and `.github-guard` must require
+`ci-ok` and nothing else.
+
+It briefly lived elsewhere and came back, which is worth knowing before you
+move it again. It was an `am-ci-guard` dev-dependency (#156, #157), then a
+`chore ci:gate` task, and both were wrong for the same reason: a checker that
+reads two text files and compares strings is not this crate's code, and putting
+it in a shared tool made a release of that tool a prerequisite for a change
+here. #158 and #159 reverted both. It is a test in this repository, and that is
+where it stays.
 
 `release.yml` triggers on a `v*.*.*` tag and `fuzz.yml` is dispatch plus a
 nightly cron, so neither ever reports on a pull request and neither may gate.
