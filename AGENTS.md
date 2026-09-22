@@ -249,17 +249,21 @@ in this constellation:
   *pending*, not failing. With `enforce_admins` on, nothing merges and there is
   no red check to point at.
 
-**`tests/ci_aggregate_gate.rs` holds both halves mechanically** — every job in
-`ci.yml` must appear in `ci-ok`'s `needs:`, and `.github-guard` must require
-`ci-ok` and nothing else.
+**`chore check:ci-gate` holds both halves mechanically** — every job in `ci.yml`
+must appear in `ci-ok`'s `needs:`, and `.github-guard` must require `ci-ok` and
+nothing else. The task names `scripts/ci-gate.sh` and nothing else, so the
+script is what can be tested, reviewed and run without `chore` at all.
 
-It briefly lived elsewhere and came back, which is worth knowing before you
-move it again. It was an `am-ci-guard` dev-dependency (#156, #157), then a
-`chore ci:gate` task, and both were wrong for the same reason: a checker that
-reads two text files and compares strings is not this crate's code, and putting
-it in a shared tool made a release of that tool a prerequisite for a change
-here. #158 and #159 reverted both. It is a test in this repository, and that is
-where it stays.
+It took three attempts to put this in the right place, which is worth knowing
+before you move it again. It was `tests/ci_aggregate_gate.rs`, then an
+`am-ci-guard` dev-dependency (#156, #157), then a `ci:gate` subcommand built
+into `chore` itself. The last two were wrong the same way: they made a release
+of a shared tool a prerequisite for a change here, and `chore` is a
+general-purpose task runner, not this project's utility bin. The first was
+wrong too, for a subtler reason — it parses a YAML file and compares strings,
+exercising nothing this crate ships, and as a `cargo test` it **counted towards
+the executed-test floor the gate itself enforces**, so the suite could satisfy
+its own floor partly by checking its own CI config.
 
 `release.yml` triggers on a `v*.*.*` tag and `fuzz.yml` is dispatch plus a
 nightly cron, so neither ever reports on a pull request and neither may gate.
