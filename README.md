@@ -6,8 +6,11 @@ driver and disk-image reader plugs into.
 ## What it gives you
 
 - `BlockRead` — read-only random-access block device (`read_at` + `size_bytes`)
-- `BlockDevice: BlockRead` — adds optional `write_at` / `flush` / `is_writable`
-- `FileDevice` — backed by a regular file, optional read-only
+- `BlockDevice: BlockRead` — adds optional `write_at` / `flush` /
+  `is_writable`, and `set_len` / `can_grow` for the devices that can change
+  their own length
+- `FileDevice` — backed by a regular file, optional read-only; the one device
+  here that can grow, when it is open read-write on a regular file
 - `CallbackDevice` — backed by host-process-owned callbacks (FFI from
   Swift / Go / C++)
 - `CachingDevice` — LRU read-cache decorator over a `BlockRead`, and over a

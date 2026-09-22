@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 /// A file opened as a block device.
@@ -58,8 +59,41 @@ pub struct FileDevice {
     /// putting the `File` in here would reintroduce the serialisation
     /// the shared guard exists to avoid.
     io_lock: RwLock<()>,
-    size: u64,
+    /// ATOMIC BECAUSE [`BlockDevice::set_len`] MOVES IT, AND
+    /// `size_bytes` TAKES NO LOCK.
+    ///
+    /// It was a plain `u64`, which was right while nothing could change
+    /// it. `set_len` takes `&self` -- every method on these traits does,
+    /// because the devices are held behind `Arc<dyn _>` -- so the number
+    /// needs interior mutability, and the cheapest correct one is an
+    /// atomic rather than putting it under `io_lock`.
+    ///
+    /// Not under `io_lock` DELIBERATELY: `size_bytes` is called on the
+    /// hot path of every wrapper in this crate ([`crate::CachingDevice`]
+    /// asks it twice per read), and routing it through a lock a writer
+    /// holds exclusively would make an ordinary read contend with an
+    /// ordinary write to learn a number that fits in a register.
+    ///
+    /// `set_len` still takes `io_lock` exclusively -- it has real I/O to
+    /// exclude -- and publishes this afterwards. See its own note for
+    /// which of the two it moves first.
+    size: AtomicU64,
     writable: bool,
+    /// Whether `set_len` can do anything: a writable handle on a REGULAR
+    /// FILE.
+    ///
+    /// Both halves are needed and neither implies the other. A read-only
+    /// handle obviously cannot truncate. A BLOCK DEVICE NODE is the case
+    /// that is easy to miss: `/dev/sdX` opened read-write is writable,
+    /// `write_at` works on it, and its length is the kernel's rather than
+    /// ours -- `ftruncate` on it is not a resize, and answering `true`
+    /// here would promise an image writer room it can never get.
+    ///
+    /// Decided once, at open, from the same `metadata` call that
+    /// `measure_size` is about to make: asking on every `can_grow` would
+    /// turn a capability question into a syscall, and the file type of an
+    /// already-open descriptor does not change.
+    growable: bool,
     /// Test-only witness that a thread reached `io_lock` — see
     /// [`LockArrivals`]. Absent from every non-test build, and the
     /// `arriving` it feeds compiles to nothing there.
@@ -138,8 +172,11 @@ impl FileDevice {
         Ok(Self {
             file,
             io_lock: RwLock::new(()),
-            size,
+            size: AtomicU64::new(size),
             writable: false,
+            // A read-only handle cannot change any length, whatever it
+            // is open on.
+            growable: false,
             #[cfg(test)]
             arrivals: LockArrivals::default(),
         })
@@ -149,11 +186,13 @@ impl FileDevice {
     pub fn open_rw<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let size = measure_size(&file)?;
+        let growable = is_regular_file(&file);
         Ok(Self {
             file,
             io_lock: RwLock::new(()),
-            size,
+            size: AtomicU64::new(size),
             writable: true,
+            growable,
             #[cfg(test)]
             arrivals: LockArrivals::default(),
         })
@@ -484,7 +523,10 @@ impl BlockRead for FileDevice {
     }
 
     fn size_bytes(&self) -> u64 {
-        self.size
+        // `Acquire` pairs with the `Release` store in `set_len`: a
+        // thread that observes a grown size must also observe the
+        // `ftruncate` that produced it.
+        self.size.load(Ordering::Acquire)
     }
 }
 
@@ -517,14 +559,20 @@ impl BlockDevice for FileDevice {
         if !self.writable {
             return Err(Error::ReadOnly);
         }
+        // READ ONCE, COMPARED AND REPORTED FROM THE SAME VALUE. `size`
+        // is atomic now that `set_len` moves it, and loading it twice
+        // could bound the write against one length and name another in
+        // the error -- an `OutOfBounds` whose `size` field does not
+        // explain its own refusal.
+        let size = self.size_bytes();
         // `checked_add` because a caller-supplied offset near `u64::MAX`
         // would otherwise wrap and land back inside the device.
         let end = offset.checked_add(buf.len() as u64);
-        if end.is_none_or(|end| end > self.size) {
+        if end.is_none_or(|end| end > size) {
             return Err(Error::OutOfBounds {
                 offset,
                 len: buf.len() as u64,
-                size: self.size,
+                size,
             });
         }
         // EXCLUSIVE: excludes other writers' seeks and every reader.
@@ -552,6 +600,113 @@ impl BlockDevice for FileDevice {
     fn is_writable(&self) -> bool {
         self.writable
     }
+
+    /// Set the file's length, and the length this device reports, as one
+    /// operation.
+    ///
+    /// # THE POINT IS THAT THE TWO MOVE TOGETHER
+    ///
+    /// #75 refused a write past the end because `write_all` at a seeked
+    /// offset grew the FILE while `size_bytes` went on reporting the
+    /// length taken at construction, so the two halves of one device
+    /// disagreed about where it ended and a caller bounding its reads by
+    /// `size_bytes` could never reach what it had written
+    /// (rust-fs-core#70). That bound stays. This method is the other
+    /// half: growth that says so, and moves the number with it.
+    ///
+    /// An implementation that called `File::set_len` and left `self.size`
+    /// alone would be #70 with a nicer name on it.
+    ///
+    /// # THE NARROWER LENGTH IS PUBLISHED FIRST, IN BOTH DIRECTIONS
+    ///
+    /// `ftruncate` and the store are two steps, and one of the two
+    /// orderings has a window in it. Take a shrink done store-then-
+    /// publish: between the truncate and the store, this device declares
+    /// 8192 bytes over a 4096-byte file, so a concurrent read inside the
+    /// declared device falls off the end of the real one and comes back
+    /// `ShortRead`. The other direction is harmless — a device that
+    /// briefly declares 4096 bytes over an 8192-byte file is only
+    /// under-reporting, which is the state every `FileDevice` is in
+    /// whenever something else appends to its file.
+    ///
+    /// So: a GROW truncates and then stores, and a SHRINK stores and then
+    /// truncates. The invariant is one sentence — THE DECLARED SIZE NEVER
+    /// EXCEEDS THE FILE'S REAL LENGTH — and it holds at every instant
+    /// rather than only at the ends.
+    ///
+    /// # `io_lock` EXCLUSIVELY, LIKE A WRITE
+    ///
+    /// For the same reason `write_at` and `flush` take it: this changes
+    /// the file underneath every reader, and a read must not observe
+    /// half of it. `size_bytes` deliberately does NOT take the lock —
+    /// see the field — so the ordering above is what keeps a reader that
+    /// asked the size mid-call from being misled, not the lock.
+    ///
+    /// # WHAT IT REFUSES
+    ///
+    /// [`Error::ReadOnly`] on a handle opened with [`FileDevice::open`],
+    /// before touching the file. [`Error::Custom`] on a handle that is
+    /// writable but not a regular file — a block device node, whose
+    /// length belongs to the kernel — naming that reason rather than
+    /// letting `ftruncate`'s `EINVAL` stand in for it. See
+    /// [`FileDevice::can_grow`], which is the question to ask instead of
+    /// discovering either of these.
+    fn set_len(&self, new_len: u64) -> Result<()> {
+        if !self.writable {
+            return Err(Error::ReadOnly);
+        }
+        if !self.growable {
+            return Err(Error::Custom(
+                "this FileDevice is open on something that is not a regular file \
+                 -- a device node's length is the kernel's, not ours, and cannot \
+                 be set through this handle"
+                    .to_string(),
+            ));
+        }
+
+        // EXCLUSIVE: excludes every reader and every other writer, the
+        // same as `write_at`.
+        let _guard = self.exclusive_guard();
+
+        let old = self.size.load(Ordering::Acquire);
+        if new_len < old {
+            // Narrow the declared device BEFORE the bytes go. See above.
+            self.size.store(new_len, Ordering::Release);
+        }
+        if let Err(e) = self.file.set_len(new_len) {
+            // A FAILED SHRINK HAS ALREADY NARROWED THE DECLARATION, and
+            // leaving it there would make the device deny bytes it still
+            // holds -- #70's defect, reached by the error path. Re-measure
+            // rather than restoring `old`: whether `ftruncate` did nothing
+            // or something is not knowable from its error, and the file
+            // itself is the only honest answer.
+            if let Ok(actual) = measure_size(&self.file) {
+                self.size.store(actual, Ordering::Release);
+            }
+            return Err(e.into());
+        }
+        self.size.store(new_len, Ordering::Release);
+        Ok(())
+    }
+
+    fn can_grow(&self) -> bool {
+        self.growable
+    }
+}
+
+/// Is this handle open on a regular file?
+///
+/// The other half of `can_grow`, and the half a reader is most likely to
+/// assume. A `FileDevice` is opened just as often on `/dev/sdX` as on an
+/// image: `measure_size` has a whole `ioctl` path for exactly that case.
+/// Such a handle is writable, `write_at` works on it, and its length is
+/// fixed by the kernel -- `ftruncate` on a block device is not a resize.
+///
+/// A failed `metadata` call answers `false`. The question is "may this
+/// device promise it can grow", and a promise nobody could verify is not
+/// one to make.
+fn is_regular_file(file: &File) -> bool {
+    file.metadata().is_ok_and(|m| m.file_type().is_file())
 }
 
 #[cfg(test)]

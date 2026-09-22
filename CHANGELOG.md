@@ -11,6 +11,83 @@ reaches all of them.
 
 ### Added
 
+- **`BlockDevice::set_len` and `BlockDevice::can_grow`: a device can be asked
+  to change its own length.** #75 refused a write past the end of a
+  `FileDevice`, and it was right to — `write_all` at a seeked offset extends a
+  file, so the backing store grew while `size_bytes` went on reporting its
+  construction-time length, and a caller bounding its reads by `size_bytes`
+  (which is what `CachingDevice` does, clamping every block it fetches) could
+  never reach the bytes it had just written (#70).
+
+  What it did not do is leave anything in its place. Appending a block,
+  cluster or grain and recording where it went is how all four image formats
+  in this family allocate, and a write past the end was the only tool any of
+  them had for the first half. Measured on this machine, each crate on its own
+  unmodified `main`, `../rust-fs-core` swapped between the two refs:
+
+  | crate | against core `main` | against `v0.2.10` |
+  |---|---|---|
+  | `rust-img-vhd` | 253 passed, **8 failed** | 261 passed, 0 failed |
+  | `rust-img-qcow2` | 252 passed, **3 failed** | 255 passed, 0 failed |
+  | `rust-img-vhdx` | 264 passed, **8 failed** | 272 passed, 0 failed |
+  | `rust-img-vmdk` | 245 passed, **12 failed** | 257 passed, 0 failed |
+
+  Every failure is one write landing exactly at the device's current end, e.g.
+  `OutOfBounds { offset: 20480, len: 4096, size: 20480 }`. (#147 counted 7/3/1/1
+  against an older `main`; the crates have moved since.) See #147 and #129.
+
+  **NOT A BREAKING CHANGE.** Both methods are defaulted — `set_len` to
+  `Err(Error::ReadOnly)` and `can_grow` to `false` — so every existing
+  implementor in every sibling crate keeps compiling and keeps behaving
+  exactly as it did. A device that cannot change its length does nothing at
+  all to adopt this.
+
+  **On `BlockDevice` rather than a separate `GrowableDevice` trait**, because
+  of what the consumers hold: `Arc<dyn BlockDevice>`, at 15 sites in vhdx, 7
+  in qcow2, 6 in vhd and 5 in vmdk. A `dyn` type cannot be bounded onto a
+  second trait without downcasting through `Any`, which turns "this device
+  cannot grow" into a failed downcast at all 33 of them. It is also the idiom
+  this trait already uses for an optional capability: `write_at` defaults to
+  `Err(ReadOnly)` and `is_writable` to `false`.
+
+  **The contract is the atomicity, not the signature.** An implementation must
+  leave the backing store, the number `size_bytes` reports and any cached view
+  of the device agreeing when it returns. One that extends the file and leaves
+  `size_bytes` stale is #70 under a new name, and it passes a naive test —
+  the write succeeds and only a later cached read finds the hole. Measured
+  with `CachingDevice::set_len` forwarding to the device and sweeping nothing:
+  a 6000-byte file behind a 4096-byte cache, the short last block warmed,
+  `set_len(8192)`, then one read across the old end returns
+  `ShortRead { offset: 5000, want: 3000, got: 1000 }`.
+
+  Implemented on:
+
+  - **`FileDevice`**, for a handle opened read-write on a regular file.
+    `can_grow` is false for a read-only handle and false for a **block device
+    node**, whose length belongs to the kernel — `ftruncate` there is not a
+    resize, and promising an image writer room it can never get would be
+    worse than refusing. `size` is an `AtomicU64` now; `size_bytes` still
+    takes no lock, and `set_len` publishes the NARROWER of the two lengths
+    first so the declared size never exceeds the file's real length at any
+    instant.
+  - **`CachingDevice`**, which sweeps the entries its new length makes short,
+    once either side of the device call, for the same reason and in the same
+    shape as `write_at`. `size_bytes` already forwarded, so the number
+    follows for free; the entries do not.
+  - **The `Arc<T>` and `Box<T>` forwarding impls**, without which
+    `Arc<dyn BlockDevice>` would answer the refusing default over a device
+    that can grow — method resolution finds those impls before it derefs —
+    and the whole change would have done nothing for the four crates it
+    exists for.
+
+  Everything else keeps the refusing default, deliberately and not as an
+  oversight: `ReadOnlyDevice`, `CallbackDevice`, `OwnedSlice` and
+  `OwnedRwSlice`. A slice's length is the window it was cut to.
+
+  `BlockRead::size_bytes`'s contract is amended to match: the number still
+  never follows its backing store, and `set_len` is now the one door through
+  which a caller can move it. (#147, #129)
+
 - **One check gates a merge, and it stands for every job.** `ci.yml` grows an
   always-run `ci-ok` job that `needs:` every other job in the workflow and
   fails when any of them failed, was cancelled or was *skipped*, and

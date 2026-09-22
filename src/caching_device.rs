@@ -854,6 +854,17 @@ impl BlockRead for CachingDevice {
         // the device, and the blocks between them cover everything up to
         // that bound. So this is the device breaking its promise being
         // caught rather than believed.
+        //
+        // `BlockDevice::set_len` IS THE ONE SANCTIONED WAY THAT NUMBER
+        // MOVES, and this is still the right answer when a read races
+        // one. `set_len` sweeps the blocks its new length makes short,
+        // either side of the device call, so a read that is not
+        // concurrent with one can never land here; a read that IS
+        // concurrent with one may, and an error naming what it got beats
+        // a short buffer reported as success. The defect this catches is
+        // a `set_len` that moved the length and swept nothing, which is
+        // exactly how a growth API re-creates #70 -- see this type's
+        // `set_len`.
         if done != buf.len() {
             return Err(crate::error::Error::ShortRead {
                 offset,
@@ -964,6 +975,111 @@ impl BlockDevice for CachingDevice {
 
     fn is_writable(&self) -> bool {
         self.writable.as_ref().is_some_and(|w| w.is_writable())
+    }
+
+    /// # THE CACHE'S VIEW HAS TO MOVE WITH THE DEVICE, OR THIS IS #70
+    ///
+    /// `size_bytes` here forwards to the device, so the NUMBER follows a
+    /// grow for free. The entries do not. `block()` clamps every fetch to
+    /// `size_bytes()` at the moment it runs — "the last block of a device
+    /// is often short", as its own comment says — so an entry fetched
+    /// before the grow ends where the device used to. Leave it in place
+    /// and a later read across the old end is served from it, runs out of
+    /// bytes, and comes back `ShortRead` for a region the device now
+    /// holds perfectly well.
+    ///
+    /// Measured, with this method forwarding to the device and sweeping
+    /// nothing: a 6000-byte file behind a 4096-byte cache, the short
+    /// block warmed, `set_len(8192)`, then one read across the old end:
+    ///
+    /// ```text
+    /// ShortRead { offset: 5000, want: 3000, got: 1000 }
+    /// ```
+    ///
+    /// That is rust-fs-core#70's signature exactly — the grow succeeded,
+    /// the file and the reported size agreed, and only a LATER CACHED
+    /// READ found the hole. It is why the growth API is a change to this
+    /// file as much as to `block.rs`.
+    ///
+    /// # FROM `min(old, new)` UPWARDS, WHICHEVER WAY THE LENGTH WENT
+    ///
+    /// A grow only makes the block STRADDLING the old end wrong, and that
+    /// block starts below the old end — so the sweep has to begin at the
+    /// old length, not at the first block boundary above it, and
+    /// `invalidate_range` drops any block whose end passes `start`.
+    ///
+    /// A shrink makes everything from the new length up wrong instead.
+    /// Taking the smaller of the two covers both without asking which
+    /// happened, and the upper bound is `u64::MAX` because "the rest of
+    /// the device" is what changed in either case.
+    ///
+    /// # `min` RATHER THAN `old`, AND NO TEST HERE CAN TELL THEM APART
+    ///
+    /// Said plainly because the alternative is a comment claiming a
+    /// guarantee nobody measured. Sweeping from the OLD length alone
+    /// leaves the blocks between the two lengths cached after a shrink,
+    /// and that suite is EXIT=0 -- every arm in `tests/device_growth.rs`
+    /// passes with `min` removed.
+    ///
+    /// It passes because nothing can read those entries. `read_at`
+    /// forwards any read whose end passes `size_bytes()` straight to the
+    /// device rather than serving it from blocks, so while the device is
+    /// short they are unreachable; and a later grow sweeps from the
+    /// smaller of ITS two lengths, which is the shrunk one, so they are
+    /// dropped before they become reachable again.
+    ///
+    /// `min` ships anyway, and not for symmetry. The argument above rests
+    /// on a bound in a DIFFERENT METHOD holding forever -- an entry that
+    /// is stale but currently unreadable is one guard away from being
+    /// stale and readable. This is the cheaper half of the invariant to
+    /// state correctly, so it is stated correctly here rather than
+    /// derived from somewhere else on every future read of this file.
+    ///
+    /// # AND IT IS SWEPT TWICE, ONCE EITHER SIDE, FOR `write_at`'S REASON
+    ///
+    /// One sweep before is not enough. Between it and the device call
+    /// landing, a concurrent [`CachingDevice::read_at`] can miss, fetch a
+    /// block clamped to the OLD length, and insert it behind the sweep.
+    /// The second sweep closes that window, together with the generation
+    /// check on the miss path. Each covers what the other cannot, in the
+    /// same way and for the same reason `write_at` documents at length.
+    ///
+    /// Both run whether or not the device call succeeded, also for
+    /// `write_at`'s reason: a `set_len` that failed may still have moved
+    /// the file, and dropping entries needlessly costs a re-read while
+    /// keeping stale ones serves bytes the device no longer has.
+    ///
+    /// # THE TWO REFUSALS ABOVE THE SWEEPS
+    ///
+    /// No writable half, and an unusable block size — the same pair
+    /// `write_at` refuses on, in the same order, and above both sweeps
+    /// for the same two reasons. `Error::ReadOnly` rather than
+    /// `Error::Custom` when there is nothing to write, because
+    /// [`crate::stream`] maps only the first to `PermissionDenied`; and
+    /// the block-size check above the sweeps because `invalidate_range`
+    /// cannot sweep correctly with a block size of zero, so sweeping
+    /// first and refusing after would do the one thing this type must
+    /// never do on the way to reporting an error. Neither refusal reaches
+    /// the device, so neither can have staled anything.
+    fn set_len(&self, new_len: u64) -> Result<()> {
+        let Some(writable) = self.writable.as_ref() else {
+            return Err(crate::error::Error::ReadOnly);
+        };
+        self.check_block_size()?;
+
+        // The lower of the two lengths: below it nothing changed, at or
+        // above it everything may have.
+        let from = self.inner.size_bytes().min(new_len);
+        self.invalidate_for_write(from, u64::MAX);
+        let result = writable.set_len(new_len);
+        self.invalidate_for_write(from, u64::MAX);
+        result
+    }
+
+    /// The writable half's answer, or `false` when there is no writable
+    /// half — a cache cannot grow a device it can only read.
+    fn can_grow(&self) -> bool {
+        self.writable.as_ref().is_some_and(|w| w.can_grow())
     }
 }
 
