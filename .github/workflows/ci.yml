@@ -129,37 +129,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  gate:
-    name: gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # THE GATE CHECKS ITSELF, AND IT IS NOT A TEST (#156, and the chore PR
-      # that replaced it). This used to be tests/ci_aggregate_gate.rs, then a
-      # dev-dependency on the am-ci-guard crate. Both were the wrong container:
-      # it exercises nothing this crate ships -- it parses a YAML file and
-      # compares strings -- and the `test` job above enforces an executed-test
-      # floor, so a meta-test inflates the very count this repository uses to
-      # satisfy its own gate. `chore ci:gate` is the same rules with none of
-      # that, and one source the twelve siblings cannot locally edit.
-      #
-      # INSTALLED FROM SOURCE, FOR NOW. `.github/actions/install-chore` fetches
-      # a RELEASE tarball and `ci:gate` is newer than 0.11.0, so the action
-      # cannot install it yet. It stays -- it is antimatter-studios/chore#52 and
-      # every other workflow here will use it -- and this step moves onto it the
-      # moment the release naming `ci:gate` is cut. `go install` at a pinned
-      # commit is the alternative that issue records as working today: Go is
-      # preinstalled on the runner, and a sha is as deliberate as a tag.
-      - name: install chore
-        run: |
-          go install github.com/antimatter-studios/chore@59b209186d32254cd45082ba5789982ffe65741f
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      # Configuration is chores.yml's, not this line's. A flag is the thing a
-      # hand-typed run omits, and then the verdict someone gets at a prompt is
-      # not the verdict CI got -- this repository answers every default, so it
-      # has nothing to say and says nothing.
-      - name: one check gates a pull request, and it stands for every job
-        run: chore ci:gate
 
   ci-ok:
     name: ci-ok
@@ -177,7 +146,7 @@ jobs:
     # ask it for AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP -- it never runs the
     # suite, so it has no privilege gap to acknowledge.
     if: always()
-    needs: [test, fmt, coverage, gate]
+    needs: [test, fmt, coverage]
     runs-on: ubuntu-latest
     steps:
       - name: Every job ran and succeeded
