@@ -54,45 +54,43 @@ src/
   ffi.rs              the C ABI — FsCoreDevice, FsCoreCallbackCfg
 tests/
   cache.rs            CachingDevice + interop tests
-crates/
-  am-ci-guard/        the shared CI gate (its own crate, its own version)
+.github/actions/
+  install-chore/      the composite action that installs `chore` in CI
 ```
 
-This repository is a cargo **workspace** with two packages. `am-fs-core` is
-at the root, unchanged: same name, same version line, same `fs_core` lib,
-same published contents, and `path = "../rust-fs-core"` still resolves to it.
+## The CI gate, and the chore installer
 
-`crates/am-ci-guard` is the second, and it is versioned independently on
-purpose. Ten of the twelve drivers pin `am-fs-core = "0.2.10"` and cannot
-bump until #147 has a replacement; a guard shipped inside `am-fs-core` would
-have inherited that deadlock and nobody could have adopted it. Consumers take
-it as a `[dev-dependencies]` entry, so it never enters a runtime dependency
-tree:
+The one required check is `ci-ok`, and it stands for every job — see
+`.github-guard`, which argues why at length. What holds that true is
+**`chore ci:gate`**, run by the `gate` job: the gate workflow must run on
+`pull_request`, `ci-ok` must `needs:` every gating job and nothing that does
+not exist, it must carry `if: always()` rather than a narrowing of it, and
+`.github-guard` must require `ci-ok` alone.
 
-```toml
-[dev-dependencies]
-am-ci-guard = "0.1"
-```
+Those rules were `tests/ci_aggregate_gate.rs` here, and in ten sibling
+repositories as ten variants of the same 161–173 lines; then briefly a
+`crates/am-ci-guard` dev-dependency (#156, #157). Both were the wrong
+container. The rules test nothing this crate ships — they parse a YAML file
+and compare strings — and the `test` job enforces an executed-test floor, so
+a meta-test inflates the very count used to satisfy the gate. They live in
+`antimatter-studios/chore` now, where a consumer cannot locally edit them and
+where no cargo dependency graph has to hear about them.
 
-```rust
-// tests/ci_aggregate_gate.rs, in full
-#[test]
-fn one_check_gates_a_pull_request_and_stands_for_every_job() {
-    am_ci_guard::AggregateGate::new(env!("CARGO_MANIFEST_DIR")).verify();
-}
-```
-
-This repository is its first consumer as well as its home — the file above
-is this repository's, verbatim.
-
-`.github/actions/install-chore` is a composite action in the same spirit, for
-the other thing every repository was writing out by hand:
+`.github/actions/install-chore` is the composite action that installs the
+binary (antimatter-studios/chore#52), for the other thing every repository
+was writing out by hand:
 
 ```yaml
 - uses: antimatter-studios/rust-fs-core/.github/actions/install-chore@<ref>
   with:
     version: "0.11.0"
 ```
+
+Three repositories each carried a copy of `scripts/ci-install-chore.sh`, one
+inlined the asset mapping four times, and a fifth hand-written copy asked for
+a tarball name that did not exist and 404'd on every scheduled run. The
+convention belongs to whoever publishes the releases, so it is spelled once,
+checksum-verified. Pin the `@ref`.
 
 ## Roadmap
 

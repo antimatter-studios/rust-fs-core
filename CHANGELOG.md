@@ -11,37 +11,6 @@ reaches all of them.
 
 ### Added
 
-- **`am-ci-guard`, and this repository is now a workspace.** The CI gate was
-  copied, not shared: `tests/ci_aggregate_gate.rs` existed in eleven
-  repositories as ten distinct files of 161-173 lines, and stripping the
-  module docs every one of them was the same code — fifty lines of
-  hand-rolled YAML scanning nobody had a reason to write eleven times. Three
-  of those copies were made on one day by three different agents, each told
-  to port it from a sibling. `crates/am-ci-guard` is that code once, taken as
-  a `[dev-dependencies]` entry, and a consumer's test file is three lines.
-
-  It is a **separate package with its own version line**, which is the whole
-  reason the workspace exists: ten of the twelve drivers pin
-  `am-fs-core = "0.2.10"` and cannot bump until #147 has a replacement, so a
-  guard shipped inside `am-fs-core` would have been unadoptable by everyone
-  who needs it.
-
-  **`am-fs-core` itself is unchanged** — same version, same `fs_core` lib,
-  same `staticlib`/`rlib`, same public API, same 65 files in the published
-  archive, and `path = "../rust-fs-core"` still resolves to it. The gate's
-  own tests prove it fails when it should, by mutating rust-fs-xfs's and
-  rust-partitions' real `ci.yml` and `.github-guard` one break at a time.
-  (#156)
-
-- **A composite action for installing `chore`.** Three repositories each had
-  a copy of `scripts/ci-install-chore.sh`, one had the asset-name mapping
-  inlined four times, and a fifth hand-written copy got the name wrong and
-  404'd on every scheduled run until someone noticed. The naming convention
-  belongs to whoever publishes the releases, so it is spelled once, in
-  `.github/actions/install-chore`, checksum-verified, for linux-x86_64,
-  linux-aarch64, darwin-arm64 and darwin-x86_64.
-  (antimatter-studios/chore#52, #156)
-
 - **One check gates a merge, and it stands for every job.** `ci.yml` grows an
   always-run `ci-ok` job that `needs:` every other job in the workflow and
   fails when any of them failed, was cancelled or was *skipped*, and
@@ -51,8 +20,8 @@ reaches all of them.
   required check that no job produces — which GitHub reads as permanently
   pending, with nothing to point at — can no longer be left behind by a
   rename. Every driver in this family depends on this crate, so a job that
-  quietly stopped gating here reaches all of them.
-  `tests/ci_aggregate_gate.rs` holds both halves to it.
+  quietly stopped gating here reaches all of them. The `gate` job holds both
+  halves to it, with `chore ci:gate`.
 
 - **The test-output budget is now a packaged, canonical family asset.**
   `scripts/output-budget.sh` keeps passing test runs quiet while retaining
@@ -142,6 +111,31 @@ reaches all of them.
   does, and `length` is now at most `parent_size - start`.
 
 ### Changed
+
+- **The CI gate is a `chore` task, not a crate, and not a test.** #157 put the
+  aggregate-gate rules in `crates/am-ci-guard`, taken here as a
+  `[dev-dependencies]` entry and called from `tests/ci_aggregate_gate.rs`. It
+  worked and it was well tested, and it was still the wrong container twice
+  over: the rules exercise nothing this crate ships — they parse a YAML file
+  and compare strings, sitting beside tests that read superblocks and walk
+  extent trees — and the `test` job enforces an executed-test floor, so a
+  meta-test inflates the very count this repository uses to satisfy its own
+  gate. Being a crate also dragged a pure CI concern into the cargo dependency
+  graph: crates.io publishing, version pins, and entanglement with #147, none
+  of which has anything to do with checking that a YAML file agrees with a
+  config file.
+
+  So #157 is reverted. This is a single-package repository again —
+  `am-fs-core`'s name, version, `fs_core` lib, `staticlib`/`rlib`,
+  `path = "../rust-fs-core"`, dependency list and 65-file `cargo package
+  --list` are all exactly what they were before the workspace conversion —
+  and the rules live in `antimatter-studios/chore` as `chore ci:gate`, run by
+  the new `gate` job. Same four checks and the same two-way non-gating rule,
+  in a place a consumer cannot locally edit and no cargo resolver has to hear
+  about.
+
+  **`.github/actions/install-chore` stays.** It is
+  antimatter-studios/chore#52 and it was never part of what was wrong here.
 
 - `SliceGeometry::rebase`'s doc comment no longer claims a check against
   the parent that it never performed. It said it returned `None` "when

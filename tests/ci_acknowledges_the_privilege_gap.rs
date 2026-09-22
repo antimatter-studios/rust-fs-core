@@ -93,82 +93,27 @@ fn runs_the_suite(run: &str) -> bool {
 }
 
 fn runs_the_suite_within(script: &str, depth: u8) -> bool {
-    // A shell line continued with a trailing `\` is one command, and the
-    // `-p` that scopes it can be on the following line.
-    let code = script
+    let code: String = script
         .lines()
         .map(strip_shell_comment)
         .collect::<Vec<_>>()
-        .join("\n")
-        .replace("\\\n", " ");
-    let direct = code.lines().any(|line| {
-        let words = shell_words(line);
-        words.windows(2).any(|pair| {
-            pair[0] == "cargo" && matches!(pair[1], "test" | "t" | "llvm-cov" | "nextest")
-        }) && !scoped_away_from_this_crate(&words)
-    });
+        .join("\n");
+    let words: Vec<&str> = code
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`'))
+        .filter(|w| !w.is_empty())
+        .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
+        .collect();
+    let direct = words
+        .windows(2)
+        .any(|pair| pair[0] == "cargo" && matches!(pair[1], "test" | "t" | "llvm-cov" | "nextest"));
     direct
         || (depth > 0
-            && shell_words(&code).iter().any(|word| {
+            && words.iter().any(|word| {
                 repository_script(word)
                     .and_then(|path| std::fs::read_to_string(path).ok())
                     .is_some_and(|body| runs_the_suite_within(&body, depth - 1))
             }))
 }
-
-fn shell_words(code: &str) -> Vec<&str> {
-    code.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`'))
-        .filter(|w| !w.is_empty())
-        .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
-        .collect()
-}
-
-/// Whether a cargo invocation is scoped to some package that is not this
-/// one, and so cannot run this crate's tests however it is spelled.
-///
-/// THIS REPOSITORY IS A WORKSPACE (#156). `crates/am-ci-guard` is the
-/// shared CI gate every driver takes as a dev-dependency, and ci.yml
-/// builds and tests it with `cargo test --locked -p am-ci-guard`. That
-/// command cannot reach tests/device_node_size.rs -- `-p` is what makes
-/// it cannot rather than does not -- so there is no privilege gap for it
-/// to acknowledge, and demanding the acknowledgement anyway would put
-/// AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP on a step where it means nothing.
-/// An acknowledgement that appears on steps it does not apply to is one
-/// nobody reads on the steps it does.
-///
-/// Deliberately narrow, because the cost of a false exemption is a
-/// suite that silently stops running. `--workspace` and `--all` override
-/// `-p` back to everything, and an invocation with no `-p` at all is
-/// this crate's suite by default. Only an explicit, exhaustive scope
-/// elsewhere counts.
-fn scoped_away_from_this_crate(words: &[&str]) -> bool {
-    if words.iter().any(|w| matches!(*w, "--workspace" | "--all")) {
-        return false;
-    }
-    let mut packages = Vec::new();
-    let mut iter = words.iter().peekable();
-    while let Some(word) = iter.next() {
-        match *word {
-            "-p" | "--package" => {
-                if let Some(name) = iter.next() {
-                    packages.push(*name);
-                }
-            }
-            _ => {
-                if let Some(name) = word
-                    .strip_prefix("--package=")
-                    .or_else(|| word.strip_prefix("-p="))
-                {
-                    packages.push(name);
-                }
-            }
-        }
-    }
-    !packages.is_empty() && packages.iter().all(|p| *p != THIS_CRATE)
-}
-
-/// This package's name, as `-p` spells it.
-const THIS_CRATE: &str = "am-fs-core";
 
 /// `line` up to a `#` that begins a word, which is where a shell comment
 /// starts. Quotes are not tracked: a `#` inside a quoted string that
@@ -552,75 +497,5 @@ jobs:
                 "",
             );
         assert_eq!(unacknowledged(&yaml).len(), 1, "llvm-cov runs the tests");
-    }
-
-    /// A run scoped to the OTHER package in this workspace is exempt,
-    /// because it cannot reach this crate's tests (#156).
-    ///
-    /// Asked of `runs_the_suite` directly rather than through a workflow,
-    /// because a line continuation and a two-command block are shell
-    /// shapes, and wrapping them in YAML would be testing the indentation
-    /// of the fixture rather than the rule.
-    #[test]
-    fn a_run_scoped_to_another_package_does_not_run_this_suite() {
-        for scoped in [
-            "cargo test --locked -p am-ci-guard",
-            "cargo test --package am-ci-guard --all-targets",
-            "cargo test --locked -p=am-ci-guard",
-            "cargo test --locked \\\n  -p am-ci-guard",
-            "cargo clippy --locked -p am-ci-guard --all-targets -- -D warnings\n\
-             cargo test --locked -p am-ci-guard",
-        ] {
-            assert!(
-                !crate::runs_the_suite(scoped),
-                "`{scoped}` cannot run tests/device_node_size.rs, so it has no \
-                 privilege gap to acknowledge"
-            );
-        }
-    }
-
-    /// And the exemption stops exactly where it should. Each of these
-    /// DOES reach this crate's suite, and a wider rule would silently
-    /// stop requiring the acknowledgement on a step that needs it.
-    #[test]
-    fn a_run_that_can_reach_this_crate_is_not_exempt() {
-        for reaching in [
-            // No scope at all: this crate by default.
-            "cargo test --locked",
-            // Scoped to this crate explicitly.
-            "cargo test --locked -p am-fs-core",
-            // `--workspace` and `--all` override `-p` back to everything.
-            "cargo test --locked --workspace -p am-ci-guard",
-            "cargo test --locked --all -p am-ci-guard",
-            // Both packages named.
-            "cargo test --locked -p am-ci-guard -p am-fs-core",
-            // A second, unscoped command beside the scoped one. Per-line
-            // is why this is caught: joined into one word list, the `-p`
-            // from the first line would exempt the second.
-            "cargo test --locked -p am-ci-guard\ncargo test --locked",
-            // And coverage, which is how this whole guard came about.
-            "cargo llvm-cov --fail-under-lines 90",
-        ] {
-            assert!(
-                crate::runs_the_suite(reaching),
-                "`{reaching}` reaches this crate's suite and must acknowledge the gap"
-            );
-        }
-    }
-
-    /// End to end through a real workflow step, which is the shape ci.yml
-    /// actually has.
-    #[test]
-    fn the_am_ci_guard_step_needs_no_acknowledgement() {
-        let yaml = OK
-            .replace("cargo test --locked", "cargo test --locked -p am-ci-guard")
-            .replace(
-                "        env:\n          AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: \"1\"\n",
-                "",
-            );
-        assert!(
-            unacknowledged(&yaml).is_empty(),
-            "a step scoped to am-ci-guard has no privilege gap"
-        );
     }
 }

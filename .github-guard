@@ -51,10 +51,17 @@
 # `select(.app.slug=="github-actions")` on every one of its three queries, so
 # it is excluded twice over before this file is read.
 #
-# tests/ci_aggregate_gate.rs holds both halves to this -- every job in ci.yml
-# has to be in `ci-ok`'s `needs`, and this file has to require `ci-ok` and
-# nothing else. Without that the aggregate drifts exactly as the named list
-# did: a job added to ci.yml and not to `needs` is invisible again.
+# `chore ci:gate` HOLDS BOTH HALVES TO THIS -- every job in ci.yml has to be in
+# `ci-ok`'s `needs`, and this file has to require `ci-ok` and nothing else.
+# Without that the aggregate drifts exactly as the named list did: a job added
+# to ci.yml and not to `needs` is invisible again. It runs in the `gate` job.
+#
+# It used to be tests/ci_aggregate_gate.rs, and then a dev-dependency on the
+# am-ci-guard crate (#156, #157). Neither belonged in a test suite: the rules
+# exercise nothing this crate ships, and the `test` job enforces an
+# executed-test floor that a meta-test inflates. The rules are
+# antimatter-studios/chore's now, where twelve siblings share one copy nobody
+# can locally edit.
 #
 # The name must match the check-run name GitHub reports, which is the job's
 # `name:` rather than its key -- `ci-ok` for both.

@@ -43,7 +43,7 @@ description: >-
 #
 # A STEP-level `if:`, not a job-level one. A job-level `if:` makes the
 # whole job non-gating, which is a different decision with its own cost --
-# see the am-ci-guard crate docs.
+# see `chore help ci-gate`.
 
 inputs:
   version:
