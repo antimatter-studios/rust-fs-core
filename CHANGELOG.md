@@ -7,7 +7,12 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
-## [Unreleased]
+## [0.2.12] — 2026-09-22
+
+`v0.2.11` was tagged without a section of its own, so the entries below cover
+both releases. Splitting them after the fact would mean guessing which side of
+a tag each one fell on; #162 tracks reconstructing `0.2.11` from the commit
+range rather than inventing it here.
 
 ### Added
 
@@ -97,8 +102,8 @@ reaches all of them.
   required check that no job produces — which GitHub reads as permanently
   pending, with nothing to point at — can no longer be left behind by a
   rename. Every driver in this family depends on this crate, so a job that
-  quietly stopped gating here reaches all of them. The `gate` job holds both
-  halves to it, with `chore ci:gate`.
+  quietly stopped gating here reaches all of them. `scripts/ci-gate.sh` holds
+  both halves to it, run by `chore check:ci-gate` and by CI directly.
 
 - **The test-output budget is now a packaged, canonical family asset.**
   `scripts/output-budget.sh` keeps passing test runs quiet while retaining
@@ -205,11 +210,21 @@ reaches all of them.
   So #157 is reverted. This is a single-package repository again —
   `am-fs-core`'s name, version, `fs_core` lib, `staticlib`/`rlib`,
   `path = "../rust-fs-core"`, dependency list and 65-file `cargo package
-  --list` are all exactly what they were before the workspace conversion —
-  and the rules live in `antimatter-studios/chore` as `chore ci:gate`, run by
-  the new `gate` job. Same four checks and the same two-way non-gating rule,
-  in a place a consumer cannot locally edit and no cargo resolver has to hear
-  about.
+  --list` are all exactly what they were before the workspace conversion.
+
+  The rules briefly moved into `antimatter-studios/chore` as a `ci:gate`
+  subcommand, and that was wrong for a third reason: `chore` is a
+  general-purpose task runner this project merely consumes, and putting them
+  there made cutting a `chore` release a prerequisite for a change here. That
+  was reverted too, and `chore`'s history is as it was.
+
+  They are now `scripts/ci-gate.sh`, run by a `chore check:ci-gate` task that
+  names the script and nothing else — so the script is what can be tested,
+  reviewed and run without `chore` at all — and by CI directly, since CI here
+  does not install `chore`. Same four checks and the same two-way non-gating
+  rule. It reads the workflow as YAML rather than scanning lines: a quoted
+  key, a flow mapping and a `run: |` block whose contents look like a job key
+  are all ordinary YAML a line scan reads wrongly.
 
   **`.github/actions/install-chore` stays.** It is
   antimatter-studios/chore#52 and it was never part of what was wrong here.
