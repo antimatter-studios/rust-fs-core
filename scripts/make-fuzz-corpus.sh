@@ -36,6 +36,24 @@ cases = {
     'offset-overflows':    (1 << 63, 1 << 63, 1 << 63, 8),
     'length-overflows':    (8, (1 << 64) - 1, 0, 16),
     'unaligned-straddle':  (3, 4000, 1021, 2050),
+    # rust-fs-core#151: the read whose END does not fit in a u64.
+    #
+    # NOT COVERED BY 'offset-overflows' ABOVE, which is named for the
+    # slice and only overflows `start + offset`. Its cache geometry is
+    # offset 2**63 reading 8 bytes, and 2**63 + 8 fits perfectly well --
+    # so before this entry no committed seed made `offset + buf.len()`
+    # wrap, which is the sum that panicked.
+    #
+    # THE OFFSET MUST STAY A MULTIPLE OF 8. `geometry_from`'s `near()`
+    # folds anything else into the parent's range to keep most cases at
+    # the edges, and a folded offset is an ordinary small one: the seed
+    # would still be here, still be named for the wrap, and no longer
+    # produce it. `the_wrapping_read_seed_still_wraps` is what notices.
+    #
+    # start 4 and length 511 are not spare: the cache target reads them
+    # as capacity `4 % 8` and block size `1 + 511 % 1024`, so this runs
+    # against a real 512-byte-block cache rather than a degenerate one.
+    'read-end-wraps':      (4, 511, (1 << 64) - 8, 16),
 }
 
 for name, (start, length, offset, read_len) in cases.items():

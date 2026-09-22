@@ -303,6 +303,68 @@ fn the_named_boundaries_still_decode_to_the_boundaries() {
     }
 }
 
+/// The #151 seed is only a reproducer for as long as it still wraps.
+///
+/// `CachingDevice::read_at` computed `offset + buf.len()` unchecked,
+/// above the only bounds check it had, and an offset near `u64::MAX`
+/// off a crafted image panicked in a checked build and wrapped in
+/// release. `read-end-wraps.bin` is that case, kept so the gate replays
+/// it forever.
+///
+/// # WHY THIS NEEDS ITS OWN ASSERTION
+///
+/// The seed is thirty-two bytes of little-endian words, and what those
+/// words MEAN is decided by `geometry_from` -- which folds any offset
+/// that is not a multiple of 8 into the parent's range, so that most
+/// cases land near the edges. Fold this one and it becomes an ordinary
+/// small read: the file is still committed, still named for the wrap,
+/// and no longer produces one. Nothing else here would notice, because
+/// a geometry that does not wrap is a perfectly good case that passes.
+///
+/// The block size and capacity are checked too. They are read from
+/// `length` and `start`, so a change to either folding rule could leave
+/// the wrap intact but aim it at a one-byte-block cache, which is not
+/// the shape that broke.
+#[test]
+fn the_wrapping_read_seed_still_wraps() {
+    let found = seeds("cache");
+    let (_, bytes) = found
+        .iter()
+        .find(|(n, _)| n == "read-end-wraps.bin")
+        .expect(
+            "the corpus has no seed called read-end-wraps.bin -- it is the only committed \
+             case whose read END does not fit in a u64, which is the sum that panicked in \
+             rust-fs-core#151. Rebuild it with scripts/make-fuzz-corpus.sh",
+        );
+
+    let geom = geometry_from(bytes);
+
+    assert!(
+        geom.offset.checked_add(geom.read_len as u64).is_none(),
+        "read-end-wraps.bin decodes to a {}-byte read at {}, whose end fits in a u64 -- so \
+         it no longer reproduces rust-fs-core#151. `near()` in geometry_from folds any \
+         offset that is not a multiple of 8; this seed's must stay one.",
+        geom.read_len,
+        geom.offset,
+    );
+    assert!(
+        geom.read_len > 0,
+        "a zero-length read returns Ok before any arithmetic, so it cannot reach the sum \
+         that overflowed",
+    );
+
+    // The same two lines `check_cache` uses, so this cannot drift from
+    // the geometry the target actually builds.
+    let block_size = 1 + (geom.length % 1024);
+    let capacity = (geom.start % 8) as usize;
+    assert_eq!(
+        (block_size, capacity),
+        (512, 4),
+        "read-end-wraps.bin no longer aims at a 512-byte-block cache holding 4 blocks, \
+         which is the shape the overflow was found in",
+    );
+}
+
 /// The parent is only useful if its bytes differ by position. A
 /// constant parent would make "read from the wrong offset" and "read
 /// from the right one" indistinguishable, and every slice property here
