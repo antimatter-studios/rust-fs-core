@@ -3,25 +3,60 @@
 # git-config format: check with `git config -f .github-guard --list`, and
 # double-quote any value containing # or ;.
 
-# Required status checks for main. A declaration beats discovery exactly.
+# What must pass before main takes a merge. github-guard reads this from the
+# default branch on the server and applies it to branch protection.
 #
-# Discovery requires checks BY JOB NAME, which is a guess at the PR gate and
-# drifts silently: a renamed job, an added workflow, or any future check
-# reporting under the github-actions app changes what is required without
-# anyone deciding to. Pinning it costs nothing and makes the intent reviewable.
+#   ci-ok   ci.yml: the one always-run gate. It `needs:` every other job in
+#           that workflow and fails when any of them failed, was cancelled or
+#           was SKIPPED -- the `test` matrix on ubuntu, macOS and Windows,
+#           fmt, and the coverage run that re-executes the suite under
+#           llvm-cov with a floor under it.
+#
+# WHY ONE NAME AND NOT FIVE (#154). This list used to name the five real
+# check names: `fmt`, `coverage` and the three `test / <os>` matrix legs.
+# Every one was correct when it was written, and that is the problem --
+# nothing kept it correct. Adding a fourth runner to the matrix, renaming
+# `coverage`, or splitting `fmt` into `fmt` + `clippy` each produce a check
+# that reports on every pull request and gates nothing, and no test in this
+# repository failed when that happened.
+#
+# The opposite spelling is worse. A required context that no job produces
+# reads to GitHub as permanently pending, and with enforce_admins on nothing
+# merges and there is no failure to point at. Both directions come from the
+# required list naming individual jobs rather than one gate, and both have
+# happened in this constellation.
+#
+# EVERY DRIVER IN THIS FAMILY DEPENDS ON THIS CRATE, so a job that quietly
+# stopped gating here is a regression that reaches all of them. That is the
+# reason to spend a file on it rather than trusting the settings page.
+#
+# THE NAME DOES NOT MOVE WHEN THE JOBS DO, which is what makes this safe to
+# change. github-guard reads this file from the DEFAULT BRANCH, so a pull
+# request that renames a gating job can never also be the one whose
+# protection learns the new name -- it would leave the old name required and
+# never reporting. Requiring the aggregate means the jobs behind it can be
+# renamed, split or replaced wholesale in a single pull request that
+# protection never notices.
+#
+# ONLY ci.yml CAN GATE, WHICH IS WHY ci-ok LIVES THERE AND NEEDS ONLY ITS
+# JOBS. release.yml triggers on a `v*.*.*` tag, after the merge it would be
+# gating has already happened. fuzz.yml is `workflow_dispatch` plus a nightly
+# cron and never sees a pull request at all. Requiring anything from either
+# would require a check that never reports on a pull request, which GitHub
+# reads as pending forever -- a permanent block on every merge. They stay
+# absent.
 #
 # NOT written to keep a third-party reviewer out of the required set. Greptile
 # reports under app slug `greptile-apps`, and github-protect-main.sh filters
 # `select(.app.slug=="github-actions")` on every one of its three queries, so
-# it is excluded twice over before this file is read. Verified against this
-# repository: the discovery query on main returns exactly the five names below
-# and nothing else.
+# it is excluded twice over before this file is read.
 #
-# Names must match the check-run names GitHub reports, including the
-# "test / <os>" job-matrix spelling.
+# tests/ci_aggregate_gate.rs holds both halves to this -- every job in ci.yml
+# has to be in `ci-ok`'s `needs`, and this file has to require `ci-ok` and
+# nothing else. Without that the aggregate drifts exactly as the named list
+# did: a job added to ci.yml and not to `needs` is invisible again.
+#
+# The name must match the check-run name GitHub reports, which is the job's
+# `name:` rather than its key -- `ci-ok` for both.
 [checks]
-	required = fmt
-	required = coverage
-	required = test / ubuntu-latest
-	required = test / macos-latest
-	required = test / windows-latest
+	required = ci-ok
