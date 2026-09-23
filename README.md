@@ -145,3 +145,10 @@ re-running github-guard's installer, never by editing the copy in `.git/hooks`.
 ## License
 
 MIT.
+
+### Non-filesystem targets
+
+The block traits, callback devices and cache also build for `wasm32-unknown-unknown`.
+`FileDevice` and the `fs_core_file_open` C convenience function are available only
+on Unix and Windows, where the native positioned-file implementation exists.
+Browser embedders supply a callback device; native behavior is unchanged.
