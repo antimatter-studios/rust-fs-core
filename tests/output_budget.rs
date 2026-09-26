@@ -25,6 +25,10 @@ fn log_path(name: &str) -> String {
 }
 
 fn run(arguments: &[&str], verbose: bool) -> Output {
+    run_with_environment(arguments, verbose, &[])
+}
+
+fn run_with_environment(arguments: &[&str], verbose: bool, environment: &[(&str, &str)]) -> Output {
     let mut command = Command::new(bash());
     command
         .current_dir(repo())
@@ -32,6 +36,9 @@ fn run(arguments: &[&str], verbose: bool) -> Output {
         .args(arguments);
     if verbose {
         command.env("OUTPUT_BUDGET_VERBOSE", "1");
+    }
+    for (name, value) in environment {
+        command.env(name, value);
     }
     command.output().unwrap_or_else(|error| {
         panic!(
@@ -120,7 +127,7 @@ fn a_byte_budget_is_enforced() {
 }
 
 #[test]
-fn a_failure_keeps_the_commands_status_and_prints_its_tail() {
+fn a_failure_keeps_the_commands_status_and_prints_its_tail_when_asked() {
     let log = log_path("failure.log");
     let output = run(
         &[
@@ -142,6 +149,115 @@ fn a_failure_keeps_the_commands_status_and_prints_its_tail() {
 
     assert_eq!(output.status.code(), Some(7), "{}", printed(&output));
     assert!(printed(&output).contains("the-reason"));
+}
+
+#[test]
+fn a_failure_is_quiet_by_default_and_says_where_the_log_is() {
+    let log = log_path("quiet-failure.log");
+    let output = run(
+        &[
+            "--log",
+            &log,
+            "--label",
+            "quiet-failure",
+            "--",
+            "sh",
+            "-c",
+            "echo the-reason; exit 7",
+        ],
+        false,
+    );
+    let terminal = printed(&output);
+
+    assert_eq!(output.status.code(), Some(7), "{terminal}");
+    assert!(
+        !terminal.contains("the-reason"),
+        "a failing run read its log aloud: {terminal}"
+    );
+    assert!(
+        terminal.contains("quiet-failure: FAILED (exit 7)"),
+        "the verdict did not name the status: {terminal}"
+    );
+    assert!(
+        terminal.contains("1 lines") && terminal.contains(&log),
+        "the verdict did not name the log and its size: {terminal}"
+    );
+}
+
+#[test]
+fn the_tail_can_be_restored_from_the_environment() {
+    let log = log_path("env-tail.log");
+    let output = run_with_environment(
+        &[
+            "--log",
+            &log,
+            "--label",
+            "env-tail",
+            "--",
+            "sh",
+            "-c",
+            "echo the-reason; exit 7",
+        ],
+        false,
+        &[("OUTPUT_BUDGET_FAIL_TAIL", "2")],
+    );
+    let terminal = printed(&output);
+
+    assert_eq!(output.status.code(), Some(7), "{terminal}");
+    assert!(
+        terminal.contains("the-reason"),
+        "OUTPUT_BUDGET_FAIL_TAIL did not restore the tail: {terminal}"
+    );
+}
+
+#[test]
+fn a_verbose_failure_does_not_repeat_the_run_it_already_streamed() {
+    let log = log_path("verbose-tail.log");
+    let output = run_with_environment(
+        &[
+            "--log",
+            &log,
+            "--tail",
+            "40",
+            "--label",
+            "verbose-tail",
+            "--",
+            "sh",
+            "-c",
+            "echo the-reason; exit 7",
+        ],
+        true,
+        &[],
+    );
+    let terminal = printed(&output);
+
+    assert_eq!(output.status.code(), Some(7), "{terminal}");
+    assert_eq!(
+        terminal.matches("the-reason").count(),
+        1,
+        "the streamed run was read back a second time: {terminal}"
+    );
+}
+
+#[test]
+fn the_superseded_harness_variables_are_reported_rather_than_ignored() {
+    let log = log_path("legacy-name.log");
+    let output = run_with_environment(
+        &["--log", &log, "--label", "legacy", "--", "echo", "hello"],
+        false,
+        &[("FLTH_VERBOSE", "1")],
+    );
+    let terminal = printed(&output);
+
+    assert!(output.status.success(), "{terminal}");
+    assert!(
+        !terminal.contains("hello"),
+        "the superseded name was honoured instead of reported: {terminal}"
+    );
+    assert!(
+        terminal.contains("FLTH_VERBOSE") && terminal.contains("OUTPUT_BUDGET_VERBOSE"),
+        "a superseded variable was ignored in silence: {terminal}"
+    );
 }
 
 #[test]

@@ -48,10 +48,24 @@ silently run an unverified script or fall back to an embedded copy.
 The stable behavior is:
 
 - a passing command is quiet and prints one verdict naming the full log;
-- a failing command prints the log tail and returns the command's status;
+- a failing command is quiet too: it prints a verdict naming its exit status,
+  the log and the log's line count, and returns the command's own status;
+- `--tail N`, or `OUTPUT_BUDGET_FAIL_TAIL=N`, prints the last N lines of the
+  log on a failure. It defaults to 0, because the reader who pays most for a
+  tail is an agent re-reading its transcript, and the assertion it wants is
+  usually further up the log than its last page;
 - a passing command over its measured line or byte budget returns 65;
 - `--verbose` or `OUTPUT_BUDGET_VERBOSE=1` streams output without lifting the
-  budget.
+  budget, and a verbose failure prints no tail because the run was already on
+  screen.
+
+The environment variables are `OUTPUT_BUDGET_VERBOSE` and
+`OUTPUT_BUDGET_FAIL_TAIL`. In `fs-linux-test-harness`, where this script was
+written, they were `FLTH_VERBOSE` and `FLTH_FAIL_TAIL`; the names moved with
+the script. That rename is the kind that fails silently — the old name is not
+read and the run simply stays quiet — so the script reports a superseded name
+on stderr rather than ignoring it. It does not honour one: a fallback keeps the
+old name alive in habits and documentation forever.
 
 Each consumer still owns its adapter, log location, measured budgets,
 executed-test floors, and CI artifacts. Pointing at this script alone does not
