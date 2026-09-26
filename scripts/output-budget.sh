@@ -12,9 +12,26 @@
 # output-budget.sh --version
 #
 # A successful run prints one verdict and keeps the full transcript in FILE.
-# A failing run prints the tail and returns the command's status. A successful
-# command that breaches a budget returns 65. OUTPUT_BUDGET_VERBOSE=1 streams
-# the transcript without lifting either budget.
+# A failing run prints a verdict naming the status, the log and its size, and
+# returns the command's own status. A successful command that breaches a
+# budget returns 65. OUTPUT_BUDGET_VERBOSE=1 streams the transcript without
+# lifting either budget.
+#
+# --tail N, or OUTPUT_BUDGET_FAIL_TAIL=N, prints the last N lines of the log
+# when the command fails. It DEFAULTS TO 0: printing the tail is right for a
+# person at a terminal and wrong for the reader who pays most, an agent that
+# re-reads its whole transcript on every later step and so pays for those
+# lines many times over -- and they are rarely the lines it needs, because the
+# assertion is usually further up the log. One line naming the log lets it
+# fetch exactly the part it wants, once.
+#
+# THE ENVIRONMENT VARIABLES ARE OUTPUT_BUDGET_*, NOT FLTH_*. This wrapper was
+# written against fs-linux-test-harness, where they were FLTH_VERBOSE and
+# FLTH_FAIL_TAIL; the names moved with the script when it became the family's
+# canonical copy. A rename like that fails silently -- the old name is simply
+# not read, and the run stays quiet -- so setting one is reported below rather
+# than ignored. It is NOT honoured: a fallback would keep the old name alive
+# in habits and documentation indefinitely.
 set -uo pipefail
 
 OUTPUT_BUDGET_API_VERSION=1
@@ -22,16 +39,24 @@ OUTPUT_BUDGET_API_VERSION=1
 LOG=""
 MAX_LINES=0
 MAX_BYTES=0
-TAIL=40
+TAIL="${OUTPUT_BUDGET_FAIL_TAIL:-0}"
 LABEL=""
 VERBOSE="${OUTPUT_BUDGET_VERBOSE:-0}"
+
+superseded() {
+    [ -n "${2:-}" ] || return 0
+    echo "output-budget.sh: $1 is set and this script does not read it." >&2
+    echo "                  The name is now $3." >&2
+}
+superseded FLTH_VERBOSE "${FLTH_VERBOSE:-}" OUTPUT_BUDGET_VERBOSE
+superseded FLTH_FAIL_TAIL "${FLTH_FAIL_TAIL:-}" OUTPUT_BUDGET_FAIL_TAIL
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --log)       shift; LOG="${1:-}" ;;
         --max-lines) shift; MAX_LINES="${1:-0}" ;;
         --max-bytes) shift; MAX_BYTES="${1:-0}" ;;
-        --tail)      shift; TAIL="${1:-40}" ;;
+        --tail)      shift; TAIL="${1:-0}" ;;
         --label)     shift; LABEL="${1:-}" ;;
         --verbose|-v) VERBOSE=1 ;;
         --version)
@@ -67,11 +92,11 @@ lines=$(wc -l < "$LOG" | tr -d ' ')
 bytes=$(wc -c < "$LOG" | tr -d ' ')
 
 if [ "$rc" -ne 0 ]; then
-    echo "$LABEL: FAILED (exit $rc)" >&2
-    if [ "$VERBOSE" != 1 ]; then
+    echo "$LABEL: FAILED (exit $rc) — $lines lines in $LOG" >&2
+    # Verbose already streamed the run, so repeating its tail says nothing new.
+    if [ "$VERBOSE" != 1 ] && [ "$TAIL" -gt 0 ]; then
         echo "--- last $TAIL lines of $LOG" >&2
         tail -n "$TAIL" "$LOG" >&2
-        echo "--- $lines lines total in $LOG" >&2
     fi
     exit "$rc"
 fi

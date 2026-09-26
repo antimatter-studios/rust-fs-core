@@ -7,6 +7,36 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [Unreleased]
+
+### Changed
+
+- **A failing tier says where its log is instead of reading it aloud.** The
+  wrapper printed forty lines of tail on every failure. That is right for a
+  person at a terminal and wrong for the reader who pays most: an agent
+  re-reads its whole transcript on every later step, so those lines are paid
+  for many times over — and they are rarely the forty that matter, because the
+  assertion is usually further up the log than its last page.
+
+  A failure now prints the verdict, the exit status, the log's path and its
+  line count. `--tail N`, or `OUTPUT_BUDGET_FAIL_TAIL=N`, brings the old
+  behaviour back for whoever is watching. A verbose run prints no tail at all,
+  because it already streamed the run. This matches `fs-linux-test-harness`
+  4b8e91b, which made the same change to the copy this script came from.
+
+- **A superseded `FLTH_*` variable is reported rather than ignored.** The
+  wrapper's variables became `OUTPUT_BUDGET_VERBOSE` and
+  `OUTPUT_BUDGET_FAIL_TAIL` when it moved here from the harness. That rename
+  fails silently — the old name is simply not read, and the run stays quiet —
+  so setting `FLTH_VERBOSE` or `FLTH_FAIL_TAIL` now prints which name replaced
+  it. It is not honoured: a fallback would keep the old name alive in habits
+  and documentation indefinitely.
+
+  Consumers pinning this script by SHA-256 (`rust-fs-ntfs`'s
+  `scripts/resolve-output-budget.sh`) must move their digest with this change.
+  `--version` is unchanged at `rust-fs-core-output-budget 1`: the flags, the
+  exit statuses and the verdict on a passing run are all the same.
+
 ## [0.2.12] — 2026-09-22
 
 `v0.2.11` was tagged without a section of its own, so the entries below cover
