@@ -7,7 +7,7 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
-## [Unreleased]
+## [0.2.13] — 2026-09-26
 
 ### Changed
 
