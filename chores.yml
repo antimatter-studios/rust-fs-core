@@ -15,8 +15,8 @@ chore_min_version: 0.6.0
 # `crate-type = ["staticlib", "rlib"]` in Cargo.toml produces. A consumer that
 # ALSO linked libfs_core.a would present ld with two strong definitions of
 # every `fs_core_*` C export. So `staticlib` below exists for uniformity with
-# the sibling libraries and for anyone building this crate on its own; nothing
-# in diskjockey links its output.
+# the sibling libraries and for anyone building this crate on its own; no
+# consumer links its output directly.
 #
 # IT TAKES NO OUTPUT DIRECTORY. `staticlib` builds into this crate's own
 # dist/; `chore artifact` prints the absolute path of that DIRECTORY, and a
@@ -226,3 +226,8 @@ tasks:
     # partly by checking its own CI config.
     cmds:
       - scripts/ci-gate.sh
+
+  test:scripts:
+    desc: The shell tests (tests/scripts/*.sh), exactly as CI runs them
+    cmds:
+      - 'for t in tests/scripts/*.sh; do bash "$t" || exit 1; done'

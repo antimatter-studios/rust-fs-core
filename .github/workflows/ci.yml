@@ -102,6 +102,12 @@ jobs:
         # CI here does not install chore -- a guard wired only into a task
         # nothing runs is a guard that reports protection it is not providing.
         run: scripts/agents-core-check.sh
+      - name: the shell tests
+        # Every tests/scripts/*.sh, so a new one is gated by being added. Plain
+        # scripts rather than cargo tests, so they cannot count towards the
+        # executed-test floor.
+        shell: bash
+        run: for t in tests/scripts/*.sh; do bash "$t" || exit 1; done
   coverage:
     name: coverage
     runs-on: ubuntu-latest
