@@ -7,6 +7,39 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [Unreleased]
+
+### Changed
+
+- **An over-budget verdict says where the rule is.** Exit 65 is a status a
+  reader meets having read nothing else, and "raise the measured budget
+  deliberately" does not say what a deliberate raise has to carry. The verdict
+  now names `docs/output-budget.md`, which gained the section that answers it:
+  a budget is a measurement, so a raise carries the measurement that justifies
+  it, and neither silencing the run nor bypassing the wrapper is a way to meet
+  one. The two older copies of this script ended the same verdict with a
+  pointer of their own; core dropped it when it became the canonical copy
+  (#153).
+
+### Fixed
+
+- **A verdict that could not be written is no longer reported as a failing
+  tier.** `scripts/output-budget.sh` ended with the verdict `printf`, so that
+  `printf`'s status became the script's: with stdout closed or full, a passing,
+  in-budget run exited 1 with nothing in the log to explain it —
+  `printf: write error: Bad file descriptor`, measured. This script's status is
+  a claim about the command it wrapped, so it now exits 0 explicitly. The write
+  error still reaches stderr; it has stopped being attributed to the tests
+  (#153).
+
+- **`docs/output-budget.md` describes the family as it is.** It still named the
+  vendored copies #153 has since deleted, a `chore ci:gate` task that was
+  reverted in favour of this repository's own `scripts/ci-gate.sh`, a
+  `rust-fs-ntfs/scripts/resolve-output-budget.sh` that no longer exists, and
+  the guest-transfer blocker that #153 itself retracted. Measured from every
+  repository's default branch: this is now the only one that commits the
+  script.
+
 ## [0.2.13] — 2026-09-26
 
 ### Changed
@@ -437,7 +470,7 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.10...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.13...HEAD
 [0.2.11]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.10...v0.2.11
 [0.2.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.2...v0.2.3

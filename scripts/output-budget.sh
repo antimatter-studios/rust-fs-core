@@ -11,11 +11,12 @@
 #                  [--label TEXT] [--verbose] -- COMMAND [ARG...]
 # output-budget.sh --version
 #
-# A successful run prints one verdict and keeps the full transcript in FILE.
-# A failing run prints a verdict naming the status, the log and its size, and
-# returns the command's own status. A successful command that breaches a
-# budget returns 65. OUTPUT_BUDGET_VERBOSE=1 streams the transcript without
-# lifting either budget.
+# A successful run prints one verdict and keeps the full transcript in FILE,
+# and exits 0 even if that verdict could not be written. A failing run prints a
+# verdict naming the status, the log and its size, and returns the command's
+# own status. A successful command that breaches a budget returns 65, and the
+# verdict names the contract a deliberate raise has to satisfy.
+# OUTPUT_BUDGET_VERBOSE=1 streams the transcript without lifting either budget.
 #
 # --tail N, or OUTPUT_BUDGET_FAIL_TAIL=N, prints the last N lines of the log
 # when the command fails. It DEFAULTS TO 0: printing the tail is right for a
@@ -111,9 +112,19 @@ fi
 
 if [ -n "$over" ]; then
     echo "$LABEL: passed, but printed $over" >&2
-    echo "             Quiet the run, or raise the measured budget deliberately." >&2
+    echo "             Quiet the run, or raise the measured budget deliberately — a" >&2
+    echo "             raise carries the measurement that justifies it; the contract" >&2
+    echo "             is docs/output-budget.md in rust-fs-core." >&2
     echo "             Full output: $LOG" >&2
     exit 65
 fi
 
 printf '%s: ok (%s lines, %s bytes) — %s\n' "$LABEL" "$lines" "$bytes" "$LOG"
+
+# THIS SCRIPT'S STATUS IS A CLAIM ABOUT THE COMMAND IT WRAPPED, so the verdict
+# above must not be able to become it. Without this line the final printf's
+# status is the script's: a caller whose stdout is closed or full turns a
+# green, in-budget run into a failure with nothing in the log to explain it.
+# The write error still reaches stderr; it just stops being reported as the
+# wrapped command's.
+exit 0

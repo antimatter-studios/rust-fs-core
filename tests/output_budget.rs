@@ -126,6 +126,88 @@ fn a_byte_budget_is_enforced() {
     assert_eq!(output.status.code(), Some(65), "{}", printed(&output));
 }
 
+/// AN OVER-BUDGET VERDICT SAYS WHERE THE RULE IS.
+///
+/// The two older copies of this script -- `fs-linux-test-harness`'s and
+/// the fork `rust-img-qcow2` carried -- ended this verdict with "see the
+/// output section of the consumer test contract". Core's copy dropped
+/// the pointer when it became the canonical one, and with it the only
+/// part of the message that answers the question the message provokes:
+/// a run has just been failed for printing too much, and "raise the
+/// measured budget deliberately" does not say what a deliberate raise
+/// has to carry. Exit 65 is a status a reader meets having read nothing,
+/// so the verdict is the whole of what it gets. rust-fs-core#153.
+#[test]
+fn a_loud_pass_names_the_contract_it_breached() {
+    let log = log_path("loud-pointer.log");
+    let output = run(
+        &[
+            "--log",
+            &log,
+            "--max-lines",
+            "1",
+            "--label",
+            "loud-pointer",
+            "--",
+            "sh",
+            "-c",
+            "printf 'one\\ntwo\\n'",
+        ],
+        false,
+    );
+    let terminal = printed(&output);
+
+    assert_eq!(output.status.code(), Some(65), "{terminal}");
+    assert!(
+        terminal.contains("docs/output-budget.md"),
+        "the over-budget verdict did not say where the contract is: {terminal}"
+    );
+}
+
+/// A VERDICT THAT CANNOT BE PRINTED IS NOT A FAILING TIER.
+///
+/// This script's exit status is a claim about the command it wrapped.
+/// The final `printf` is the last statement, so without an explicit
+/// `exit 0` its status becomes the script's: a caller that closed stdout,
+/// or filled the device stdout pointed at, turns a green, in-budget run
+/// into a failure with nothing in the log to explain it. Measured on the
+/// copy before the fix:
+///
+/// ```text
+/// $ bash -c 'bash scripts/output-budget.sh --log … --label demo -- echo hi >&-'
+/// scripts/output-budget.sh: line 119: printf: write error: Bad file descriptor
+/// exit=1
+/// ```
+///
+/// The write error still reaches stderr afterwards -- it is real and is
+/// not hidden. What changes is that it stops being reported as the
+/// wrapped command's failure.
+#[test]
+fn a_verdict_that_cannot_be_written_is_not_a_failing_tier() {
+    let log = log_path("closed-stdout.log");
+    let output = Command::new(bash())
+        .current_dir(repo())
+        .arg("-c")
+        .arg(format!(
+            "bash scripts/output-budget.sh --log {log} --label closed -- echo hi >&-"
+        ))
+        .output()
+        .unwrap_or_else(|error| panic!("could not run the wrapper with stdout closed: {error}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "an in-budget pass reported the verdict's own write error as the tier's status: {}",
+        printed(&output)
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo().join(&log))
+            .expect("the log is still written when the verdict is not")
+            .trim(),
+        "hi"
+    );
+}
+
 #[test]
 fn a_failure_keeps_the_commands_status_and_prints_its_tail_when_asked() {
     let log = log_path("failure.log");
