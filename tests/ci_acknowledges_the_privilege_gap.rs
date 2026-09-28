@@ -111,6 +111,7 @@ fn runs_the_suite_within(script: &str, depth: u8) -> bool {
             && words.iter().any(|word| {
                 repository_script(word)
                     .and_then(|path| std::fs::read_to_string(path).ok())
+                    .filter(|body| is_shell_script(word, body))
                     .is_some_and(|body| runs_the_suite_within(&body, depth - 1))
             }))
 }
@@ -127,6 +128,15 @@ fn strip_shell_comment(line: &str) -> &str {
         }
     }
     line
+}
+
+/// Whether a file a step names is something a shell would run: a `.sh`
+/// file, or one that opens with a `#!` line. A document or a Rust source
+/// is not executed by being named -- following one read `docs/*.md` and
+/// then `tests/*.rs` prose as shell, and reported a `grep` for a packaged
+/// file as a suite run.
+fn is_shell_script(word: &str, body: &str) -> bool {
+    word.ends_with(".sh") || body.starts_with("#!")
 }
 
 /// `word` as a file in this repository, if it names one: `scripts/x.sh`,
@@ -373,6 +383,42 @@ jobs:
             unacknowledged(&yaml).is_empty(),
             "{run} does not run the suite"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A PATH IS FOLLOWED ONLY WHEN IT IS A SCRIPT. The packaging step
+    /// greps for `scripts/output-budget.sh`, whose verdict text names
+    /// `docs/output-budget.md`, which names `tests/output_budget.rs`,
+    /// whose prose says `cargo test`. Every hop was read as a script, so
+    /// a step that runs nothing was reported as running the suite. A
+    /// document or a Rust source is not executed by being named.
+    #[test]
+    fn a_path_that_is_not_a_script_is_not_followed() {
+        let dir = std::env::temp_dir().join(format!("core-ci-guard-doc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("notes.md");
+        std::fs::write(&doc, "Run it with\n\ncargo test --locked\n").unwrap();
+        let source = dir.join("notes.rs");
+        std::fs::write(&source, "//! cargo test --test notes\n").unwrap();
+        let script = dir.join("verdict.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho \"the contract is {}\"\n", doc.display()),
+        )
+        .unwrap();
+
+        for run in [
+            format!("cat {}", doc.display()),
+            format!("cat {}", source.display()),
+            format!("grep -F {} list.txt", script.display()),
+        ] {
+            let yaml =
+                format!("on:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: {run}\n");
+            assert!(
+                unacknowledged(&yaml).is_empty(),
+                "{run:?} runs nothing, however far its paths are followed"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
