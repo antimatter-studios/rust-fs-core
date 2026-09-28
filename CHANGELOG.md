@@ -39,10 +39,10 @@ reaches all of them.
 
 ## [0.2.12] — 2026-09-22
 
-`v0.2.11` was tagged without a section of its own, so the entries below cover
-both releases. Splitting them after the fact would mean guessing which side of
-a tag each one fell on; #162 tracks reconstructing `0.2.11` from the commit
-range rather than inventing it here.
+`v0.2.11` has a section of its own again, below. It was tagged without one,
+and the entries were folded in here; which side of the tag each fell on is not
+a guess, because `git log v0.2.10..v0.2.11` says exactly — so they have been
+moved rather than left (#162).
 
 ### Added
 
@@ -135,6 +135,59 @@ range rather than inventing it here.
   quietly stopped gating here reaches all of them. `scripts/ci-gate.sh` holds
   both halves to it, run by `chore check:ci-gate` and by CI directly.
 
+### Changed
+
+- **The CI gate is a `chore` task, not a crate, and not a test.** #157 put the
+  aggregate-gate rules in `crates/am-ci-guard`, taken here as a
+  `[dev-dependencies]` entry and called from `tests/ci_aggregate_gate.rs`. It
+  worked and it was well tested, and it was still the wrong container twice
+  over: the rules exercise nothing this crate ships — they parse a YAML file
+  and compare strings, sitting beside tests that read superblocks and walk
+  extent trees — and the `test` job enforces an executed-test floor, so a
+  meta-test inflates the very count this repository uses to satisfy its own
+  gate. Being a crate also dragged a pure CI concern into the cargo dependency
+  graph: crates.io publishing, version pins, and entanglement with #147, none
+  of which has anything to do with checking that a YAML file agrees with a
+  config file.
+
+  So #157 is reverted. This is a single-package repository again —
+  `am-fs-core`'s name, version, `fs_core` lib, `staticlib`/`rlib`,
+  `path = "../rust-fs-core"`, dependency list and 65-file `cargo package
+  --list` are all exactly what they were before the workspace conversion.
+
+  The rules briefly moved into `antimatter-studios/chore` as a `ci:gate`
+  subcommand, and that was wrong for a third reason: `chore` is a
+  general-purpose task runner this project merely consumes, and putting them
+  there made cutting a `chore` release a prerequisite for a change here. That
+  was reverted too, and `chore`'s history is as it was.
+
+  They are now `scripts/ci-gate.sh`, run by a `chore check:ci-gate` task that
+  names the script and nothing else — so the script is what can be tested,
+  reviewed and run without `chore` at all — and by CI directly, since CI here
+  does not install `chore`. Same four checks and the same two-way non-gating
+  rule. It reads the workflow as YAML rather than scanning lines: a quoted
+  key, a flow mapping and a `run: |` block whose contents look like a job key
+  are all ordinary YAML a line scan reads wrongly.
+
+  **`.github/actions/install-chore` stays.** It is
+  antimatter-studios/chore#52 and it was never part of what was wrong here.
+
+- `SliceGeometry::rebase`'s doc comment no longer claims a check against
+  the parent that it never performed. It said it returned `None` "when
+  the rebased offset would not fit on the parent at all"; there was no
+  parent in scope, and the only thing tested was that the address fit in
+  a `u64`. The C header made the matching promise, that the slice's
+  addressable range "is `length` bytes", and now states the clamp.
+
+## [0.2.11] — 2026-09-21
+
+Reconstructed after the fact: the tag was cut without a section, and #162
+tracked putting one back. The entries below are the ones `v0.2.10..v0.2.11`
+carries — 52 commits — separated from `0.2.12`'s seven by the tag itself
+rather than by recollection.
+
+### Added
+
 - **The test-output budget is now a packaged, canonical family asset.**
   `scripts/output-budget.sh` keeps passing test runs quiet while retaining
   complete logs, and `scripts/test-floor.sh` rejects a green run that did not
@@ -167,6 +220,7 @@ range rather than inventing it here.
   does (#146).
 
 ### Fixed
+
 
 - The release workflow now runs the suite under `--release` as well as
   debug, so the profile that gets published is tested (#111). It also
@@ -221,50 +275,6 @@ range rather than inventing it here.
   `SliceGeometry::rebase` at the root rather than with another
   `checked_add`: that sum can only leave a `u64` if `start + length`
   does, and `length` is now at most `parent_size - start`.
-
-### Changed
-
-- **The CI gate is a `chore` task, not a crate, and not a test.** #157 put the
-  aggregate-gate rules in `crates/am-ci-guard`, taken here as a
-  `[dev-dependencies]` entry and called from `tests/ci_aggregate_gate.rs`. It
-  worked and it was well tested, and it was still the wrong container twice
-  over: the rules exercise nothing this crate ships — they parse a YAML file
-  and compare strings, sitting beside tests that read superblocks and walk
-  extent trees — and the `test` job enforces an executed-test floor, so a
-  meta-test inflates the very count this repository uses to satisfy its own
-  gate. Being a crate also dragged a pure CI concern into the cargo dependency
-  graph: crates.io publishing, version pins, and entanglement with #147, none
-  of which has anything to do with checking that a YAML file agrees with a
-  config file.
-
-  So #157 is reverted. This is a single-package repository again —
-  `am-fs-core`'s name, version, `fs_core` lib, `staticlib`/`rlib`,
-  `path = "../rust-fs-core"`, dependency list and 65-file `cargo package
-  --list` are all exactly what they were before the workspace conversion.
-
-  The rules briefly moved into `antimatter-studios/chore` as a `ci:gate`
-  subcommand, and that was wrong for a third reason: `chore` is a
-  general-purpose task runner this project merely consumes, and putting them
-  there made cutting a `chore` release a prerequisite for a change here. That
-  was reverted too, and `chore`'s history is as it was.
-
-  They are now `scripts/ci-gate.sh`, run by a `chore check:ci-gate` task that
-  names the script and nothing else — so the script is what can be tested,
-  reviewed and run without `chore` at all — and by CI directly, since CI here
-  does not install `chore`. Same four checks and the same two-way non-gating
-  rule. It reads the workflow as YAML rather than scanning lines: a quoted
-  key, a flow mapping and a `run: |` block whose contents look like a job key
-  are all ordinary YAML a line scan reads wrongly.
-
-  **`.github/actions/install-chore` stays.** It is
-  antimatter-studios/chore#52 and it was never part of what was wrong here.
-
-- `SliceGeometry::rebase`'s doc comment no longer claims a check against
-  the parent that it never performed. It said it returned `None` "when
-  the rebased offset would not fit on the parent at all"; there was no
-  parent in scope, and the only thing tested was that the address fit in
-  a `u64`. The C header made the matching promise, that the slice's
-  addressable range "is `length` bytes", and now states the clamp.
 
 ## [0.2.10] — 2026-09-06
 
