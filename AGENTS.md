@@ -325,10 +325,13 @@ The practical consequence for an agent: **a change here is not finished when
 this repository is green.** Landing a behaviour change means cutting a release
 and moving each consumer's pin, which is a separate pull request per consumer.
 
-## The live open decision: a write past the end, #147 and #129
+## The decision that was open: a write past the end, #147 and #129
 
-Read both issues before touching `FileDevice`, the `BlockDevice` contract, or
-anything a write path reaches.
+Read this before touching `FileDevice`, the `BlockDevice` contract, or anything
+a write path reaches. **It is settled** — #70, #75, #147 and #129 are all
+closed, the replacement shipped, and every consumer has adopted it. It is
+written down because the shape recurs, and because the obvious "fix" is still
+wrong.
 
 `write_at` **defaults to `Err(Error::ReadOnly)`** on the `BlockDevice` trait —
 with `flush` a no-op and `is_writable` returning `false` — so the default
@@ -349,17 +352,7 @@ when it clamps every block it fetches, can never reach. That is **#70**.
 **And it removed the only way four crates allocate, with no replacement.**
 Appending is how a sparse image format grows, and `rust-img-vhd`,
 `rust-img-qcow2`, `rust-img-vhdx` and `rust-img-vmdk` each had nothing else.
-Measured, each on its own unmodified `main`, against this crate's `main` versus
-its pinned tag:
-
-| crate | against `main` | against the pinned tag |
-|---|---|---|
-| `rust-img-vhd` | 62 passed, **7 failed** | 69 passed, 0 failed |
-| `rust-img-qcow2` | 48 passed, **3 failed** | 48 passed, 0 failed |
-| `rust-img-vhdx` | 37 passed, **1 failed** | 38 passed, 0 failed |
-| `rust-img-vmdk` | 24 passed, **1 failed** | 25 passed, 0 failed |
-
-Every failure is the same shape — a write landing exactly at the device's
+Every failure was the same shape — a write landing exactly at the device's
 current end, which is what allocating a new block, cluster or grain looks like
 in all four formats:
 
@@ -367,25 +360,51 @@ in all four formats:
 OutOfBounds { offset: 67108864, len: 1048576, size: 67108864 }
 ```
 
-Nothing is broken today only because **ten consumers are pinned** to a tag that
-predates `4e19fc9`. The bill arrives for whoever next bumps a pin, and they
-meet it as a pile of failing write tests with no obvious connection to the
-bump.
-
 **Do not "fix" this by reverting #75 — that reintroduces #70.** It is the
-tempting move precisely because it turns ten repositories green again in one
-commit. The remedy under discussion is an explicit growth operation on the
-writable device contract: `BlockDevice::set_len` / `grow_to`, or a separate
-growable trait, which moves the size `size_bytes` reports, the cache's view of
-it and the file length together, and refuses on devices that cannot grow — a
-raw block device or a slice. Pre-sizing in each consumer is the third option
-and is the weakest: it is workable for a fixed image and awkward for a sparse
-one that grows as it is written, which is the whole point of the format.
+tempting move precisely because it would turn several repositories green again
+in one commit.
 
-This is a decision about **this crate's contract**, which is why it is open
-here rather than settled four different ways downstream. Land it with a test
-that a device grown that way reads back through `CachingDevice`, and **tag a
-release before any consumer bumps its pin**.
+### What closed it
+
+`BlockDevice::set_len` and `BlockDevice::can_grow` (`e202e7d`, #161), released
+in **v0.2.12**. Growth is a named operation that moves the file's length, the
+number `size_bytes` reports and the cache's view of it together, and refuses on
+a device that cannot grow — a read-only file, a slice, the default
+implementation. Both methods are defaulted (`Err(Error::ReadOnly)` and
+`false`), so nothing that already implemented the trait had to change.
+
+`tests/device_growth.rs` is the evidence, and it is shaped around the failure
+mode rather than the feature: a `set_len` that moves the file and leaves
+`size_bytes` — or a cached block — behind **re-creates #70 exactly**, and
+passes a naive test, because the write it enables succeeds and only a later
+cached read finds the hole. Hence
+`a_device_grown_through_the_cache_reads_back_through_the_cache`,
+`an_appended_block_written_through_the_cache_reads_back` and
+`a_shrink_and_regrow_through_the_cache_does_not_serve_the_bytes_that_went`.
+
+### The consumers moved, which is the half that used to be missing
+
+The old text here said nothing was broken only because ten consumers were
+pinned below `4e19fc9`, and that the bill would arrive for whoever next bumped
+a pin. It arrived and was paid. Read from each repository's default branch on
+2026-09-28 — `Cargo.toml` requirement and `Cargo.lock` agreeing, `ci-ok` green
+on the head commit:
+
+| consumer | `am-fs-core` |
+|---|---|
+| `rust-fs-ext4`, `rust-fs-xfs`, `rust-fs-btrfs`, `rust-fs-ntfs` | 0.2.13 |
+| `rust-fs-erofs`, `rust-fs-squashfs`, `rust-partitions` | 0.2.13 |
+| `rust-img-qcow2`, `rust-img-vhd`, `rust-img-vhdx`, `rust-img-vmdk` | 0.2.13, allocating through `set_len` |
+| `rust-blk-probe` | `0.2`, locked at 0.2.6 — the one left, and not blocked by this |
+
+The four image writers were the whole of #147, and each adopted the growth
+operation before it moved its pin rather than after. `rust-blk-probe` is behind
+on every sibling it pins, and is held by antimatter-studios/rust-partitions#131
+rather than by anything here (#168).
+
+**The standing rule survives the decision:** a behaviour change here is not
+finished when this repository is green. Tag a release, then move each
+consumer's pin, one pull request per consumer.
 
 ## Never grow a shared tool to solve a problem in this repository
 
