@@ -142,6 +142,26 @@ shared guard is that one audit covers every repository, so a local edit to
 trim the idle half would cost more than the idle half does. It is updated by
 re-running github-guard's installer, never by editing the copy in `.git/hooks`.
 
+## Verifying a release
+
+From the next release onward, every version published to crates.io is
+also attached to the GitHub release for its tag, with a build-provenance
+attestation signed by this repository's release workflow. It proves the
+crate was built by `.github/workflows/release.yml` from a commit in this
+repository, not uploaded from someone's machine. To check the crates.io
+download of version `X.Y.Z`:
+
+```sh
+curl -sSfLo am-fs-core-X.Y.Z.crate https://static.crates.io/crates/am-fs-core/am-fs-core-X.Y.Z.crate
+gh attestation verify am-fs-core-X.Y.Z.crate \
+  --repo antimatter-studios/rust-fs-core \
+  --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release.yml
+```
+
+The workflow refuses to attest a `.crate` whose sha256 differs from the
+checksum crates.io records for that version, so the file on the release
+page and the crates.io download are the same bytes.
+
 ## License
 
 MIT.
