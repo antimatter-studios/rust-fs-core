@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use fs_core::cli::clap::{Arg, ArgMatches, Command};
-use fs_core::cli::{self, dispatch, docs, doctor, output, CliError, Family, Json, Outcome, Tool};
+use fs_core::cli::{self, dispatch, docs, output, CliError, Family, Json, Outcome, Tool};
 
 // ---------------------------------------------------------------------------
 // The demo family
@@ -562,6 +562,7 @@ fn doctor_through_the_entry_point_reports_and_exits_1_when_a_name_is_not_ours() 
 #[cfg(unix)]
 mod on_path {
     use super::*;
+    use fs_core::cli::doctor;
     use std::os::unix::fs::PermissionsExt;
 
     /// An executable script at `path` with `body` after the shebang.
