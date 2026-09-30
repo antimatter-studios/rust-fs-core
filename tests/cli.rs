@@ -454,7 +454,14 @@ fn every_name_gets_a_man_page_in_its_section_and_each_subcommand_one_beside_it()
             std::fs::read_to_string(share.join(page)).unwrap_or_else(|e| panic!("{page}: {e}"));
         assert!(text.contains(".TH "), "{page}: not a man page");
         assert!(
-            r.stdout.contains(&share.join(page).display().to_string()),
+            // Reported in the platform's own separators, which on Windows
+            // are not the `/` the page list above is written in.
+            r.stdout.contains(
+                &share
+                    .join(page.split('/').collect::<PathBuf>())
+                    .display()
+                    .to_string()
+            ),
             "{page} not reported:\n{}",
             r.stdout
         );
