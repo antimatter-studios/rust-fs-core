@@ -222,13 +222,7 @@ const PROBE_KEEP: usize = 64 * 1024;
 /// exits, a program answering more than a pipe holds blocks on the full
 /// pipe, runs out the time and is taken for someone else's.
 fn ask_version(program: &Path) -> Option<String> {
-    let mut child = Process::new(program)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut child = spawn_version(program)?;
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         use std::io::Read;
@@ -266,6 +260,34 @@ fn ask_version(program: &Path) -> Option<String> {
     }
     let kept = reader.join().ok()?;
     Some(String::from_utf8_lossy(&kept).into_owned())
+}
+
+/// Start `program --version`, asking again while the file is busy.
+///
+/// Linux refuses to run a file some process still holds open for writing
+/// (ETXTBSY): an install still copying the binary into place, or any
+/// program that forked while it had the file open. That is momentary, and
+/// the program is whatever it is the moment the writer lets go, so a busy
+/// file is asked again, for up to five seconds, rather than
+/// taken for somebody else's.
+fn spawn_version(program: &Path) -> Option<std::process::Child> {
+    let mut polls_left = PROBE_POLLS;
+    loop {
+        match Process::new(program)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => return Some(child),
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && polls_left > 0 => {
+                polls_left -= 1;
+                std::thread::sleep(PROBE_POLL);
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 #[cfg(unix)]

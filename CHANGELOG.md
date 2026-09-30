@@ -17,6 +17,13 @@ reaches all of them.
   the plumbing had gained this fix after the copies were reconciled into
   `fs_core::cli`, so it is carried here before that copy is deleted.
 
+- **`doctor` asks a busy program again instead of calling it foreign.**
+  Linux refuses to run a file something still holds open for writing
+  (ETXTBSY) — an install still copying it into place, or any process that
+  forked while it had the file open — and `doctor` took that refusal for a
+  program that is not ours. It now retries for up to five seconds. The
+  release run of v0.2.14 failed on exactly this in its own test suite.
+
 ## [0.2.14] — 2026-09-30
 
 ### Added
