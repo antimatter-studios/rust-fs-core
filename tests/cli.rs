@@ -455,12 +455,14 @@ fn every_name_gets_a_man_page_in_its_section_and_each_subcommand_one_beside_it()
         assert!(text.contains(".TH "), "{page}: not a man page");
         assert!(
             // Reported in the platform's own separators, which on Windows
-            // are not the `/` the page list above is written in.
+            // are not the `/` the page list above is written in, and as a
+            // JSON string, which doubles each of those backslashes.
             r.stdout.contains(
                 &share
                     .join(page.split('/').collect::<PathBuf>())
                     .display()
                     .to_string()
+                    .replace('\\', "\\\\")
             ),
             "{page} not reported:\n{}",
             r.stdout
