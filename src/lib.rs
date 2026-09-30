@@ -14,6 +14,10 @@ pub(crate) mod test_device;
 pub mod block;
 pub mod caching_device;
 pub mod callback_device;
+// The command-line plumbing the family's tools share, behind the `cli`
+// feature. Its own module docs say what it is.
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod counting_device;
 pub mod error;
 pub mod ffi;

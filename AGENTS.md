@@ -295,8 +295,9 @@ Rust **1.95.0**, pinned in `rust-toolchain.toml` with `rustfmt` and `clippy`,
 because a floating `stable` turns a newly added clippy lint into a hard CI
 error without `Cargo.lock` moving.
 
-This crate sits at the bottom of the dependency graph: `[dependencies]` is
-empty, there is no `../sibling` path dependency, and nothing has to be checked
+This crate sits at the bottom of the dependency graph: the default build has
+no dependency at all (`[dependencies]` holds only clap, clap_complete and
+clap_mangen, each optional behind the `cli` feature), there is no `../sibling` path dependency, and nothing has to be checked
 out beside it to build or test it. That is why `pre-commit.d/rust-deps-pinned.sh`
 looks half-idle here — its sibling-pinning half has nothing to pin, while its
 `Cargo.lock` half applies in full. The README says so at length so nobody has

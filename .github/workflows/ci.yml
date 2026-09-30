@@ -63,7 +63,7 @@ jobs:
       - name: test (quiet, budgeted, with an executed-test floor)
         shell: bash
         run: |
-          bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets
+          bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets --features cli
           bash scripts/test-floor.sh debug 330
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
@@ -76,12 +76,16 @@ jobs:
           path: tmp/logs/
           if-no-files-found: warn
           retention-days: 7
+      # Twice: once as a consumer's static library builds this crate (no
+      # features), and once with the `cli` feature the tools turn on, so a
+      # lint in either shape is caught.
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets --features cli -- -D warnings
       # `cargo doc` EXITS 0 ON WARNINGS, so an unresolved intra-doc link
       # reaches main unseen unless warnings are denied here. Two did (#88).
       # Declared through `env:` rather than an inline `VAR=... cargo doc`
       # because this job also runs on windows-latest.
-      - run: cargo doc --no-deps --locked
+      - run: cargo doc --no-deps --locked --features cli
         env:
           RUSTDOCFLAGS: "-D warnings"
   fmt:
@@ -128,7 +132,7 @@ jobs:
       - name: coverage (quiet, budgeted, fail under 90%)
         shell: bash
         run: |
-          bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --html --output-dir target/llvm-cov --fail-under-lines 90
+          bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90
           bash scripts/test-floor.sh coverage 330
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"

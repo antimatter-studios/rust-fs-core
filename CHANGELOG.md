@@ -11,6 +11,32 @@ reaches all of them.
 
 ### Added
 
+- **`fs_core::cli`, behind a new `cli` feature: the command-line plumbing the
+  family's tools share** (#177). Dispatch on `argv[0]`, the `<tool> (<crate>)
+  <version>` line, `<repo> doctor`, JSON results with `--text` as the opt-out,
+  the structured error on stderr and its exit statuses, and `generate
+  names|man|completions`. It was a directory every tool carried by hand
+  (`src/cli/common/`), and the copies had drifted; this is their superset,
+  with each drift settled once:
+  - `doctor` reads a program's `--version` answer while the program runs.
+    Most copies read it only after the program exited, so a program printing
+    more than a pipe holds blocked, ran out the probe's five seconds and was
+    reported as somebody else's.
+  - The entry point's `--help` examples are aligned on the longest command.
+    Most copies used fixed spacing, which misaligned as soon as a verb was
+    longer than `mkfs`.
+  - `--json`/`--text`: the one given last on the command line wins, as the
+    contract always said. With the switches global, clap copies each level's
+    switch into the other, so every copy answered text for `--text … --json`
+    across a subcommand. A `--text` after `--` is data, not a switch.
+  - `generate man|completions` is part of every tool, not only some.
+  - A new `cli::respond` returns what would be printed and the status
+    without printing it, so the contract is tested in-process.
+
+  clap, clap_complete and clap_mangen are optional and reached only through
+  the feature: the default build, and the static library, gain nothing
+  (`tests/cli_feature_is_opt_in.rs` refuses otherwise).
+
 - Releases carry a build-provenance attestation: the published `.crate` is
   attached to the GitHub release for its tag, checked first against the
   crates.io checksum, and verifiable with `gh attestation verify` (see the
