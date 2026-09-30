@@ -825,6 +825,31 @@ mod on_path {
         assert_eq!(f.version.as_deref(), Some("fs.demo (am-fs-demo) 1.2.3"));
     }
 
+    /// Linux refuses to run a file some process still holds open for
+    /// writing (ETXTBSY). A test suite writing its scripts on one thread
+    /// while another forks leaks exactly such a descriptor into the fork
+    /// for an instant, and an install still copying a binary into place
+    /// holds one too. Either way the program is ours the moment the writer
+    /// lets go, so the probe asks again rather than calling it foreign.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_still_open_for_writing_is_asked_again() {
+        let dir = scratch("busy");
+        let path = dir.join("fs.demo");
+        answering(&path, "fs.demo (am-fs-demo) 1.2.3");
+        let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(writer);
+        });
+        let f = finding(
+            &doctor::diagnose_path(&FAMILY, &path_of(&[&dir])),
+            "fs.demo",
+        );
+        closer.join().unwrap();
+        assert_eq!(f.status, doctor::Status::Ours, "{f:?}");
+    }
+
     #[test]
     fn a_program_that_never_answers_is_given_up_on_and_is_foreign() {
         let dir = scratch("silent");
