@@ -7,7 +7,7 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
-## [Unreleased]
+## [0.2.15] — 2026-09-30
 
 ### Fixed
 
@@ -520,7 +520,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.14...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.15...HEAD
+[0.2.15]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.13...v0.2.14
 [0.2.11]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.10...v0.2.11
 [0.2.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.3...v0.2.4
