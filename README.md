@@ -24,6 +24,33 @@ driver and disk-image reader plugs into.
 - `BlockReadStreamer` — `std::io::Read + Seek` over any `BlockRead`
 - A unified `Error` type with a `Custom(String)` escape hatch so each
   driver can lift its own internal errors to the trait boundary
+- `cli` — behind the `cli` cargo feature: the command-line plumbing every
+  tool in the family shares. One multi-call binary dispatching on `argv[0]`,
+  the `<tool> (<crate>) <version>` line, `<repo> doctor`, JSON results with
+  `--text` as the opt-out, the `{"error": ..., "code": N}` failure on
+  stderr and its exit statuses, and `generate names|man|completions` for
+  packaging. A crate describes its tools once, as a `cli::Family`, and calls
+  `cli::main`. **Use it; do not copy it.** It began as a directory each
+  crate carried by hand, and the copies drifted within weeks.
+
+### The `cli` feature
+
+```toml
+[features]
+cli = ["dep:clap", "am-fs-core/cli"]
+
+[[bin]]
+name = "rust-fs-<fs>"
+path = "src/cli/main.rs"
+required-features = ["cli"]
+```
+
+Turn it on only under the crate's own `cli` feature, beside the
+`required-features` on its binary. clap, clap_complete and clap_mangen are
+optional here and reached only through the feature, so the default build —
+and every static library built from it — gains no dependency. The crate's
+own `clap` requirement stays, for its tools' commands; `fs_core::cli::clap`
+re-exports the one this module is built against.
 
 ## Intended consumers
 
@@ -55,6 +82,8 @@ src/
   readonly.rs         ReadOnlyDevice (rejects writes whatever the inner type allows)
   stream.rs           BlockReadStreamer (std::io::Read + Seek over a BlockRead)
   ffi.rs              the C ABI — FsCoreDevice, FsCoreCallbackCfg
+  cli.rs              the tools' shared plumbing (feature `cli`), and in cli/:
+                      dispatch, version, doctor, output, docs, family
 tests/
   cache.rs            CachingDevice + interop tests
 .github/actions/
@@ -132,8 +161,9 @@ it out twice.
 
 The guard does two jobs. It refuses a workflow that clones a **sibling
 project** at a floating ref instead of a tag — and this crate sits at the
-bottom of the dependency graph with an empty `[dependencies]`, so there is no
-sibling to pin and that half never fires. It also refuses a missing or drifted
+bottom of the dependency graph, with no dependency at all in its default build
+and only the optional clap crates behind `cli`, so there is no sibling to pin
+and that half never fires. It also refuses a missing or drifted
 `Cargo.lock` and runs `cargo metadata --locked` as a stale-lock check, and
 that half applies in full, because this crate does track its lockfile.
 

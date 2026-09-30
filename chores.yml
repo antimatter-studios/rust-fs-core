@@ -156,6 +156,7 @@ tasks:
       - scripts/agents-core-check.sh
       - cargo fmt --check
       - cargo clippy --locked --all-targets -- -D warnings
+      - cargo clippy --locked --all-targets --features cli -- -D warnings
 
   build:
     desc: Debug build
@@ -164,13 +165,13 @@ tasks:
   test:debug:
     desc: Debug-profile suite, including every target
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets --features cli'
       - 'bash scripts/test-floor.sh debug 330'
 
   test:release:
     desc: Release-profile suite, including every target
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 750 50000 -- cargo test --locked --release --all-targets'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 750 50000 -- cargo test --locked --release --all-targets --features cli'
       - 'bash scripts/test-floor.sh release 330'
 
   test:
@@ -182,7 +183,7 @@ tasks:
   coverage:
     desc: Instrumented suite with the same 90% line-coverage gate as CI
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --html --output-dir target/llvm-cov --fail-under-lines 90'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90'
       - 'bash scripts/test-floor.sh coverage 330'
 
   clean:
