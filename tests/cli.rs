@@ -540,6 +540,42 @@ fn a_share_directory_that_cannot_be_written_is_a_structured_failure() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A share directory is a path, and a path need not be UTF-8: clap must
+/// hand it over as bytes rather than refuse the command line. Where the
+/// filesystem itself refuses such a name (APFS does), the failure is the
+/// filesystem's, a structured `generate` failure, not a usage error.
+#[cfg(unix)]
+#[test]
+fn a_share_directory_that_is_not_utf8_is_not_a_usage_error() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = scratch("not-utf8");
+    let share = dir.join(std::ffi::OsStr::from_bytes(b"share-\xff"));
+    for what in ["man", "completions"] {
+        let mut args = argv(&["rust-fs-demo", "generate", what]);
+        args.push(share.clone().into_os_string());
+        let r = cli::respond(&FAMILY, args);
+        assert_ne!(
+            r.code, 2,
+            "generate {what}: a non-UTF-8 SHARE was refused as a usage error: {}",
+            r.stderr
+        );
+        if r.code == 0 {
+            assert!(
+                share.exists(),
+                "generate {what} reported success but wrote nothing"
+            );
+        } else {
+            assert!(
+                r.stderr
+                    .starts_with(&format!("{{\"error\": \"generate {what}: ")),
+                "{}",
+                r.stderr
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // doctor
 // ---------------------------------------------------------------------------

@@ -217,14 +217,24 @@ pub fn repo_command(family: &'static Family) -> Cmd {
             .subcommand(
                 Cmd::new("man")
                     .about("Write a man page per name under SHARE/man/man<section>/")
-                    .arg(Arg::new("share").value_name("SHARE").required(true)),
+                    .arg(share_arg()),
             )
             .subcommand(
                 Cmd::new("completions")
                     .about("Write zsh, bash and fish completions per name under SHARE/")
-                    .arg(Arg::new("share").value_name("SHARE").required(true)),
+                    .arg(share_arg()),
             ),
     )
+}
+
+/// `generate`'s SHARE: a path, and so taken as bytes. A path need not be
+/// UTF-8, and a `String` argument would turn one that is not into a usage
+/// error before the filesystem had a say.
+fn share_arg() -> Arg {
+    Arg::new("share")
+        .value_name("SHARE")
+        .value_parser(clap::value_parser!(OsString))
+        .required(true)
 }
 
 /// The entry point's examples, one command per line with its explanation
@@ -289,7 +299,7 @@ fn respond_repo(family: &'static Family, argv: Vec<OsString>) -> Response {
             }
             Some((what @ ("man" | "completions"), args)) => {
                 let share = std::path::Path::new(
-                    args.get_one::<String>("share")
+                    args.get_one::<OsString>("share")
                         .expect("clap requires the share directory"),
                 );
                 let written = if what == "man" {

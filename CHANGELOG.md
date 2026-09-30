@@ -7,6 +7,16 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [Unreleased]
+
+### Fixed
+
+- **`generate man|completions` takes its SHARE directory as a path.** A
+  directory whose name is not UTF-8 now reaches the filesystem instead of
+  being refused by clap as a usage error with status 2. One driver's copy of
+  the plumbing had gained this fix after the copies were reconciled into
+  `fs_core::cli`, so it is carried here before that copy is deleted.
+
 ## [0.2.14] — 2026-09-30
 
 ### Added
