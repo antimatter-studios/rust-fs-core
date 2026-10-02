@@ -246,8 +246,9 @@ runs it against the calling repository:
 - `scripts/core.sh semver-check` runs cargo-semver-checks on the caller's
   crate against its newest crates.io release.
 - `scripts/core.sh ci-gate` holds the caller's `ci.yml` and `.github-guard`
-  to one required check: `ci-ok` needs every job, and the guard, read with
-  `git config` as github-guard reads it, names `ci-ok` alone. It needs
+  to one required check: `ci-ok` needs every job, its steps read every result
+  it needs (`toJSON(needs)` as a whole, or each `needs.<job>.result`), and the
+  guard, read with `git config` as github-guard reads it, names `ci-ok` alone. It needs
   python3 with PyYAML, and git. A repository with no `Cargo.toml` (a Go one)
   has no cargo to find core through, so its CI checks out rust-fs-core
   beside it or sets `FS_CORE_ROOT`.
