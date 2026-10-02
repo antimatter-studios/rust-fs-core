@@ -130,7 +130,8 @@ were tried for those rules and both were reverted — `crates/am-ci-guard` here
 reverted). They were wrong the same way: each made cutting a release of a
 shared tool a prerequisite for a change in this repository. The rules now live
 in `scripts/ci-gate.sh`, run by `chore check:ci-gate`, which is this
-repository's own file. **The container changed twice; the conclusion below did
+repository's own file -- and, like `test-floor`, a family script every
+repository runs from here as `scripts/core.sh ci-gate`. **The container changed twice; the conclusion below did
 not**, and it is the conclusion this section exists to record — the obvious
 next step is still to move this script into whatever shared thing exists, and
 it is still rejected.

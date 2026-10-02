@@ -51,10 +51,11 @@
 # `select(.app.slug=="github-actions")` on every one of its three queries, so
 # it is excluded twice over before this file is read.
 #
-# `chore ci:gate` HOLDS BOTH HALVES TO THIS -- every job in ci.yml has to be in
-# `ci-ok`'s `needs`, and this file has to require `ci-ok` and nothing else.
-# Without that the aggregate drifts exactly as the named list did: a job added
-# to ci.yml and not to `needs` is invisible again. It runs in the `gate` job.
+# `scripts/core.sh ci-gate` HOLDS BOTH HALVES TO THIS -- every job in ci.yml
+# has to be in `ci-ok`'s `needs`, and this file has to require `ci-ok` and
+# nothing else. Without that the aggregate drifts exactly as the named list
+# did: a job added to ci.yml and not to `needs` is invisible again. It runs in
+# the `fmt` job, and it reads this file with `git config`, as github-guard does.
 #
 # It used to be tests/ci_aggregate_gate.rs, and then a dev-dependency on the
 # am-ci-guard crate (#156, #157). Neither belonged in a test suite: the rules

@@ -232,7 +232,7 @@ tasks:
     # floor the gate itself enforces -- so the suite could satisfy its floor
     # partly by checking its own CI config.
     cmds:
-      - scripts/ci-gate.sh
+      - bash scripts/core.sh ci-gate
 
   check:semver:
     desc: Refuse a public-API break the version in Cargo.toml does not declare

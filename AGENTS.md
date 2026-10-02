@@ -229,9 +229,10 @@ verdict line on success and the tail on failure.
 
 ## The family scripts — one copy, here, run by every repository
 
-`scripts/test-floor.sh` and `scripts/semver-check.sh` are the family's, the
-same way `scripts/output-budget.sh` is. Each repository once carried its own
-copy of both, and the copies drifted: one silent-exit bug in the floor was
+`scripts/test-floor.sh`, `scripts/semver-check.sh`, `scripts/ci-gate.sh`
+and `scripts/guest-rust-toolchain.sh` are the family's, the same way
+`scripts/output-budget.sh` is. Each repository once carried its own copy of
+them, and the copies drifted: one silent-exit bug in the floor was
 fixed seven times, and a rule one repository added reached no other. Now no
 repository carries either. Each carries `scripts/core.sh`, byte-identical to
 this repository's, which finds rust-fs-core (`FS_CORE_ROOT`, the sibling
@@ -244,6 +245,12 @@ runs it against the calling repository:
   was ignored.
 - `scripts/core.sh semver-check` runs cargo-semver-checks on the caller's
   crate against its newest crates.io release.
+- `scripts/core.sh ci-gate` holds the caller's `ci.yml` and `.github-guard`
+  to one required check: `ci-ok` needs every job, and the guard, read with
+  `git config` as github-guard reads it, names `ci-ok` alone. It needs
+  python3 with PyYAML, and git. A repository with no `Cargo.toml` (a Go one)
+  has no cargo to find core through, so its CI checks out rust-fs-core
+  beside it or sets `FS_CORE_ROOT`.
 
 - `scripts/core.sh guest-rust-toolchain`, run inside a driver's test VM,
   installs the toolchain the caller's `rust-toolchain.toml` pins into
@@ -262,7 +269,8 @@ runs it against the calling repository:
   if anything it runs calls a local copy. Every repository runs it in CI.
 
 This repository runs its own through `scripts/core.sh` too, so the path every
-consumer takes is the one tested here (`tests/family_scripts.rs`). A change to
+consumer takes is the one tested here (`tests/family_scripts.rs`, and
+`tests/scripts/test-ci-gate.sh` for the gate, which needs PyYAML). A change to
 either script is a change for the whole family: keep the `--version` contract,
 or bump it and every consumer's `core.sh` in the same pass.
 
@@ -307,7 +315,7 @@ in this constellation:
 
 **`chore check:ci-gate` holds both halves mechanically** — every job in `ci.yml`
 must appear in `ci-ok`'s `needs:`, and `.github-guard` must require `ci-ok` and
-nothing else. The task names `scripts/ci-gate.sh` and nothing else, so the
+nothing else. The task runs `scripts/core.sh ci-gate` and nothing else, so the
 script is what can be tested, reviewed and run without `chore` at all.
 
 It took three attempts to put this in the right place, which is worth knowing

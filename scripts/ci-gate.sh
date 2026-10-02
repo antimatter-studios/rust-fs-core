@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Verify the one required check stands for every job.
+# ci-gate.sh -- the one required check stands for every job. Run it as
+# `scripts/core.sh ci-gate` from any repository in the family; this file is
+# the only copy. It reads the CALLER's ci.yml and .github-guard
+# ($FS_CORE_CALLER, which scripts/core.sh sets; run directly, the repository
+# this file is in).
 #
 # Two halves, and both must hold or the aggregate is decoration:
 #
@@ -7,8 +11,16 @@
 #                  `if: always()`, and names no job that does not exist.
 #   2. .github-guard — requires that aggregate and nothing else.
 #
+# THE OVERRIDES, all optional and read from the environment. Paths are relative
+# to the caller's root:
+#   CI_GATE_WORKFLOW     the gating workflow   (.github/workflows/ci.yml)
+#   CI_GATE_GUARD        the declaration       (.github-guard)
+#   CI_GATE_AGGREGATE    the aggregate job     (ci-ok)
+#   CI_GATE_NON_GATING   space-separated jobs that carry `if:` or
+#                        `continue-on-error:` and are deliberately advisory
+#
 # WHY THIS IS A SCRIPT AND NOT A TEST. It parses a YAML file and compares
-# strings; it exercises nothing this repository ships. As a `cargo test` it also
+# strings; it exercises nothing a crate ships. As a `cargo test` it also
 # counted towards the executed-test floor the gate itself enforces, so a repo
 # could satisfy its floor partly by checking its own CI config.
 #
@@ -18,9 +30,23 @@
 # not providing. YAML 1.2 semantics matter too: GitHub's `on:` key must stay the
 # string `on` rather than folding into a boolean, since that is the key telling
 # a gating workflow from a release one.
+#
+# THE GUARD IS READ THE WAY github-guard READS IT: `git config --file GUARD
+# --no-includes --get-all checks.required`, one check per `required =` line,
+# each value trimmed and kept whole. A check name can hold spaces -- `full test
+# suite (fixtures + integration)` is one -- so splitting a value on whitespace
+# reports checks that do not exist; and git drops a trailing `; comment` that a
+# hand-rolled parser reads as more names. A guard git cannot parse fails.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CI_GATE_API_VERSION=1
+if [ "${1:-}" = "--version" ]; then
+    printf 'rust-fs-core-ci-gate %s\n' "$CI_GATE_API_VERSION"
+    exit 0
+fi
+[ $# -eq 0 ] || { echo "usage: ci-gate.sh   (configured by CI_GATE_* in the environment)" >&2; exit 2; }
+
+ROOT="${FS_CORE_CALLER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WORKFLOW="${CI_GATE_WORKFLOW:-.github/workflows/ci.yml}"
 AGGREGATE="${CI_GATE_AGGREGATE:-ci-ok}"
 GUARD="${CI_GATE_GUARD:-.github-guard}"
@@ -31,9 +57,10 @@ NON_GATING="${CI_GATE_NON_GATING:-}"
 
 cd "$ROOT" || exit 1
 command -v python3 >/dev/null || { echo "ci-gate: python3 is required" >&2; exit 2; }
+command -v git >/dev/null || { echo "ci-gate: git is required to read $GUARD" >&2; exit 2; }
 
 python3 - "$WORKFLOW" "$AGGREGATE" "$GUARD" "$NON_GATING" <<'PY'
-import sys, re, os
+import sys, os, subprocess
 wf, agg, guard, non_gating = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].split()
 fails = []
 
@@ -124,19 +151,22 @@ else:
                 f"a skipped dependency is judged by `always()`, so an undeclared "
                 f"conditional job silently changes what the gate means.")
 
-# .github-guard: git-config format. `required =` inside a comment is prose.
+# .github-guard: git-config, read by git, as github-guard reads it. Each
+# `required =` line is one check, whatever it contains.
 required = []
 if not os.path.exists(guard):
     fails.append(f"`{guard}` is missing, so nothing declares what protection should require.")
 else:
-    for line in open(guard):
-        s = line.strip()
-        if s.startswith("#") or s.startswith(";"):
-            continue
-        m = re.match(r'required\s*=\s*(.+)$', s)
-        if m:
-            val = m.group(1).strip().strip('"')
-            required += [v for v in re.split(r'[,\s]+', val) if v]
+    valid = subprocess.run(["git", "config", "--file", guard, "--no-includes", "--list"],
+                           capture_output=True, text=True)
+    if valid.returncode != 0:
+        fails.append(
+            f"`{guard}` is not valid git-config, so github-guard ignores it and protection "
+            f"falls back to discovering checks: {valid.stderr.strip()}")
+    else:
+        got = subprocess.run(["git", "config", "--file", guard, "--no-includes", "--get-all",
+                              "checks.required"], capture_output=True, text=True)
+        required = [v.strip() for v in got.stdout.split("\n") if v.strip()]
 
 if required != [agg]:
     fails.append(
