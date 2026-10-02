@@ -211,7 +211,7 @@ Two more independent graders stand behind that, and neither is this crate
 marking its own homework:
 
 - `cargo llvm-cov --fail-under-lines 90` in the `coverage` job.
-- An **executed-test floor of 330** on every tier (`scripts/test-floor.sh`). A
+- An **executed-test floor of 330** on every tier (`scripts/core.sh test-floor`). A
   suite that silently stops running a material part of itself otherwise reports
   exactly the same green as one that passes.
 
@@ -223,13 +223,36 @@ SHA-256 and API version; none of them may carry its own copy, and none of them
 may edit this one to suit itself. `docs/output-budget.md` is the contract.
 `#153` is the open work on the copies that diverged before that was true.
 
-Locally it is reached through two thin adapters that do belong here:
+Locally it is reached through `scripts/tier.sh LABEL LOG MAX-LINES MAX-BYTES
+-- CMD...`, which runs a tier quietly into `tmp/logs/<LOG>.log`, printing one
+verdict line on success and the tail on failure.
 
-- `scripts/tier.sh LABEL LOG MAX-LINES MAX-BYTES -- CMD...` runs a tier
-  quietly into `tmp/logs/<LOG>.log`, printing one verdict line on success and
-  the tail on failure.
-- `scripts/test-floor.sh <LOG> <n>` reads that same log back and fails when
-  fewer than `n` tests executed.
+## The family scripts — one copy, here, run by every repository
+
+`scripts/test-floor.sh` and `scripts/semver-check.sh` are the family's, the
+same way `scripts/output-budget.sh` is. Each repository once carried its own
+copy of both, and the copies drifted: one silent-exit bug in the floor was
+fixed seven times, and a rule one repository added reached no other. Now no
+repository carries either. Each carries `scripts/core.sh`, byte-identical to
+this repository's, which finds rust-fs-core (`FS_CORE_ROOT`, the sibling
+checkout, or cargo's am-fs-core), insists on the script's `--version`, and
+runs it against the calling repository:
+
+- `scripts/core.sh test-floor [--refuse-ignored] TIER FLOOR` reads the
+  caller's `tmp/logs/TIER.log` and fails when fewer than FLOOR tests -- or a
+  semver run's lints -- executed, or with `--refuse-ignored`, when any test
+  was ignored.
+- `scripts/core.sh semver-check` runs cargo-semver-checks on the caller's
+  crate against its newest crates.io release.
+
+- `scripts/core.sh family-check` fails the caller if it commits a copy of
+  any of these, if its `scripts/core.sh` differs from this repository's, or
+  if anything it runs calls a local copy. Every repository runs it in CI.
+
+This repository runs its own through `scripts/core.sh` too, so the path every
+consumer takes is the one tested here (`tests/family_scripts.rs`). A change to
+either script is a change for the whole family: keep the `--version` contract,
+or bump it and every consumer's `core.sh` in the same pass.
 
 | tier | measured | budget | floor |
 |---|---|---|---|

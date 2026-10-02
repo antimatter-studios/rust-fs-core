@@ -50,7 +50,7 @@ jobs:
       - name: test (debug, quiet and budgeted)
         run: |
           bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets --features cli
-          bash scripts/test-floor.sh debug 330
+          bash scripts/core.sh test-floor debug 330
       # A RELEASE-PROFILE RUN, DECIDED IN #111. The profile published is
       # the release one, and optimisation can change behaviour the debug
       # run never sees: `debug_assert!` bodies vanish, overflow wraps.
@@ -64,7 +64,7 @@ jobs:
       - name: test (release, quiet and budgeted)
         run: |
           bash scripts/tier.sh "test (release)" release 750 50000 -- cargo test --locked --release --all-targets --features cli
-          bash scripts/test-floor.sh release 330
+          bash scripts/core.sh test-floor release 330
       - name: keep the full test transcripts
         if: always()
         uses: actions/upload-artifact@v4

@@ -27,14 +27,18 @@ jobs:
           toolchain: 1.95.0
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: verify packaged output-budget script
+      - name: verify the packaged family scripts
+        # A consumer with no checkout of this repository gets these from the
+        # published crate, through cargo, so the package must carry them.
         shell: bash
         run: |
           files="$(cargo package --locked --list)"
-          grep -Fqx 'scripts/output-budget.sh' <<<"$files" || {
-            echo 'package omits scripts/output-budget.sh' >&2
-            exit 1
-          }
+          for script in core.sh output-budget.sh test-floor.sh semver-check.sh family-check.sh; do
+            grep -Fqx "scripts/$script" <<<"$files" || {
+              echo "package omits scripts/$script" >&2
+              exit 1
+            }
+          done
       - run: cargo build --locked --all-targets
       # AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP ACKNOWLEDGES A REAL GAP.
       # tests/device_node_size.rs covers the Linux device-size probe's
@@ -71,7 +75,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets --features cli
-          bash scripts/test-floor.sh debug 330
+          bash scripts/core.sh test-floor debug 330
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
           EXPECT_OVERFLOW_CHECKS: "1"
@@ -140,7 +144,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90
-          bash scripts/test-floor.sh coverage 330
+          bash scripts/core.sh test-floor coverage 330
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
       - name: keep the coverage transcript and report
@@ -180,7 +184,7 @@ jobs:
           tool: cargo-semver-checks@${{ env.CARGO_SEMVER_CHECKS_VERSION }}
       - name: semver (quiet, budgeted)
         shell: bash
-        run: bash scripts/tier.sh semver semver 40 4000 -- scripts/semver-check.sh
+        run: bash scripts/tier.sh semver semver 40 4000 -- bash scripts/core.sh semver-check
 
 
   ci-ok:
