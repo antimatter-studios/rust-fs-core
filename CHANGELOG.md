@@ -7,6 +7,29 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.17] — 2026-10-02
+
+### Added
+
+- **`scripts/core.sh guest-rust-toolchain`: the one copy of the toolchain
+  install a driver's test VM runs** (#190). Five Linux drivers each installed
+  the guest's Rust toolchain in their own `scripts/vm-setup.sh`, and only one
+  of the five recovered from an install a reaper or deadline interrupted; on
+  the other four that wreckage, on a disk that outlives `vm:down`, broke every
+  later `chore test:vm` until the VM was destroyed. The family script installs
+  the channel the caller's `rust-toolchain.toml` pins, with rustfmt and clippy
+  on the minimal profile, into a `RUSTUP_HOME`/`CARGO_HOME` the caller must
+  name; clears rustup's download and tmp caches first; removes a toolchain
+  that failed to install and tries once more, printing the first failure;
+  fetches rustup again when the one on disk cannot answer `--version`; and
+  holds a lock, because every worktree of a project shares one guest. It
+  answers `--version` with `rust-fs-core-guest-rust-toolchain 1`.
+- `family-check` refuses a committed `scripts/guest-rust-toolchain.sh`, and a
+  workflow, `chores.yml` or script that runs one directly.
+- `tests/scripts/test-guest-rust-toolchain.sh` drives the install through
+  each kind of wreckage against a stub rustup that refuses the way the real
+  one was measured refusing.
+
 ## [0.2.16] — 2026-10-02
 
 ### Added
