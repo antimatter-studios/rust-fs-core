@@ -13,7 +13,10 @@ if [ ! -f "$LOG" ]; then
     exit 1
 fi
 
-ran="$(grep -aoE 'test result: ok\. [0-9]+ passed' "$LOG" | \
+# `|| true` because grep finding NOTHING exits 1, and under `pipefail` and
+# `-e` that ended this script at the assignment -- still failing, but
+# silently, in exactly the case it exists to name: zero tests ran (#185).
+ran="$({ grep -aoE 'test result: ok\. [0-9]+ passed' "$LOG" || true; } | \
     awk '{ sum += $4 } END { print sum + 0 }')"
 if [ "$ran" -lt "$FLOOR" ]; then
     echo "::error::only $ran tests executed in the $TIER tier, floor is $FLOOR"
