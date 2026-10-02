@@ -245,6 +245,18 @@ runs it against the calling repository:
 - `scripts/core.sh semver-check` runs cargo-semver-checks on the caller's
   crate against its newest crates.io release.
 
+- `scripts/core.sh guest-rust-toolchain`, run inside a driver's test VM,
+  installs the toolchain the caller's `rust-toolchain.toml` pins into
+  `RUSTUP_HOME`/`CARGO_HOME` (both required), and recovers from the wreckage
+  an interrupted install leaves on the guest's disk: a `.partial` download, a
+  half-populated toolchain, a half-written rustup. It runs from the driver's
+  `[test] guest_command` (`scripts/guest-suite.sh`), because that is the
+  first point at which this repository is in the guest -- `test:vm` stages
+  the pinned checkout on the share -- and the harness's `[setup]` script runs
+  before it is. fs-linux-test-harness is not the home: it refuses by design
+  to name a language or a toolchain. `tests/scripts/test-guest-rust-toolchain.sh`
+  drives each kind of wreckage against a stub rustup (#190).
+
 - `scripts/core.sh family-check` fails the caller if it commits a copy of
   any of these, if its `scripts/core.sh` differs from this repository's, or
   if anything it runs calls a local copy. Every repository runs it in CI.

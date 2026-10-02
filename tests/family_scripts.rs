@@ -127,6 +127,10 @@ fn version_of(script: &str) -> String {
 fn each_family_script_states_its_contract() {
     assert_eq!(version_of("test-floor.sh"), "rust-fs-core-test-floor 1");
     assert_eq!(version_of("semver-check.sh"), "rust-fs-core-semver-check 1");
+    assert_eq!(
+        version_of("guest-rust-toolchain.sh"),
+        "rust-fs-core-guest-rust-toolchain 1"
+    );
 }
 
 #[test]
@@ -298,6 +302,7 @@ fn the_package_ships_every_family_script() {
         "test-floor.sh",
         "semver-check.sh",
         "family-check.sh",
+        "guest-rust-toolchain.sh",
     ] {
         assert!(
             Path::new(&repo().join("scripts").join(script)).is_file(),
@@ -329,6 +334,34 @@ fn family_check_passes_a_clean_caller_and_refuses_each_kind_of_copy() {
     assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("scripts/test-floor.sh is a copy"),
+        "{}",
+        printed(&out)
+    );
+
+    // The guest toolchain install is a family script like the others: five
+    // repositories carried a copy of it once, and only one recovered from an
+    // interrupted install. A copy, or a call that bypasses core.sh, is refused.
+    let guest = Caller::new("family-guest-copy");
+    fs::write(
+        guest.root.join("scripts/guest-rust-toolchain.sh"),
+        "echo mine\n",
+    )
+    .unwrap();
+    fs::write(
+        guest.root.join("scripts/guest-suite.sh"),
+        "bash scripts/guest-rust-toolchain.sh\n",
+    )
+    .unwrap();
+    let out = guest.core(&["family-check"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("scripts/guest-rust-toolchain.sh is a copy"),
+        "{}",
+        printed(&out)
+    );
+    assert!(
+        said.contains("scripts/guest-suite.sh:1:bash scripts/guest-rust-toolchain.sh"),
         "{}",
         printed(&out)
     );
