@@ -7,6 +7,31 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.16] — 2026-10-02
+
+### Added
+
+- **The family scripts are this crate's, and every repository runs them from
+  here.** `scripts/test-floor.sh` and `scripts/semver-check.sh` now run
+  against the CALLING repository -- its `tmp/logs/`, its `Cargo.toml` -- and
+  answer `--version` (`rust-fs-core-test-floor 1`,
+  `rust-fs-core-semver-check 1`). `scripts/core.sh` is the one file a
+  consumer carries: it finds this crate and runs the script named. The floor
+  is the union of what the consumers' copies did: it survives a log with no
+  result line, counts cargo-semver-checks' lints with colour stripped, and
+  with `--refuse-ignored` fails a tier that ignored a test. `--targets FILE
+  TIER` checks a floor per integration target, so a suite that empties from
+  the inside cannot hide inside a healthy total (rust-fs-btrfs's per-target
+  floors, now everyone's).
+- **`scripts/core.sh family-check`** fails a repository that commits a copy of
+  a family script, carries a `scripts/core.sh` that differs from this one, or
+  runs a local `scripts/test-floor.sh` / `scripts/semver-check.sh` from a
+  workflow, `chores.yml` or script. Every repository runs it in CI, so a copy
+  cannot come back unnoticed.
+- `tests/family_scripts.rs` runs every one from a caller tree, the way
+  consumers do, and proves the bootstrap refuses a missing core and a script
+  with the wrong `--version`.
+
 ## [0.2.15] — 2026-09-30
 
 ### Fixed

@@ -172,13 +172,13 @@ tasks:
     desc: Debug-profile suite, including every target
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets --features cli'
-      - 'bash scripts/test-floor.sh debug 330'
+      - 'bash scripts/core.sh test-floor debug 330'
 
   test:release:
     desc: Release-profile suite, including every target
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 750 50000 -- cargo test --locked --release --all-targets --features cli'
-      - 'bash scripts/test-floor.sh release 330'
+      - 'bash scripts/core.sh test-floor release 330'
 
   test:
     desc: Debug and release test tiers
@@ -190,7 +190,7 @@ tasks:
     desc: Instrumented suite with the same 90% line-coverage gate as CI
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90'
-      - 'bash scripts/test-floor.sh coverage 330'
+      - 'bash scripts/core.sh test-floor coverage 330'
 
   clean:
     desc: Remove this crate's cargo output
@@ -242,7 +242,7 @@ tasks:
     # the baseline is the registry, which moves without this tree changing,
     # so a fingerprint would call a stale answer up to date.
     cmds:
-      - 'bash scripts/tier.sh semver semver 40 4000 -- scripts/semver-check.sh'
+      - 'bash scripts/tier.sh semver semver 40 4000 -- bash scripts/core.sh semver-check'
 
   test:scripts:
     desc: The shell tests (tests/scripts/*.sh), exactly as CI runs them
