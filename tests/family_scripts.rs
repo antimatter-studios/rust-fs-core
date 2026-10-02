@@ -131,6 +131,14 @@ fn each_family_script_states_its_contract() {
         version_of("guest-rust-toolchain.sh"),
         "rust-fs-core-guest-rust-toolchain 1"
     );
+    assert_eq!(
+        version_of("stage-siblings.sh"),
+        "rust-fs-core-stage-siblings 1"
+    );
+    assert_eq!(
+        version_of("guest-rust-run.sh"),
+        "rust-fs-core-guest-rust-run 1"
+    );
     assert_eq!(version_of("ci-gate.sh"), "rust-fs-core-ci-gate 1");
     assert_eq!(version_of("package-cli.sh"), "rust-fs-core-package-cli 1");
 }
@@ -324,6 +332,8 @@ fn the_package_ships_every_family_script() {
         "guest-rust-toolchain.sh",
         "ci-gate.sh",
         "package-cli.sh",
+        "stage-siblings.sh",
+        "guest-rust-run.sh",
     ] {
         assert!(
             Path::new(&repo().join("scripts").join(script)).is_file(),
@@ -398,6 +408,52 @@ fn family_check_passes_a_clean_caller_and_refuses_each_kind_of_copy() {
         "{}",
         printed(&out)
     );
+
+    // The rest of the guest's Rust layer is family scripts too: the staging
+    // of path siblings on the host and the linking, environment and install
+    // in the guest were copied into five drivers' test:vm and guest-suite.sh
+    // (#195). A copy, or a call that bypasses core.sh, is refused.
+    let layer = Caller::new("family-guest-layer-copy");
+    for script in ["stage-siblings.sh", "guest-rust-run.sh"] {
+        fs::write(layer.root.join("scripts").join(script), "echo mine\n").unwrap();
+    }
+    fs::write(
+        layer.root.join("chores.yml"),
+        "tasks:\n  test:vm:\n    cmds:\n      - 'bash scripts/stage-siblings.sh /share rust-fs-core'\n",
+    )
+    .unwrap();
+    fs::write(
+        layer.root.join("scripts/guest-suite.sh"),
+        "exec bash scripts/guest-rust-run.sh fs-x /share rust-fs-core -- true\n",
+    )
+    .unwrap();
+    let out = layer.core(&["family-check"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
+    let said = String::from_utf8_lossy(&out.stdout);
+    for expected in [
+        "scripts/stage-siblings.sh is a copy",
+        "scripts/guest-rust-run.sh is a copy",
+        "chores.yml:4:      - 'bash scripts/stage-siblings.sh /share rust-fs-core'",
+        "scripts/guest-suite.sh:1:exec bash scripts/guest-rust-run.sh",
+    ] {
+        assert!(said.contains(expected), "{expected}: {}", printed(&out));
+    }
+
+    // A driver's own guest command is its scripts/guest-suite.sh, and the
+    // family script it runs is named so that file is not taken for a copy.
+    let driver = Caller::new("family-guest-suite-is-the-drivers");
+    fs::write(
+        driver.root.join("scripts/guest-suite.sh"),
+        "FS_CORE_ROOT=/share/siblings/rust-fs-core exec bash scripts/core.sh guest-rust-run fs-x /share rust-fs-core -- scripts/test.sh\n",
+    )
+    .unwrap();
+    fs::write(
+        driver.root.join("chores.yml"),
+        "tasks:\n  test:vm:\n    cmds:\n      - 'bash scripts/core.sh stage-siblings /share rust-fs-core -- true'\n",
+    )
+    .unwrap();
+    let out = driver.core(&["family-check"], &[]);
+    assert!(out.status.success(), "{}", printed(&out));
 
     // A bootstrap edited away from core's.
     let edited = Caller::new("family-edited");

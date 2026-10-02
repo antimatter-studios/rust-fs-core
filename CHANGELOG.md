@@ -7,6 +7,30 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.20] — 2026-10-03
+
+### Added
+
+- **`scripts/core.sh stage-siblings` and `scripts/core.sh guest-rust-run`:
+  the one copy of the rest of a driver's test-VM Rust layer** (#195). Five
+  Linux drivers carried the same staging in their `test:vm` task and the same
+  head of `scripts/guest-suite.sh`, differing only in the filesystem's name.
+  `stage-siblings SHARE SIBLING... [-- COMMAND...]` runs on the host: it
+  stages each path sibling's HEAD on the VM share, replacing what was staged
+  before, refuses a sibling that is not checked out or has no commit and a
+  share that is not a directory, and then runs the guest command with
+  chore's `CLI_ARGS` less `--verbose`/`-v`, unglobbed. `guest-rust-run NAME
+  SHARE SIBLING... -- COMMAND...` runs in the guest: it refuses outside the
+  VM, links each staged sibling beside the caller (pointing a stale link
+  back, refusing a real directory in its place), exports the toolchain and
+  build directories under `/var/lib/NAME-rust` and `/var/cache/NAME-target`,
+  installs the pinned toolchain through `guest-rust-toolchain`, and runs the
+  suite with its status. They answer `--version` with
+  `rust-fs-core-stage-siblings 1` and `rust-fs-core-guest-rust-run 1`.
+- `family-check` refuses a committed `scripts/stage-siblings.sh` or
+  `scripts/guest-rust-run.sh`, and a workflow, `chores.yml` or script that
+  runs one directly.
+
 ## [0.2.19] — 2026-10-02
 
 ### Added
