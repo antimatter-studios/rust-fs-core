@@ -46,6 +46,12 @@ chore_min_version: 0.6.0
 #   debug      557 / 31,250 bytes      750 / 50,000     330
 #   release    557 / 31,295 bytes      750 / 50,000     330
 #   coverage   575 / 32,607 bytes      800 / 60,000     330
+#   semver     (see below)              40 / 4,000       -
+#
+# The semver row is rust-fs-ext4's measurement of the same script: 11 lines /
+# 489 bytes passing with the baseline's rustdoc cached, one line more when it
+# is built. Its lines are fixed, not per item, so 40 / 4,000 leaves room for a
+# warning block without hiding a flood. It has no floor: it runs one check.
 #
 # scripts/output-budget.sh is the one canonical neutral family source. See
 # docs/output-budget.md; consumers invoke it through their pinned
@@ -227,6 +233,16 @@ tasks:
     # partly by checking its own CI config.
     cmds:
       - scripts/ci-gate.sh
+
+  check:semver:
+    desc: Refuse a public-API break the version in Cargo.toml does not declare
+    # Against the newest version on crates.io, with cargo-semver-checks: a
+    # break needs the 0.x minor to move, an addition the patch. Why, and what
+    # it cannot see, is at the top of the script. No `sources:` on purpose --
+    # the baseline is the registry, which moves without this tree changing,
+    # so a fingerprint would call a stale answer up to date.
+    cmds:
+      - 'bash scripts/tier.sh semver semver 40 4000 -- scripts/semver-check.sh'
 
   test:scripts:
     desc: The shell tests (tests/scripts/*.sh), exactly as CI runs them
