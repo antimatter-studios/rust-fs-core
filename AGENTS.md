@@ -229,8 +229,8 @@ verdict line on success and the tail on failure.
 
 ## The family scripts — one copy, here, run by every repository
 
-`scripts/test-floor.sh`, `scripts/semver-check.sh`, `scripts/ci-gate.sh`
-and `scripts/guest-rust-toolchain.sh` are the family's, the same way
+`scripts/test-floor.sh`, `scripts/semver-check.sh`, `scripts/ci-gate.sh`,
+`scripts/guest-rust-toolchain.sh` and `scripts/package-cli.sh` are the family's, the same way
 `scripts/output-budget.sh` is. Each repository once carried its own copy of
 them, and the copies drifted: one silent-exit bug in the floor was
 fixed seven times, and a rule one repository added reached no other. Now no
@@ -264,13 +264,35 @@ runs it against the calling repository:
   to name a language or a toolchain. `tests/scripts/test-guest-rust-toolchain.sh`
   drives each kind of wreckage against a stub rustup (#190).
 
+- `scripts/core.sh package-cli VERSION LABEL [TARGET-DIR]` builds the
+  caller's release tarball in the current directory and prints its name: the
+  install prefix every repository ships (the multi-call binary, a relative
+  symlink per dotted name, a man page per name in its section, the zsh, bash
+  and fish completions, `share/<repo>/CAVEATS`, the licences), checked from
+  the unpacked tarball before it is named. What is the caller's own is read
+  from its `Cargo.toml`, never written in the script:
+
+  ```toml
+  [package.metadata.package-cli]
+  names = { "mkfs.example" = 8, "fs.example" = 1 }  # every dotted name, and its man section
+  licenses = ["LICENSE"]                            # files at the repository's root
+  caveats = "packaging/CAVEATS"                     # optional; this is the default
+  ```
+
+  The binary's `generate names` must list exactly those names. Ten
+  repositories each carried a copy of this script, and of its test, until
+  the copies held three policies for which names ship (#193);
+  `tests/package_cli.rs` is the one test of the one script. It needs cargo
+  and python3, and every list in it is compared in the C locale.
+
 - `scripts/core.sh family-check` fails the caller if it commits a copy of
   any of these, if its `scripts/core.sh` differs from this repository's, or
   if anything it runs calls a local copy. Every repository runs it in CI.
 
 This repository runs its own through `scripts/core.sh` too, so the path every
 consumer takes is the one tested here (`tests/family_scripts.rs`, and
-`tests/scripts/test-ci-gate.sh` for the gate, which needs PyYAML). A change to
+`tests/scripts/test-ci-gate.sh` for the gate, which needs PyYAML, and
+`tests/package_cli.rs` for the tarball). A change to
 either script is a change for the whole family: keep the `--version` contract,
 or bump it and every consumer's `core.sh` in the same pass.
 

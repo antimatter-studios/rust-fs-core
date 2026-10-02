@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           files="$(cargo package --locked --list)"
-          for script in core.sh output-budget.sh test-floor.sh semver-check.sh family-check.sh guest-rust-toolchain.sh ci-gate.sh; do
+          for script in core.sh output-budget.sh test-floor.sh semver-check.sh family-check.sh guest-rust-toolchain.sh ci-gate.sh package-cli.sh; do
             grep -Fqx "scripts/$script" <<<"$files" || {
               echo "package omits scripts/$script" >&2
               exit 1
