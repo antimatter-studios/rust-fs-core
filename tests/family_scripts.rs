@@ -404,6 +404,36 @@ fn per_target_floors_catch_a_suite_that_emptied_inside_a_healthy_total() {
         printed(&ok)
     );
 
+    // A target the log never mentions -- a suite that stopped being BUILT --
+    // counts as zero, not as absent and therefore fine.
+    fs::write(
+        caller.root.join(".github/test-floors.txt"),
+        "reads 3\nnever_built 1\n",
+    )
+    .unwrap();
+    caller.log("suite", &run(1));
+    let unbuilt = caller.core(
+        &[
+            "test-floor",
+            "--targets",
+            ".github/test-floors.txt",
+            "suite",
+        ],
+        &[],
+    );
+    assert_eq!(unbuilt.status.code(), Some(1), "{}", printed(&unbuilt));
+    assert!(
+        String::from_utf8_lossy(&unbuilt.stdout)
+            .contains("never_built executed 0 tests, floor is 1"),
+        "{}",
+        printed(&unbuilt)
+    );
+    fs::write(
+        caller.root.join(".github/test-floors.txt"),
+        "# target floor\nlib 2\nreads 3\nwrites 1\n",
+    )
+    .unwrap();
+
     caller.log("suite", &run(0));
     let emptied = caller.core(
         &[
