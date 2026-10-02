@@ -7,6 +7,31 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.18] — 2026-10-02
+
+### Added
+
+- **`ci-gate` is a family script, served by `scripts/core.sh`.** Eleven
+  repositories each committed a byte-identical `scripts/ci-gate.sh`, and the
+  three that had none had nothing holding their required checks to `ci-ok`.
+  It now runs against the CALLER's `ci.yml` and `.github-guard`
+  (`FS_CORE_CALLER`), answers `--version` with `rust-fs-core-ci-gate 1`, and
+  every repository runs it as `bash scripts/core.sh ci-gate`. The
+  `CI_GATE_*` overrides are unchanged, and their paths are relative to the
+  caller.
+- `scripts/core.sh family-check` refuses a committed `scripts/ci-gate.sh` and
+  a workflow, `chores.yml` or script that runs one, as it already did for
+  `test-floor` and `semver-check`.
+
+### Fixed
+
+- **`.github-guard` is read as github-guard reads it**, with `git config
+  --get-all checks.required`: one check per `required =` line, kept whole. The
+  gate split each value on whitespace, so `full test suite (fixtures +
+  integration)` was reported as six checks that do not exist, a trailing
+  `; comment` git ignores was read as more checks, and a `required =` under
+  some other section counted. A guard git cannot parse now fails, by name.
+
 ## [0.2.17] — 2026-10-02
 
 ### Added

@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           files="$(cargo package --locked --list)"
-          for script in core.sh output-budget.sh test-floor.sh semver-check.sh family-check.sh guest-rust-toolchain.sh; do
+          for script in core.sh output-budget.sh test-floor.sh semver-check.sh family-check.sh guest-rust-toolchain.sh ci-gate.sh; do
             grep -Fqx "scripts/$script" <<<"$files" || {
               echo "package omits scripts/$script" >&2
               exit 1
@@ -110,7 +110,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
       - name: the one required check stands for every job
-        run: scripts/ci-gate.sh
+        run: bash scripts/core.sh ci-gate
       - name: the agent guide carries the shared block
         # AGENTS.md embeds agent-core, byte-identical with every sibling. This
         # runs the script directly rather than through `chore lint`, because

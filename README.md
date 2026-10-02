@@ -94,7 +94,7 @@ tests/
 
 The one required check is `ci-ok`, and it stands for every job — see
 `.github-guard`, which argues why at length. What holds that true is
-**`chore ci:gate`**, run by the `gate` job: the gate workflow must run on
+**`scripts/core.sh ci-gate`**, run by the `fmt` job: the gate workflow must run on
 `pull_request`, `ci-ok` must `needs:` every gating job and nothing that does
 not exist, it must carry `if: always()` rather than a narrowing of it, and
 `.github-guard` must require `ci-ok` alone.
@@ -104,9 +104,12 @@ repositories as ten variants of the same 161–173 lines; then briefly a
 `crates/am-ci-guard` dev-dependency (#156, #157). Both were the wrong
 container. The rules test nothing this crate ships — they parse a YAML file
 and compare strings — and the `test` job enforces an executed-test floor, so
-a meta-test inflates the very count used to satisfy the gate. They live in
-`antimatter-studios/chore` now, where a consumer cannot locally edit them and
-where no cargo dependency graph has to hear about them.
+a meta-test inflates the very count used to satisfy the gate. A `ci:gate`
+subcommand inside `chore` was wrong too: it made a release of a shared tool a
+prerequisite for a change here. They are `scripts/ci-gate.sh` now, one of this
+crate's family scripts: every repository in the family runs this copy as
+`bash scripts/core.sh ci-gate` against its own `ci.yml` and `.github-guard`,
+and `scripts/core.sh family-check` refuses a repository that commits its own.
 
 `.github/actions/install-chore` is the composite action that installs the
 binary (antimatter-studios/chore#52), for the other thing every repository

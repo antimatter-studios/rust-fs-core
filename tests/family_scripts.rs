@@ -131,6 +131,24 @@ fn each_family_script_states_its_contract() {
         version_of("guest-rust-toolchain.sh"),
         "rust-fs-core-guest-rust-toolchain 1"
     );
+    assert_eq!(version_of("ci-gate.sh"), "rust-fs-core-ci-gate 1");
+}
+
+/// `ci-gate` is served the way the others are: by name, through the
+/// bootstrap, with its contract checked before it runs. Its behaviour against
+/// a caller's `ci.yml` and `.github-guard` is `tests/scripts/test-ci-gate.sh`,
+/// which needs python3's yaml module and so runs where CI provides one.
+#[test]
+fn the_bootstrap_serves_ci_gate() {
+    let caller = Caller::new("ci-gate");
+    let out = caller.core(&["ci-gate", "--version"], &[]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "rust-fs-core-ci-gate 1",
+        "{}",
+        printed(&out)
+    );
 }
 
 #[test]
@@ -303,6 +321,7 @@ fn the_package_ships_every_family_script() {
         "semver-check.sh",
         "family-check.sh",
         "guest-rust-toolchain.sh",
+        "ci-gate.sh",
     ] {
         assert!(
             Path::new(&repo().join("scripts").join(script)).is_file(),
@@ -366,6 +385,18 @@ fn family_check_passes_a_clean_caller_and_refuses_each_kind_of_copy() {
         printed(&out)
     );
 
+    // A committed copy of ci-gate, the one every repository used to carry.
+    let gate = Caller::new("family-gate-copy");
+    fs::write(gate.root.join("scripts/ci-gate.sh"), "echo mine\n").unwrap();
+    let out = gate.core(&["family-check"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("scripts/ci-gate.sh is a copy of rust-fs-core's; delete it and run it as scripts/core.sh ci-gate"),
+        "{}",
+        printed(&out)
+    );
+
     // A bootstrap edited away from core's.
     let edited = Caller::new("family-edited");
     let path = edited.root.join("scripts/core.sh");
@@ -399,6 +430,21 @@ fn family_check_passes_a_clean_caller_and_refuses_each_kind_of_copy() {
     assert!(
         !said.contains("see scripts/semver-check.sh"),
         "a comment was counted as a call: {}",
+        printed(&out)
+    );
+
+    // chores.yml still naming the local ci-gate, as eleven of them did.
+    let gate_call = Caller::new("family-gate-call");
+    fs::write(
+        gate_call.root.join("chores.yml"),
+        "tasks:\n  check:ci-gate:\n    cmds:\n      - scripts/ci-gate.sh\n",
+    )
+    .unwrap();
+    let out = gate_call.core(&["family-check"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("- scripts/ci-gate.sh"),
+        "{}",
         printed(&out)
     );
 }
