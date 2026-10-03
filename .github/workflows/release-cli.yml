@@ -1,0 +1,179 @@
+name: release-cli
+
+# THE FAMILY'S RELEASE TARBALL, PACKAGED, ATTESTED AND ATTACHED FROM ONE
+# PLACE. Every repository that ships command-line tools once carried its own
+# `package-cli` matrix and its own attest-and-attach job in `release.yml`,
+# and the copies drifted: one repository's release never got the jobs and
+# shipped no tarball at all (#193). This is the one copy. A repository calls
+# it from its tag-triggered `release.yml`:
+#
+#   cli:
+#     needs: [gate, publish]
+#     permissions:
+#       contents: write
+#       id-token: write
+#       attestations: write
+#     uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@<sha> # vX.Y.Z
+#     with:
+#       core-ref: vX.Y.Z
+#       toolchain: 1.95.0
+#
+# Everything about WHAT is shipped is the caller's, in its Cargo.toml
+# (`[package.metadata.package-cli]`, read by scripts/package-cli.sh); this
+# file decides only HOW: which platforms, in what order, and with which
+# grants. The binary is `<repo>`, the last segment of the caller's
+# repository name, which package-cli.sh requires to be a [[bin]] target.
+#
+# In a called workflow the `github` context is the CALLER's: the checkout is
+# the caller's tag, GITHUB_REF_NAME is its tag, and the attestation's signer
+# is the caller's release.yml. Anyone can check a download with
+#
+#   gh attestation verify <tarball> --repo <owner>/<repo>
+#
+# tests/release_cli_workflow.rs reads this file and fails on each property
+# above; nothing else here would notice, because it runs only on another
+# repository's tag.
+on:
+  workflow_call:
+    inputs:
+      core-ref:
+        description: The rust-fs-core tag the caller's Cargo.toml pins, cloned as its path sibling.
+        required: true
+        type: string
+      toolchain:
+        description: The Rust toolchain the caller pins.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Native builds, one runner per platform: cross-compiling needs a cross
+  # toolchain or an emulator, and GitHub provides both platforms natively.
+  # Read-only. A leg hands its tarball on as an artifact; `attach` publishes
+  # them together once every leg has passed, so a release never carries one
+  # platform without the other.
+  package:
+    name: package the tools (${{ matrix.label }})
+    permissions:
+      contents: read
+    strategy:
+      # One platform failing should not hide whether the other built.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            label: darwin-arm64
+          - runner: ubuntu-latest
+            label: linux-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # A tarball named for a branch would be a release nobody tagged.
+      - name: refuse anything but a version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::release-cli packages a version tag, not $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
+      # The path dependency, at the tag the caller pins. Through env: a
+      # caller's input is text, and spliced into a script it would be code.
+      - name: clone the rust-fs-core sibling
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.core-ref }}
+        run: git clone --depth 1 --branch "$CORE_REF" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
+        with:
+          toolchain: ${{ inputs.toolchain }}
+
+      - name: build the multi-call binary
+        shell: bash
+        run: cargo build --release --locked --features cli --bin "${GITHUB_REPOSITORY##*/}"
+
+      # package-cli.sh prints the tarball's name on stdout and checks the
+      # tarball it built: exactly the contracted members, every dotted name
+      # a relative symlink, and every name answering --help and --version.
+      - name: package and check the tarball
+        id: pack
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          bash scripts/core.sh package-cli "${GITHUB_REF_NAME#v}" "$LABEL" > "$RUNNER_TEMP/tarball"
+          tarball="$(tail -n 1 "$RUNNER_TEMP/tarball")"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          # A formula needs this to verify the download; in the job summary,
+          # updating one is a copy, not a re-download.
+          {
+            echo "### $tarball"
+            echo ""
+            echo '```'
+            echo "sha256 $(shasum -a 256 "$tarball" | cut -d' ' -f1)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # AN ARTIFACT, NOT THE RELEASE: a leg that published its own asset
+      # would do so whether or not the other leg later failed.
+      - name: keep the tarball for the attach job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-${{ matrix.label }}
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job with a write grant, and it checks nothing out and builds
+  # nothing: it downloads the legs' tarballs, attests their provenance, and
+  # hands them to `gh`.
+  attach:
+    name: attest and attach the tools
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: collect every leg's tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: cli-*
+          path: dist
+          merge-multiple: true
+
+      - name: one tarball per platform, no more and no fewer
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/*.tar.gz)
+          if [ "${#assets[@]}" -ne 2 ]; then
+            echo "::error::expected 2 tarballs (one per package leg), found ${#assets[@]}: ${assets[*]}" >&2
+            exit 1
+          fi
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: attach the tarballs to the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz --clobber
