@@ -8,7 +8,11 @@
 # Two halves, and both must hold or the aggregate is decoration:
 #
 #   1. ci.yml    — the aggregate job `needs:` every other gating job, carries
-#                  `if: always()`, and names no job that does not exist.
+#                  `if: always()`, names no job that does not exist, and its
+#                  steps read every result it needs: `toJSON(needs)` or
+#                  `needs.*.result` as a whole, or each `needs.<job>.result`.
+#                  What a script handed `toJSON(needs)` does with it is that
+#                  script's business; the gate sees only that it was handed.
 #   2. .github-guard — requires that aggregate and nothing else.
 #
 # THE OVERRIDES, all optional and read from the environment. Paths are relative
@@ -60,7 +64,7 @@ command -v python3 >/dev/null || { echo "ci-gate: python3 is required" >&2; exit
 command -v git >/dev/null || { echo "ci-gate: git is required to read $GUARD" >&2; exit 2; }
 
 python3 - "$WORKFLOW" "$AGGREGATE" "$GUARD" "$NON_GATING" <<'PY'
-import sys, os, subprocess
+import sys, os, re, subprocess
 wf, agg, guard, non_gating = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].split()
 fails = []
 
@@ -118,6 +122,36 @@ else:
     for n in needs:
         if n not in jobs:
             fails.append(f"`{agg}` needs `{n}`, which is not a job in `{wf}`.")
+
+    # The aggregate must READ what it needs (#198). A job in `needs:` whose
+    # result no step looks at gates nothing: it can fail and the aggregate
+    # still passes. Accepted: the whole context -- `toJSON(needs)` (GitHub's
+    # function names are case-insensitive) or `needs.*.result` -- or each
+    # need's own `needs.<job>.result` / `needs['<job>'].result`. Read from
+    # every string in the steps, so `run:`, `env:` and `if:` all count.
+    def strings(node):
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                yield from strings(k)
+                yield from strings(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from strings(v)
+    text = "\n".join(strings(body.get("steps") or []))
+    whole = re.search(r"(?i)\btojson\(\s*needs\s*\)", text) or \
+        re.search(r"\bneeds\.\*\.result\b", text)
+    if not whole:
+        for n in needs:
+            spelled = re.escape(n)
+            if not re.search(r"\bneeds(\." + spelled + r"|\[\s*['\"]" + spelled +
+                             r"['\"]\s*\])\.result\b", text):
+                fails.append(
+                    f"`{agg}` needs `{n}` but no step of it reads `needs.{n}.result`, so "
+                    f"that job gates nothing: it can fail and `{agg}` still passes. Judge "
+                    f"`toJSON(needs)` as a whole, so a job added to `needs:` is judged "
+                    f"without editing the step.")
 
     for name in non_gating:
         if name not in jobs:

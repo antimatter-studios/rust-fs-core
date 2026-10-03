@@ -70,7 +70,10 @@ jobs:
     if: always()
     needs: [build, lint]
     runs-on: ubuntu-latest
-    steps: [{run: "true"}]
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS" | jq -e '"'"'all(.[]; .result == "success")'"'"'
 '
 ONE='[checks]
 	required = ci-ok
@@ -155,7 +158,86 @@ else
     fail "an unparsable guard was not refused as such (status $status):"$'\n'"$said"
 fi
 
-# --- 8. The overrides are still read, relative to the caller. -------------
+# --- 8. ci-ok must READ what it needs, not only need it (#198). ------------
+#
+# A job in `needs:` whose result the step never looks at gates nothing: it
+# can fail and ci-ok still passes. Three repositories in the family had
+# exactly this, a hand-kept list in the step that left out `semver`.
+listed='  ci-ok:
+    if: always()
+    needs: [build, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every gating job must have concluded success
+        run: |
+          for one in "build:${{ needs.build.result }}"; do
+            [ "${one#*:}" = success ] || exit 1
+          done
+'
+dir="$(caller unread "$ONE" <<<"${WORKFLOW%%  ci-ok:*}$listed")"
+gate "$dir"
+if [ "$status" -eq 1 ] && grep -qF '`ci-ok` needs `lint` but no step of it reads `needs.lint.result`' <<<"$said"; then
+    ok "a need the aggregate's steps never read fails, by name"
+else
+    fail "a need ci-ok never reads was accepted (status $status):"$'\n'"$said"
+fi
+if grep -qF 'needs.build.result' <<<"$said"; then
+    fail "a need the step does read was reported as unread:"$'\n'"$said"
+fi
+
+# Every need named, in each spelling GitHub accepts, passes.
+named='  ci-ok:
+    if: always()
+    needs: [build, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ needs.build.result != '"'"'success'"'"' || needs['"'"'lint'"'"'].result != '"'"'success'"'"' }}
+        run: exit 1
+'
+dir="$(caller named "$ONE" <<<"${WORKFLOW%%  ci-ok:*}$named")"
+gate "$dir"
+if [ "$status" -eq 0 ]; then
+    ok "a step naming every need's result, dotted or indexed, passes"
+else
+    fail "a step that reads every need was refused (status $status):"$'\n'"$said"
+fi
+
+# The whole context, in either of GitHub's spellings, passes; so does needs.*.
+for whole in 'toJson(needs)' 'contains(needs.*.result, '"'"'failure'"'"')'; do
+    body="  ci-ok:
+    if: always()
+    needs: [build, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          VERDICT: \${{ $whole }}
+        run: test -n \"\$VERDICT\"
+"
+    dir="$(caller "whole-${whole%%(*}" "$ONE" <<<"${WORKFLOW%%  ci-ok:*}$body")"
+    gate "$dir"
+    if [ "$status" -eq 0 ]; then
+        ok "a step reading the whole needs context ($whole) passes"
+    else
+        fail "a step reading the whole needs context ($whole) was refused (status $status):"$'\n'"$said"
+    fi
+done
+
+# A step with no steps at all, or none that touch needs, reads nothing.
+blind='  ci-ok:
+    if: always()
+    needs: [build, lint]
+    runs-on: ubuntu-latest
+    steps: [{run: "true"}]
+'
+dir="$(caller blind "$ONE" <<<"${WORKFLOW%%  ci-ok:*}$blind")"
+gate "$dir"
+if [ "$status" -eq 1 ] && grep -qF '`ci-ok` needs `build` but no step of it reads `needs.build.result`' <<<"$said"; then
+    ok "an aggregate that reads nothing fails"
+else
+    fail "an aggregate that never reads needs was accepted (status $status):"$'\n'"$said"
+fi
+
+# --- 9. The overrides are still read, relative to the caller. -------------
 dir="$(caller overrides "$ONE" <<<"$WORKFLOW")"
 mv "$dir/.github/workflows/ci.yml" "$dir/.github/workflows/gate.yml"
 mv "$dir/.github-guard" "$dir/guard.cfg"

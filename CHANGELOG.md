@@ -7,6 +7,19 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.21] — 2026-10-03
+
+### Fixed
+
+- **`ci-gate` fails an aggregate whose steps never read a result it needs**
+  (#198). It held `ci-ok`'s `needs:` to every job, but not what the step did
+  with them, and three repositories had a step that judged a hand-kept list
+  leaving out `semver`: a failing semver job left `ci-ok` green and the gate
+  passed. The steps must now read `toJSON(needs)` or `needs.*.result` as a
+  whole, or each need's own `needs.<job>.result`; a need none of them reads
+  is named. A script handed `toJSON(needs)` is trusted with it -- the gate
+  cannot see inside the script.
+
 ## [0.2.20] — 2026-10-03
 
 ### Added
