@@ -7,6 +7,23 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.23] — 2026-10-03
+
+### Added
+
+- **`.github/workflows/release-cli.yml`: the one copy of the release
+  tarball's package, attest and attach jobs** (#193, #202). Each repository
+  that ships command-line tools carried its own `package-cli` matrix and
+  attest-and-attach job in `release.yml`, and the copies drifted. This is a
+  `workflow_call` workflow taking the caller's `core-ref` and `toolchain`: it
+  builds on darwin-arm64 and linux-x86_64 with a read-only token, runs
+  `scripts/core.sh package-cli` after a locked release build, and one job
+  holding the write grants refuses anything but the two tarballs, attests
+  them and attaches them to the caller's tag. A caller pins it by commit SHA
+  and passes this release's tag as `core-ref`.
+- `tests/release_cli_workflow.rs` reads the workflow as YAML and fails on
+  each property a caller relies on, with one mutation per property.
+
 ## [0.2.22] — 2026-10-03
 
 ### Fixed
