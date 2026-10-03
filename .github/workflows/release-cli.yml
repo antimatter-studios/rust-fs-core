@@ -25,10 +25,21 @@ name: release-cli
 # repository name, which package-cli.sh requires to be a [[bin]] target.
 #
 # In a called workflow the `github` context is the CALLER's: the checkout is
-# the caller's tag, GITHUB_REF_NAME is its tag, and the attestation's signer
-# is the caller's release.yml. Anyone can check a download with
+# the caller's tag and GITHUB_REF_NAME is its tag. THE ATTESTATION'S SIGNER
+# IS THIS FILE, NOT THE CALLER'S release.yml. Sigstore takes the
+# certificate's Build Signer URI from `job_workflow_ref`, which in a called
+# workflow names the called workflow; the caller's release.yml is recorded
+# only as the build configuration. Anyone can check a download with
 #
 #   gh attestation verify <tarball> --repo <owner>/<repo>
+#
+# and pin the signer with
+#
+#   gh attestation verify <tarball> --repo <owner>/<repo> \
+#     --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
+#
+# Naming the caller's release.yml as --signer-workflow refuses every
+# tarball this workflow attests.
 #
 # tests/release_cli_workflow.rs reads this file and fails on each property
 # above; nothing else here would notice, because it runs only on another
