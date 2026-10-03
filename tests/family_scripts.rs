@@ -507,6 +507,63 @@ fn family_check_passes_a_clean_caller_and_refuses_each_kind_of_copy() {
     );
 }
 
+/// `cmp` compares bytes, not the mode: a byte-identical `scripts/core.sh`
+/// that lost its executable bit passed family-check and then failed with
+/// `Permission denied` wherever a caller ran it directly (rust-fs-core#200).
+/// Where the caller is a git repository the mode is the one git records,
+/// because the mode on disk depends on `core.fileMode`.
+#[test]
+fn family_check_refuses_a_bootstrap_that_is_not_executable() {
+    #[cfg(unix)]
+    let chmod = |caller: &Caller, mode: u32| {
+        use std::os::unix::fs::PermissionsExt;
+        let path = caller.root.join("scripts").join("core.sh");
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+    };
+    let git = |caller: &Caller, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&caller.root)
+            .args(args)
+            .output()
+            .expect("git is needed to build a caller repository");
+        assert!(out.status.success(), "git {args:?}: {}", printed(&out));
+    };
+    let refused = |out: &Output| {
+        assert_eq!(out.status.code(), Some(1), "{}", printed(out));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("scripts/core.sh is not executable"),
+            "{}",
+            printed(out)
+        );
+    };
+
+    // Outside git, the mode on disk is all there is. Windows has no mode
+    // to clear, so this case is Unix's; the git cases below run everywhere.
+    #[cfg(unix)]
+    {
+        let plain = Caller::new("family-mode-plain");
+        chmod(&plain, 0o644);
+        refused(&plain.core(&["family-check"], &[]));
+    }
+
+    // In git, the recorded mode decides, whatever the disk says.
+    let lost = Caller::new("family-mode-git-lost");
+    git(&lost, &["init", "-q"]);
+    git(&lost, &["add", "scripts/core.sh"]);
+    git(&lost, &["update-index", "--chmod=-x", "scripts/core.sh"]);
+    refused(&lost.core(&["family-check"], &[]));
+
+    let kept = Caller::new("family-mode-git-kept");
+    git(&kept, &["init", "-q"]);
+    git(&kept, &["config", "core.fileMode", "false"]);
+    git(&kept, &["add", "scripts/core.sh"]);
+    git(&kept, &["update-index", "--chmod=+x", "scripts/core.sh"]);
+    #[cfg(unix)]
+    chmod(&kept, 0o644);
+    let out = kept.core(&["family-check"], &[]);
+    assert!(out.status.success(), "{}", printed(&out));
+}
+
 #[test]
 fn per_target_floors_catch_a_suite_that_emptied_inside_a_healthy_total() {
     let caller = Caller::new("targets");

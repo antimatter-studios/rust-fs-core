@@ -13,7 +13,8 @@
 #      scripts/ci-gate.sh, scripts/package-cli.sh, scripts/stage-siblings.sh
 #      and scripts/guest-rust-run.sh are not committed in the caller.
 #   2. ONE BOOTSTRAP. The caller's scripts/core.sh is byte-identical to this
-#      repository's, so the way core is found is the same everywhere.
+#      repository's, so the way core is found is the same everywhere, and
+#      executable -- in the mode git records, where git tracks it.
 #   3. NOTHING CALLS A COPY. No workflow, chores.yml or script in the caller
 #      runs scripts/test-floor.sh, scripts/semver-check.sh,
 #      scripts/guest-rust-toolchain.sh, scripts/ci-gate.sh,
@@ -51,8 +52,21 @@ if [ "$CALLER" != "$CORE" ]; then
     # 2. One bootstrap.
     if [ ! -f "$CALLER/scripts/core.sh" ]; then
         fail "scripts/core.sh is missing; copy rust-fs-core's scripts/core.sh unchanged"
-    elif ! cmp -s "$CALLER/scripts/core.sh" "$CORE/scripts/core.sh"; then
-        fail "scripts/core.sh differs from rust-fs-core's; copy it again, unchanged"
+    else
+        if ! cmp -s "$CALLER/scripts/core.sh" "$CORE/scripts/core.sh"; then
+            fail "scripts/core.sh differs from rust-fs-core's; copy it again, unchanged"
+        fi
+        # cmp compares bytes, not the mode, and a copy that lost its
+        # executable bit fails far from here, wherever it is run directly
+        # (#200). Where git tracks the file its recorded mode decides, since
+        # the mode on disk depends on core.fileMode; otherwise the disk does.
+        mode="$(git -C "$CALLER" ls-files -s -- scripts/core.sh 2>/dev/null | cut -d' ' -f1)"
+        if [ -n "$mode" ]; then
+            [ "$mode" = 100755 ] \
+                || fail "scripts/core.sh is not executable (git records mode $mode); run git update-index --chmod=+x scripts/core.sh"
+        elif [ ! -x "$CALLER/scripts/core.sh" ]; then
+            fail "scripts/core.sh is not executable; chmod +x scripts/core.sh"
+        fi
     fi
 
     # 3. Nothing calls a copy. Only files a run reads: workflows, chores.yml,
