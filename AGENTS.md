@@ -285,6 +285,26 @@ runs it against the calling repository:
   `tests/package_cli.rs` is the one test of the one script. It needs cargo
   and python3, and every list in it is compared in the C locale.
 
+- `scripts/core.sh stage-siblings SHARE SIBLING... [-- COMMAND...]`, run on
+  the host by a driver's `test:vm`, puts each path sibling checked out at
+  `../SIBLING` on the VM share at `SHARE/siblings/SIBLING`, from its HEAD
+  through `git archive`, replacing what was staged before; then runs
+  COMMAND (the harness's `vm.sh guest-test`) with chore's `CLI_ARGS`
+  appended, less the tier wrapper's `--verbose`/`-v`. It has to be a host
+  script: it runs before the guest exists.
+
+- `scripts/core.sh guest-rust-run NAME SHARE SIBLING... -- COMMAND...`, run
+  by a driver's `scripts/guest-suite.sh` inside the VM, refuses unless
+  `FLTH_GUEST=1`, links each staged sibling at `../SIBLING` (in the guest,
+  `/SIBLING`), exports `RUSTUP_HOME`/`CARGO_HOME` under `/var/lib/NAME-rust`
+  and `CARGO_TARGET_DIR=/var/cache/NAME-target`, installs the toolchain
+  through `guest-rust-toolchain`, and runs COMMAND from the caller. The
+  bootstrap cannot find core before core is linked, so the caller sets
+  `FS_CORE_ROOT=/share/siblings/rust-fs-core` for this one call. It is not
+  named `guest-suite`, because that is each driver's own guest command and
+  family-check would take it for a copy. `tests/scripts/test-stage-siblings.sh`
+  and `tests/scripts/test-guest-rust-run.sh` drive both (#195).
+
 - `scripts/core.sh family-check` fails the caller if it commits a copy of
   any of these, if its `scripts/core.sh` differs from this repository's, or
   if anything it runs calls a local copy. Every repository runs it in CI.
