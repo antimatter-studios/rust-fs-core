@@ -7,6 +7,17 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.22] — 2026-10-03
+
+### Fixed
+
+- **`family-check` refuses a `scripts/core.sh` that is not executable**
+  (#200). It compared the caller's copy with `cmp`, which reads bytes and not
+  the mode, so a copy that lost its executable bit in a conflict resolution
+  passed and then failed with `Permission denied` where a guest suite ran it
+  directly. Where git tracks the file, the mode git records decides, because
+  the mode on disk depends on `core.fileMode`; otherwise the disk's does.
+
 ## [0.2.21] — 2026-10-03
 
 ### Fixed

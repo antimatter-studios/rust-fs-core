@@ -307,8 +307,9 @@ runs it against the calling repository:
   and `tests/scripts/test-guest-rust-run.sh` drive both (#195).
 
 - `scripts/core.sh family-check` fails the caller if it commits a copy of
-  any of these, if its `scripts/core.sh` differs from this repository's, or
-  if anything it runs calls a local copy. Every repository runs it in CI.
+  any of these, if its `scripts/core.sh` differs from this repository's or
+  is not executable (in the mode git records, where git tracks it), or if
+  anything it runs calls a local copy. Every repository runs it in CI.
 
 This repository runs its own through `scripts/core.sh` too, so the path every
 consumer takes is the one tested here (`tests/family_scripts.rs`, and
