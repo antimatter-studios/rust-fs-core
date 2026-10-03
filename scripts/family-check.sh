@@ -9,14 +9,15 @@
 # so every repository runs this in CI, and it checks three things:
 #
 #   1. NO COPY. scripts/output-budget.sh, scripts/test-floor.sh,
-#      scripts/semver-check.sh, scripts/guest-rust-toolchain.sh and
-#      scripts/ci-gate.sh are not committed in the caller.
+#      scripts/semver-check.sh, scripts/guest-rust-toolchain.sh,
+#      scripts/ci-gate.sh and scripts/package-cli.sh are not committed in the
+#      caller.
 #   2. ONE BOOTSTRAP. The caller's scripts/core.sh is byte-identical to this
 #      repository's, so the way core is found is the same everywhere.
 #   3. NOTHING CALLS A COPY. No workflow, chores.yml or script in the caller
-#      runs scripts/test-floor.sh, scripts/semver-check.sh or
-#      scripts/guest-rust-toolchain.sh or scripts/ci-gate.sh directly; the
-#      calls go through scripts/core.sh.
+#      runs scripts/test-floor.sh, scripts/semver-check.sh,
+#      scripts/guest-rust-toolchain.sh, scripts/ci-gate.sh or
+#      scripts/package-cli.sh directly; the calls go through scripts/core.sh.
 #
 # Run here, in rust-fs-core itself, there is nothing to compare against but
 # itself, and the checks are skipped by being trivially true -- this
@@ -39,7 +40,7 @@ fail() { printf 'FAIL  family-check: %s\n' "$1"; fails=$((fails + 1)); }
 
 if [ "$CALLER" != "$CORE" ]; then
     # 1. No copy.
-    for script in output-budget.sh test-floor.sh semver-check.sh guest-rust-toolchain.sh ci-gate.sh; do
+    for script in output-budget.sh test-floor.sh semver-check.sh guest-rust-toolchain.sh ci-gate.sh package-cli.sh; do
         if [ -e "$CALLER/scripts/$script" ]; then
             fail "scripts/$script is a copy of rust-fs-core's; delete it and run it as scripts/core.sh ${script%.sh}"
         fi
@@ -60,7 +61,7 @@ if [ "$CALLER" != "$CORE" ]; then
         [ -f "$path" ] && targets+=("$path")
     done
     if [ "${#targets[@]}" -gt 0 ]; then
-        hits="$(grep -nE 'scripts/(test-floor|semver-check|guest-rust-toolchain|ci-gate)\.sh' "${targets[@]}" 2>/dev/null \
+        hits="$(grep -nE 'scripts/(test-floor|semver-check|guest-rust-toolchain|ci-gate|package-cli)\.sh' "${targets[@]}" 2>/dev/null \
             | grep -vE '^\s*#|:[0-9]+:\s*#' || true)"
         if [ -n "$hits" ]; then
             fail "these run a local copy instead of scripts/core.sh:"$'\n'"${hits//$CALLER\//}"

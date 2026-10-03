@@ -7,6 +7,35 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.19] — 2026-10-02
+
+### Added
+
+- **`scripts/core.sh package-cli VERSION LABEL [TARGET-DIR]`: the one copy of
+  the release tarball's packaging** (#193). Ten repositories each carried a
+  `scripts/package-cli.sh` and a test of it, ten different files holding
+  three policies for which names go in the tarball; one never moved to the
+  multi-call layout and shipped a single tool for a whole release. The family
+  script is the union of what the copies did -- the install-prefix layout,
+  every dotted name a relative symlink to `bin/<repo>`, a page per name in its
+  manual section and one per subcommand beside it, the zsh, bash and fish
+  completions, `share/<repo>/CAVEATS` of at most four lines, the licences, and
+  every name answering `--help` and `--version` as `<name> (<crate>)
+  <version>` -- checked from the unpacked tarball, with no tarball left behind
+  on any failure, not even a previous run's. What differs between
+  repositories is read from the caller's `Cargo.toml` under
+  `[package.metadata.package-cli]`: `names` (each dotted name and its man
+  section), `licenses`, and optionally `caveats`. The names written there and
+  the ones the binary lists must agree as sets, in any order, and every list
+  is compared in the C locale -- a bare `sort` failed correct tarballs in
+  eight repositories' tests this week. A page in a section no name has, a
+  completion for a name not shipped, or any other file outside the layout is
+  refused. It answers `--version` with `rust-fs-core-package-cli 1`.
+- `family-check` refuses a committed `scripts/package-cli.sh`, and a
+  workflow, `chores.yml` or script that runs one directly.
+- `tests/package_cli.rs` runs it from caller trees against a stand-in binary
+  that behaves, and one for each way a build can be wrong.
+
 ## [0.2.18] — 2026-10-02
 
 ### Added

@@ -132,6 +132,7 @@ fn each_family_script_states_its_contract() {
         "rust-fs-core-guest-rust-toolchain 1"
     );
     assert_eq!(version_of("ci-gate.sh"), "rust-fs-core-ci-gate 1");
+    assert_eq!(version_of("package-cli.sh"), "rust-fs-core-package-cli 1");
 }
 
 /// `ci-gate` is served the way the others are: by name, through the
@@ -322,6 +323,7 @@ fn the_package_ships_every_family_script() {
         "family-check.sh",
         "guest-rust-toolchain.sh",
         "ci-gate.sh",
+        "package-cli.sh",
     ] {
         assert!(
             Path::new(&repo().join("scripts").join(script)).is_file(),
