@@ -18,6 +18,12 @@ reaches all of them.
   same way. Several repositories in the family use the `v` form, and
   diskjockey's pre-push hook requires it for a tag.
 
+### Added
+
+- **`release-notes --unattested`** ends the notes with a provenance line that
+  does not claim an attestation, for a repository whose release workflow
+  attaches files it does not attest.
+
 ## [0.3.3] — 2026-10-06
 
 ### Added

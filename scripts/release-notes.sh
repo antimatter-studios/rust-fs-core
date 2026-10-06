@@ -24,7 +24,11 @@ if [ "${1:-}" = "--version" ]; then
     printf 'rust-fs-core-release-notes %s\n' "$RELEASE_NOTES_API_VERSION"
     exit 0
 fi
-[ $# -eq 1 ] || { echo "usage: release-notes.sh VERSION" >&2; exit 2; }
+# --unattested: the release attaches files its workflow built but does not
+# attest, so the provenance line says that rather than claim an attestation.
+unattested=0
+if [ "${1:-}" = "--unattested" ]; then unattested=1; shift; fi
+[ $# -eq 1 ] || { echo "usage: release-notes.sh [--unattested] VERSION" >&2; exit 2; }
 version="${1#v}"
 
 ROOT="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
@@ -72,4 +76,8 @@ printf '\n---\n\n'
 if [ -n "$repo" ] && [ -n "$previous" ]; then
     printf '**Changes since %s:** https://github.com/%s/compare/v%s...v%s\n\n' "$previous" "$repo" "$previous" "$version"
 fi
-printf 'The files attached here are the ones this tag published, each with a build-provenance attestation from this repository'"'"'s release workflow.\n'
+if [ "$unattested" = 1 ]; then
+    printf 'The files attached here are the ones this tag'"'"'s release workflow built.\n'
+else
+    printf 'The files attached here are the ones this tag published, each with a build-provenance attestation from this repository'"'"'s release workflow.\n'
+fi
