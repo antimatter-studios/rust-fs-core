@@ -23,7 +23,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-am-fs-core = { path = ".." }
+rust-fs-core = { path = ".." }
 
 [[bin]]
 name = "slice"

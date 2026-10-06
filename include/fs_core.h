@@ -1,6 +1,6 @@
 /*
  * fs-core C ABI — block-device handle and error conventions shared
- * across am-fs-core, am-img-qcow2, am-partitions, am-fs-ext4, and
+ * across rust-fs-core, am-img-qcow2, am-partitions, am-fs-ext4, and
  * future am-fs-* / am-img-* sibling crates.
  *
  * Link with libfs_core.a (or its sister-crate equivalent that

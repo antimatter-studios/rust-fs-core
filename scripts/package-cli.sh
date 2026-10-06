@@ -44,7 +44,7 @@
 #
 # where <name> is each dotted name and <repo> itself, whose page is section
 # 1. The pages and completions are written by the binary (`<repo> generate
-# man|completions SHARE`, am-fs-core's `cli` module), from the clap commands
+# man|completions SHARE`, rust-fs-core's `cli` module), from the clap commands
 # it parses with, so they cannot describe a flag it does not take.
 #
 # THE NAMES ARE WRITTEN DOWN, in Cargo.toml, AND READ FROM THE BINARY

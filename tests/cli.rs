@@ -424,7 +424,7 @@ fn a_tool_with_its_own_usage_status_keeps_it() {
 // ---------------------------------------------------------------------------
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("am-fs-core-cli-{}-{tag}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rust-fs-core-cli-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

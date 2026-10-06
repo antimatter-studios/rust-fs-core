@@ -6,7 +6,7 @@ chore_min_version: 0.6.0
 # How to build rust-fs-core is knowledge that belongs to rust-fs-core. Every
 # sibling that depends on it — rust-fs-{ext4,ntfs,squashfs,erofs,xfs,btrfs},
 # rust-partitions, rust-img-{qcow2,vhd,vhdx,vmdk} — resolves it as
-# `am-fs-core = { path = "../rust-fs-core" }`, and each of them ships
+# `rust-fs-core = { path = "../rust-fs-core" }`, and each of them ships
 # `include/fs_core.h` alongside its own header because the header it emits
 # `#include`s it.
 #

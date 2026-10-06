@@ -38,8 +38,8 @@ resolver has this order:
 1. If `../rust-fs-core/scripts/output-budget.sh` exists, return it directly.
    This deliberately permits a developer to test coordinated, uncommitted
    core and driver changes.
-2. Otherwise ask Cargo for the resolved `am-fs-core` package. Package-based
-   resolution requires `am-fs-core` **0.2.11 or later**, because published
+2. Otherwise ask Cargo for the resolved `rust-fs-core` package. Package-based
+   resolution requires `rust-fs-core` **0.2.11 or later**, because published
    crate archives are immutable. The package must contain this script and the
    resolver still verifies its API version and SHA-256.
 3. Otherwise look in a user or repository tooling cache under a key containing
@@ -150,7 +150,7 @@ tier, it has to exist before any cargo command in that tier has run, and
 a build to the one step that must work before a build does.
 
 **A crate already delivers it, and a second route would be the problem
-again.** This script is inside the published `am-fs-core` archive — `ci.yml`
+again.** This script is inside the published `rust-fs-core` archive — `ci.yml`
 has a step that fails the build if `cargo package --list` stops naming it —
 and every converted consumer resolves it through `cargo metadata`, checking
 `--version` before it runs. Adding a second delivery path would give one file

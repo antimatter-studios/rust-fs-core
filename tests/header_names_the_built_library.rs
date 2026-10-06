@@ -187,12 +187,12 @@ fn the_header_tells_consumers_to_link_the_library_that_is_built() {
 /// that merely still handles the plain spelling proves nothing.
 #[test]
 fn the_lib_name_is_parsed_rather_than_scanned() {
-    let plain = "[package]\nname = \"am-fs-core\"\n\n[lib]\nname = \"fs_core\"\n";
-    let single_quoted = "[package]\nname = \"am-fs-core\"\n\n[lib]\nname = 'fs_core'\n";
+    let plain = "[package]\nname = \"rust-fs-core\"\n\n[lib]\nname = \"fs_core\"\n";
+    let single_quoted = "[package]\nname = \"rust-fs-core\"\n\n[lib]\nname = 'fs_core'\n";
     let trailing_comment =
-        "[package]\nname = \"am-fs-core\"\n\n[lib]\nname = \"fs_core\" # the exported ABI name\n";
+        "[package]\nname = \"rust-fs-core\"\n\n[lib]\nname = \"fs_core\" # the exported ABI name\n";
     let commented_section =
-        "[package]\nname = \"am-fs-core\"\n\n[lib] # the staticlib consumers link\nname = \"fs_core\"\n";
+        "[package]\nname = \"rust-fs-core\"\n\n[lib] # the staticlib consumers link\nname = \"fs_core\"\n";
 
     for (what, toml) in [
         ("the plain spelling", plain),
@@ -211,15 +211,15 @@ fn the_lib_name_is_parsed_rather_than_scanned() {
 /// The package name is not the library name.
 #[test]
 fn the_lib_name_comes_from_the_lib_section_and_not_the_package() {
-    let toml = "[package]\nname = \"am-fs-core\"\nversion = \"0.2.10\"\n\n\
+    let toml = "[package]\nname = \"rust-fs-core\"\nversion = \"0.2.10\"\n\n\
                 [lib]\nname = \"fs_core\"\ncrate-type = [\"staticlib\", \"rlib\"]\n";
     assert_eq!(
         lib_name(toml).as_deref(),
         Some("fs_core"),
-        "using the package name would look for libam-fs-core.a"
+        "using the package name would look for librust-fs-core.a"
     );
     // And a manifest with no [lib] section has no library name to give.
-    assert_eq!(lib_name("[package]\nname = \"am-fs-core\"\n"), None);
+    assert_eq!(lib_name("[package]\nname = \"rust-fs-core\"\n"), None);
 }
 
 /// AN INSTRUCTION, NOT A MENTION — AND NOT A NEGATION.

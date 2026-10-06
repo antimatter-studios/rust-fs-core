@@ -1,18 +1,7 @@
 # fs-core
 
-> **Renamed to [`rust-fs-core`](https://crates.io/crates/rust-fs-core).**
-> `am-fs-core` 0.2.24 is the last version published under this name, and it
-> is the same code as 0.2.23. New versions are published only as
-> `rust-fs-core`. To move, change one line in `Cargo.toml`:
->
-> ```toml
-> # before
-> am-fs-core = "0.2"
-> # after
-> rust-fs-core = "0.2"
-> ```
->
-> The import is unchanged: `use fs_core::...` keeps working.
+Published on crates.io as **`rust-fs-core`** (the repository's name) and
+imported as `fs_core`. Up to 0.2.24 it was published as `am-fs-core`.
 
 Pure-Rust block-device framework. The shared substrate every filesystem
 driver and disk-image reader plugs into.
@@ -51,7 +40,7 @@ driver and disk-image reader plugs into.
 
 ```toml
 [features]
-cli = ["dep:clap", "am-fs-core/cli"]
+cli = ["dep:clap", "rust-fs-core/cli"]
 
 [[bin]]
 name = "rust-fs-<fs>"
@@ -199,8 +188,8 @@ repository, not uploaded from someone's machine. To check the crates.io
 download of version `X.Y.Z`:
 
 ```sh
-curl -sSfLo am-fs-core-X.Y.Z.crate https://static.crates.io/crates/am-fs-core/am-fs-core-X.Y.Z.crate
-gh attestation verify am-fs-core-X.Y.Z.crate \
+curl -sSfLo rust-fs-core-X.Y.Z.crate https://static.crates.io/crates/rust-fs-core/rust-fs-core-X.Y.Z.crate
+gh attestation verify rust-fs-core-X.Y.Z.crate \
   --repo antimatter-studios/rust-fs-core \
   --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release.yml
 ```

@@ -1,11 +1,24 @@
 # Changelog
 
-Notable changes to `am-fs-core`, newest first. This is a `0.x` crate, so the
+Notable changes to `rust-fs-core` (published as `am-fs-core` up to 0.2.24), newest first. This is a `0.x` crate, so the
 **minor** is the compatibility boundary: a minor bump may break API, a patch
 never does.
 
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
+
+## [0.3.0] — 2026-10-06
+
+### Changed
+
+- **Published as `rust-fs-core`, the repository's name.** The crate was
+  `am-fs-core` up to 0.2.24, which stays on crates.io pointing here. A
+  dependent changes one line, `am-fs-core = "0.2"` to `rust-fs-core = "0.3"`;
+  the import (`fs_core`) and the C symbols are unchanged. The version moves
+  to 0.3.0 so the new name starts on a version the old one never had.
+- **`scripts/core.sh` finds core under either name** while the family moves,
+  so a consumer still on `am-fs-core` and one already on `rust-fs-core` both
+  resolve it.
 
 ## [0.2.24] — 2026-10-06
 
