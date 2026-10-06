@@ -236,7 +236,7 @@ them, and the copies drifted: one silent-exit bug in the floor was
 fixed seven times, and a rule one repository added reached no other. Now no
 repository carries either. Each carries `scripts/core.sh`, byte-identical to
 this repository's, which finds rust-fs-core (`FS_CORE_ROOT`, the sibling
-checkout, or cargo's am-fs-core), insists on the script's `--version`, and
+checkout, or cargo's rust-fs-core), insists on the script's `--version`, and
 runs it against the calling repository:
 
 - `scripts/core.sh test-floor [--refuse-ignored] TIER FLOOR` reads the
@@ -395,11 +395,11 @@ target itself. Nothing else in the repository needs a second target.
 
 ## Every consumer pins this crate twice, and the second pin is a checkout
 
-Twelve crates depend on `am-fs-core`, and a consumer declares it as **both** a
+Twelve crates depend on `rust-fs-core`, and a consumer declares it as **both** a
 version and a path:
 
 ```toml
-am-fs-core = { path = "../rust-fs-core", version = "0.2.10" }
+rust-fs-core = { path = "../rust-fs-core", version = "0.2.10" }
 ```
 
 The `version` is what a published build resolves and what makes a tagged
@@ -480,7 +480,7 @@ a pin. It arrived and was paid. Read from each repository's default branch on
 2026-09-28 — `Cargo.toml` requirement and `Cargo.lock` agreeing, `ci-ok` green
 on the head commit:
 
-| consumer | `am-fs-core` |
+| consumer | `rust-fs-core` |
 |---|---|
 | `rust-fs-ext4`, `rust-fs-xfs`, `rust-fs-btrfs`, `rust-fs-ntfs` | 0.2.13 |
 | `rust-fs-erofs`, `rust-fs-squashfs`, `rust-partitions` | 0.2.13 |

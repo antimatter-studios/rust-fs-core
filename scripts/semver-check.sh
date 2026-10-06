@@ -30,6 +30,18 @@
 # struct's layout or an exported function's arity as a C caller sees it. Those
 # still need a changelog line written by a person.
 #
+# A CRATE THAT CHANGED ITS NAME has no release under the new one, so the
+# registry has no baseline for it. Cargo.toml then declares the old name,
+#
+#     [package.metadata.semver]
+#     former-name = "am-fs-core"
+#
+# and while the new name is unpublished the baseline is the former name's
+# newest release, its [package] name rewritten to the new one so the two
+# compare as one crate. Without the declaration an unpublished crate fails,
+# as before: a first release has nothing to be compatible with only when it
+# says so.
+#
 # cargo-semver-checks is MIT/Apache-2.0. CARGO_SEMVER_CHECKS_VERSION pins the
 # version CI installs; a different local one is reported, not refused.
 # SEMVER_CHECK_DRY_RUN=1 prints the command instead of running it.
@@ -56,11 +68,37 @@ read_package() {
 crate="$(read_package name)"
 version="$(read_package version)"
 [ -n "$crate" ] || { echo "semver-check: $ROOT/Cargo.toml names no [package]" >&2; exit 1; }
+former="$(awk '
+    /^\[/ { in_tab = ($0 == "[package.metadata.semver]"); next }
+    in_tab && $1 == "former-name" && $2 == "=" { gsub(/"/, "", $3); print $3; exit }
+' Cargo.toml)"
 
 command=(cargo semver-checks check-release --package "$crate")
 if [ "${SEMVER_CHECK_DRY_RUN:-0}" = 1 ]; then
     echo "semver-check: would run in $ROOT: ${command[*]}"
+    [ -z "$former" ] || echo "semver-check: while $crate is unpublished, against $former's newest release"
     exit 0
+fi
+
+UA="rust-fs-core semver-check (github.com/antimatter-studios/rust-fs-core)"
+published() { [ "$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "https://crates.io/api/v1/crates/$1")" = 200 ]; }
+baseline_from=""
+if [ -n "$former" ] && ! published "$crate"; then
+    newest="$(curl -fsS -A "$UA" "https://crates.io/api/v1/crates/$former" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_stable_version"])')"
+    base="$(mktemp -d)"
+    curl -fsSL -A "$UA" "https://static.crates.io/crates/$former/$former-$newest.crate" \
+        | tar xz -C "$base"
+    root="$base/$former-$newest"
+    # Only the [package] name: the [lib] name, which is what the API is
+    # compared by, is the same under both.
+    awk -v old="$former" -v new="$crate" '
+        /^\[/ { in_pkg = ($0 == "[package]") }
+        in_pkg && $1 == "name" && $3 == "\"" old "\"" { print "name = \"" new "\""; next }
+        { print }
+    ' "$root/Cargo.toml" > "$root/Cargo.toml.new" && mv "$root/Cargo.toml.new" "$root/Cargo.toml"
+    command+=(--baseline-root "$root")
+    baseline_from="$former $newest (the former name; $crate has no release yet)"
 fi
 
 PINNED="${CARGO_SEMVER_CHECKS_VERSION:-0.50.0}"
@@ -74,7 +112,7 @@ if [ "$have" != "$PINNED" ]; then
     echo "semver-check: note: cargo-semver-checks $have here, CI pins $PINNED" >&2
 fi
 
-echo "semver-check: $crate $version against the newest crates.io release"
+echo "semver-check: $crate $version against ${baseline_from:-the newest crates.io release}"
 # --release-type is NOT passed: the bump is read from Cargo.toml, so the
 # version a release would publish is the version being checked.
 exec "${command[@]}"

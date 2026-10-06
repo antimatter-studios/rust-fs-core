@@ -250,8 +250,34 @@ fn semver_check_checks_the_callers_package() {
         printed(&out)
     );
     assert!(
-        !said.contains("am-fs-core"),
+        // The package flag, not the bare name: the checkout's own path is
+        // `.../rust-fs-core/...`, so the name alone is in every line.
+        !said.contains("--package rust-fs-core") && !said.contains("--package am-fs-core"),
         "it checked this crate, not the caller's: {}",
+        printed(&out)
+    );
+}
+
+#[test]
+fn semver_check_names_the_former_name_a_renamed_crate_is_compared_with() {
+    let caller = Caller::new("semver-former");
+    fs::write(
+        caller.root.join("Cargo.toml"),
+        "[package]\nname = \"rust-example\"\nversion = \"0.2.0\"\n\n\
+         [package.metadata.semver]\nformer-name = \"am-example\"\n",
+    )
+    .unwrap();
+    let out = caller.core(&["semver-check"], &[("SEMVER_CHECK_DRY_RUN", "1")]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("--package rust-example"),
+        "it did not check the crate under its new name: {}",
+        printed(&out)
+    );
+    assert!(
+        said.contains("against am-example's newest release"),
+        "it did not say the former name is the baseline: {}",
         printed(&out)
     );
 }
@@ -296,7 +322,7 @@ fn the_bootstrap_refuses_what_it_cannot_vouch_for() {
 
 #[test]
 fn this_repository_runs_its_own_scripts_through_the_same_bootstrap() {
-    // No FS_CORE_ROOT, no sibling: cargo names this crate as am-fs-core.
+    // No FS_CORE_ROOT, no sibling: cargo names this crate as rust-fs-core.
     let out = Command::new(bash())
         .current_dir(repo())
         .args(["scripts/core.sh", "test-floor", "--version"])

@@ -283,7 +283,7 @@ use std::pub_mod_lookalike;
 /// the tree the failure message tells you to add it to.
 #[test]
 fn only_the_layout_block_counts_as_the_inventory() {
-    let readme = r#"# am-fs-core
+    let readme = r#"# rust-fs-core
 
 Prose that happens to mention ghost.rs in passing.
 
@@ -321,7 +321,7 @@ src/
 /// and it would do it silently.
 #[test]
 fn a_missing_layout_section_yields_nothing_rather_than_everything() {
-    let readme = "# am-fs-core\n\nNo layout section here, but block.rs is named.\n";
+    let readme = "# rust-fs-core\n\nNo layout section here, but block.rs is named.\n";
     assert!(
         layout_block(readme).is_empty(),
         "a README with no Layout section produced a non-empty block, so the check \
