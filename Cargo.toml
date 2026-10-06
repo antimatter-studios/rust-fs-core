@@ -1,9 +1,9 @@
 [package]
 name = "am-fs-core"
-version = "0.2.23"
+version = "0.2.24"
 edition = "2021"
 license = "MIT"
-description = "Pure-Rust block-device framework — BlockRead/BlockDevice traits + FileDevice + CallbackDevice + LRU cache. Foundation crate for fs-* drivers and img-* containers."
+description = "Renamed to rust-fs-core: this crate receives no further versions. Depend on rust-fs-core instead; the import is unchanged (use fs_core)."
 repository = "https://github.com/antimatter-studios/rust-fs-core"
 
 # The fuzz crate is its own package, on its own toolchain, and is not
