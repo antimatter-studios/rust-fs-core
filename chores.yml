@@ -43,10 +43,15 @@ chore_min_version: 0.6.0
 # and executed the same 374 tests as the post-change debug run:
 #
 #   tier       measured locally       budget           floor
-#   debug      557 / 31,250 bytes      750 / 50,000     330
-#   release    557 / 31,295 bytes      750 / 50,000     330
+#   debug      557 / 31,250 bytes     1000 / 60,000     330
+#   release    751 lines (CI, cold)   1000 / 60,000     330
 #   coverage   575 / 32,607 bytes      800 / 60,000     330
 #   semver     (see below)              40 / 4,000       -
+#
+# THE DEBUG AND RELEASE ROWS MOVED ON 2026-10-06, from 750 / 50,000: the v0.3.5
+# release's test (release) tier printed 751 lines on CI (run 37490111355), the
+# suite having grown with the family scripts' tests since the measurement
+# above. That plus about a third; debug runs the same selection.
 #
 # The semver row is rust-fs-ext4's measurement of the same script: 11 lines /
 # 489 bytes passing with the baseline's rustdoc cached, one line more when it
@@ -171,13 +176,13 @@ tasks:
   test:debug:
     desc: Debug-profile suite, including every target
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets --features cli'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 1000 60000 -- cargo test --locked --all-targets --features cli'
       - 'bash scripts/core.sh test-floor debug 330'
 
   test:release:
     desc: Release-profile suite, including every target
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 750 50000 -- cargo test --locked --release --all-targets --features cli'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli'
       - 'bash scripts/core.sh test-floor release 330'
 
   test:
