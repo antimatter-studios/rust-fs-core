@@ -672,3 +672,143 @@ fn the_agent_core_check_reads_the_callers_guide_not_this_repositorys() {
     let out = caller.core(&["agents-core-check"], &[]);
     assert!(out.status.success(), "{}", printed(&out));
 }
+
+/// `tier` with its flags, running `bash -c SCRIPT` as the tier's command.
+fn tier_running(caller: &Caller, flags: &[&str], script: &str) -> Output {
+    let mut args = vec!["tier"];
+    args.extend_from_slice(flags);
+    args.extend_from_slice(&["unit", "unit", "50", "5000", "--", "bash", "-c", script]);
+    caller.core(&args, &[])
+}
+
+/// `--refuse-ignored`: libtest's own `N ignored` fails a tier that otherwise
+/// passed. `cargo test` prints its ignored count and exits 0, so a tier that
+/// stopped running half of itself is a green line unless this reads it.
+#[test]
+fn the_tier_runner_refuses_an_ignored_test_when_asked() {
+    let caller = Caller::new("tier-ignored");
+    let ok = "echo 'test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'";
+    let two = "echo 'test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out'";
+
+    let out = tier_running(&caller, &["--refuse-ignored"], ok);
+    assert!(out.status.success(), "nothing ignored: {}", printed(&out));
+
+    let out = tier_running(&caller, &["--refuse-ignored"], two);
+    assert_eq!(out.status.code(), Some(66), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("2 test(s) ignored"),
+        "the refusal does not count the ignored tests: {}",
+        printed(&out)
+    );
+
+    // Summed across test binaries: an ignore in the second is caught too.
+    let out = tier_running(&caller, &["--refuse-ignored"], &format!("{ok}; {two}"));
+    assert_eq!(out.status.code(), Some(66), "{}", printed(&out));
+
+    // Only a verdict at the start of a line counts; a quoted summary is not one.
+    let out = tier_running(
+        &caller,
+        &["--refuse-ignored"],
+        "echo '  the oracle said: test result: ok. 1 passed; 0 failed; 9 ignored'",
+    );
+    assert!(
+        out.status.success(),
+        "a quoted summary was read: {}",
+        printed(&out)
+    );
+
+    // Not asked, not refused.
+    let out = tier_running(&caller, &[], two);
+    assert!(out.status.success(), "refused unasked: {}", printed(&out));
+
+    // Both gates at once, in either order.
+    let out = tier_running(
+        &caller,
+        &["--refuse-ignored", "--refuse-skips"],
+        "echo 'SKIP: x'",
+    );
+    assert_eq!(out.status.code(), Some(66), "{}", printed(&out));
+    let out = tier_running(&caller, &["--refuse-skips", "--refuse-ignored"], two);
+    assert_eq!(out.status.code(), Some(66), "{}", printed(&out));
+}
+
+/// A command that failed keeps its own status: its story is better than a
+/// skip or ignored count, so the gates only refuse a pass.
+#[test]
+fn a_failing_tier_keeps_its_own_status_through_both_gates() {
+    let caller = Caller::new("tier-gates-fail");
+    let out = tier_running(
+        &caller,
+        &["--refuse-skips", "--refuse-ignored"],
+        "echo 'SKIP: x'; echo 'test result: FAILED. 1 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out'; exit 3",
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", printed(&out));
+}
+
+/// `tier.sh TIER -- COMMAND`: the budget is a row of the caller's own
+/// `scripts/tier-budgets.txt`, so a repository keeps one measured table as
+/// data while the runner stays here. A tier with no row is refused rather
+/// than run unbudgeted.
+#[test]
+fn the_tier_runner_reads_a_budget_from_the_callers_table() {
+    let caller = Caller::new("tier-table");
+    fs::write(
+        caller.root.join("scripts").join("tier-budgets.txt"),
+        "# tier  lines  bytes   measured 2026-10-06\nunit    2      200\n\nloud    1      100  # a comment after the row\n",
+    )
+    .unwrap();
+
+    let out = caller.core(&["tier", "unit", "--", "echo", "hello"], &[]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        caller.root.join("tmp/logs/unit.log").is_file(),
+        "the log is not named for the tier: {}",
+        printed(&out)
+    );
+
+    let out = caller.core(
+        &[
+            "tier",
+            "loud",
+            "--",
+            "bash",
+            "-c",
+            "echo one; echo two; echo three",
+        ],
+        &[],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "the row's budget was not applied: {}",
+        printed(&out)
+    );
+
+    let out = caller.core(&["tier", "absent", "--", "echo", "hi"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("tier-budgets.txt"),
+        "the refusal does not name the table: {}",
+        printed(&out)
+    );
+
+    // The gates apply to the table form too.
+    let out = caller.core(
+        &["tier", "--refuse-skips", "unit", "--", "echo", "SKIP: x"],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(66), "{}", printed(&out));
+}
+
+/// No table at all is refused, naming the file that would provide one.
+#[test]
+fn the_tier_runner_refuses_the_table_form_without_a_table() {
+    let caller = Caller::new("tier-no-table");
+    let out = caller.core(&["tier", "unit", "--", "echo", "hi"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("scripts/tier-budgets.txt"),
+        "{}",
+        printed(&out)
+    );
+}
