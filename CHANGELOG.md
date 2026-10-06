@@ -16,6 +16,11 @@ reaches all of them.
 - **`tier.sh --refuse-ignored`** fails a passing tier whose libtest summaries
   report ignored tests (exit 66), the gate rust-fs-squashfs kept in its own
   copy. It combines with `--refuse-skips`.
+- **`tier.sh TIER -- COMMAND`** takes the tier's budget from the caller's own
+  `scripts/tier-budgets.txt` (`TIER LINES BYTES`, `#` comments), so a
+  repository that kept one measured table inside its copy of the runner keeps
+  the table as data and runs this file in place. A tier with no row is refused
+  (exit 2).
 
 ### Changed
 

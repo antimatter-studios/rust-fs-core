@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # tier.sh [--refuse-skips] [--refuse-ignored] LABEL LOG-NAME MAX-LINES MAX-BYTES -- COMMAND [ARG...]
+# tier.sh [--refuse-skips] [--refuse-ignored] TIER -- COMMAND [ARG...]
 #
 # The family's tier runner: one quiet, budgeted test tier around
 # output-budget.sh, writing tmp/logs/LOG-NAME.log in the repository it is run
@@ -31,12 +32,31 @@ while :; do
     esac
 done
 
-[ $# -ge 5 ] || { echo "tier.sh: usage: tier.sh [--refuse-skips] [--refuse-ignored] LABEL LOG MAX-LINES MAX-BYTES -- CMD..." >&2; exit 2; }
-LABEL="$1"
-LOG_NAME="$2"
-MAX_LINES="$3"
-MAX_BYTES="$4"
-shift 4
+USAGE="usage: tier.sh [--refuse-skips] [--refuse-ignored] LABEL LOG MAX-LINES MAX-BYTES -- CMD...
+       tier.sh [--refuse-skips] [--refuse-ignored] TIER -- CMD..."
+
+if [ "${2:-}" = "--" ]; then
+    # THE TABLE FORM. The budget is the caller's own measured row in
+    # scripts/tier-budgets.txt -- `TIER LINES BYTES`, `#` starting a comment
+    # -- so a repository keeps one table as data and none of this logic. A
+    # tier with no row is refused rather than run unbudgeted.
+    TABLE="$CALLER/scripts/tier-budgets.txt"
+    [ -f "$TABLE" ] || { echo "tier.sh: '$1' names a tier, and there is no $TABLE to find its budget in." >&2; exit 2; }
+    row="$(sed 's/#.*//' "$TABLE" | awk -v t="$1" '$1 == t { print $2, $3; exit }')"
+    [ -n "$row" ] || { echo "tier.sh: '$1' has no budget. Add a measured row to scripts/tier-budgets.txt." >&2; exit 2; }
+    LABEL="$1"
+    LOG_NAME="$1"
+    MAX_LINES="${row% *}"
+    MAX_BYTES="${row#* }"
+    shift 1
+else
+    [ $# -ge 5 ] || { echo "tier.sh: $USAGE" >&2; exit 2; }
+    LABEL="$1"
+    LOG_NAME="$2"
+    MAX_LINES="$3"
+    MAX_BYTES="$4"
+    shift 4
+fi
 [ "${1:-}" = "--" ] && shift
 [ $# -gt 0 ] || { echo "tier.sh: no command" >&2; exit 2; }
 
