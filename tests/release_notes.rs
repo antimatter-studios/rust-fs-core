@@ -24,6 +24,23 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Git's bash on Windows: a bare `bash` there is WSL's launcher, which has no
+/// distribution on the runner (the same choice tests/family_scripts.rs makes).
+fn bash() -> PathBuf {
+    if cfg!(windows) {
+        for candidate in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+    }
+    PathBuf::from("bash")
+}
+
 fn printed(output: &Output) -> String {
     format!(
         "status {:?}\nstdout:\n{}\nstderr:\n{}",
@@ -65,7 +82,7 @@ impl Caller {
     }
 
     fn core(&self, args: &[&str]) -> Output {
-        Command::new("bash")
+        Command::new(bash())
             .current_dir(&self.root)
             .arg("scripts/core.sh")
             .args(args)
@@ -128,7 +145,7 @@ const CHANGELOG: &str = "# Changelog
 ";
 
 fn script_version(script: &str) -> String {
-    let out = Command::new("bash")
+    let out = Command::new(bash())
         .arg(repo().join("scripts").join(script))
         .arg("--version")
         .output()
