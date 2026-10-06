@@ -332,3 +332,24 @@ fn a_section_headed_without_brackets_is_found_too() {
         );
     }
 }
+
+/// A repository whose release workflow attaches files without attesting them
+/// says so: `--unattested` swaps the provenance line for one that does not
+/// claim an attestation the release does not have.
+#[test]
+fn an_unattested_release_does_not_claim_an_attestation() {
+    let caller = Caller::new("unattested");
+    caller.write("CHANGELOG.md", CHANGELOG);
+    let out = caller.core(&["release-notes", "--unattested", "0.2.0"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let notes = String::from_utf8_lossy(&out.stdout);
+    assert!(notes.contains("### Breaking"), "{notes}");
+    assert!(
+        !notes.contains("attestation"),
+        "an unattested release claims an attestation:\n{notes}"
+    );
+    assert!(
+        notes.contains("this tag's release workflow built"),
+        "the provenance line is missing:\n{notes}"
+    );
+}
