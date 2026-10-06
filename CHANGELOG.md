@@ -26,6 +26,12 @@ reaches all of them.
   `tmp/logs/` and takes `--refuse-skips`, the check three repositories had in
   their own copies, failing a run that printed `SKIP:` lines (exit 66).
 
+### Fixed
+
+- **`agents-core-check` checks the caller's AGENTS.md.** It found the guide
+  beside itself, so run in place from another repository it checked this
+  crate's guide and passed whatever the caller's said.
+
 ## [0.3.1] — 2026-10-06
 
 ### Added
