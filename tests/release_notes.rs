@@ -353,3 +353,28 @@ fn an_unattested_release_does_not_claim_an_attestation() {
         "the provenance line is missing:\n{notes}"
     );
 }
+
+/// The diff link compares with the previous RELEASE: a heading like
+/// `## 0.2.0-dev` or `## Before 0.1.4` between two releases is history, not a
+/// tag, and a link to it is a link to nothing.
+#[test]
+fn the_diff_link_skips_a_heading_that_is_not_a_release() {
+    let caller = Caller::new("prev");
+    caller.write(
+        "CHANGELOG.md",
+        "# Changelog\n\n## Unreleased\n\n## v0.1.5 — 2026-10-02\n\n- A fix.\n\n\
+         ## Before v0.1.4 — merged\n\n- History.\n\n## 0.2.0-dev — pre-merge\n\n- More.\n\n\
+         ## 0.1.0 — initial\n\n- The first.\n",
+    );
+    let out = caller.core(&["release-notes", "0.1.5"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let notes = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !notes.contains("0.2.0-dev"),
+        "the diff link names a heading that is not a release:\n{notes}"
+    );
+    assert!(
+        notes.contains("compare/v0.1.0...v0.1.5"),
+        "no link to the previous release:\n{notes}"
+    );
+}
