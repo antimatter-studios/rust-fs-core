@@ -32,7 +32,7 @@ case "${1:-}" in
     *) echo "usage: changelog-draft.sh [--write]" >&2; exit 2 ;;
 esac
 
-ROOT="${FS_CORE_CALLER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ROOT="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$ROOT"
 
 repo="${GITHUB_REPOSITORY:-}"

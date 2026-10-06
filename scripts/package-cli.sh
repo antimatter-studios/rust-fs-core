@@ -90,7 +90,7 @@ case "$version$label" in
 esac
 
 CORE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CALLER="$(cd "${FS_CORE_CALLER:-$CORE}" && pwd)"
+CALLER="$(cd "${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" && pwd)"
 target_dir="${3:-$CALLER/target/release}"
 
 # ---- What the caller ships, from its Cargo.toml. ---------------------------

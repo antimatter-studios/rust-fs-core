@@ -50,7 +50,7 @@ if [ "${1:-}" = "--version" ]; then
 fi
 [ $# -eq 0 ] || { echo "usage: ci-gate.sh   (configured by CI_GATE_* in the environment)" >&2; exit 2; }
 
-ROOT="${FS_CORE_CALLER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ROOT="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 WORKFLOW="${CI_GATE_WORKFLOW:-.github/workflows/ci.yml}"
 AGGREGATE="${CI_GATE_AGGREGATE:-ci-ok}"
 GUARD="${CI_GATE_GUARD:-.github-guard}"

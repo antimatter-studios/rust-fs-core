@@ -54,7 +54,7 @@ if [ "${1:-}" = "--version" ]; then
 fi
 [ $# -eq 0 ] || { echo "usage: semver-check.sh" >&2; exit 2; }
 
-ROOT="${FS_CORE_CALLER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ROOT="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$ROOT"
 
 # [package]'s own name and version: the first `name =` / `version =` after the

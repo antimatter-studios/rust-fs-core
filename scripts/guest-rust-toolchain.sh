@@ -54,7 +54,7 @@ die() {
     exit 1
 }
 
-CALLER="${FS_CORE_CALLER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CALLER="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 [ -n "${RUSTUP_HOME:-}" ] || die "RUSTUP_HOME is not set; name a directory on the guest's own disk."
 [ -n "${CARGO_HOME:-}" ] || die "CARGO_HOME is not set; name a directory on the guest's own disk."
