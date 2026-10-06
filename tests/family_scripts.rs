@@ -744,3 +744,71 @@ fn a_failing_tier_keeps_its_own_status_through_both_gates() {
     );
     assert_eq!(out.status.code(), Some(3), "{}", printed(&out));
 }
+
+/// `tier.sh TIER -- COMMAND`: the budget is a row of the caller's own
+/// `scripts/tier-budgets.txt`, so a repository keeps one measured table as
+/// data while the runner stays here. A tier with no row is refused rather
+/// than run unbudgeted.
+#[test]
+fn the_tier_runner_reads_a_budget_from_the_callers_table() {
+    let caller = Caller::new("tier-table");
+    fs::write(
+        caller.root.join("scripts").join("tier-budgets.txt"),
+        "# tier  lines  bytes   measured 2026-10-06\nunit    2      200\n\nloud    1      100  # a comment after the row\n",
+    )
+    .unwrap();
+
+    let out = caller.core(&["tier", "unit", "--", "echo", "hello"], &[]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        caller.root.join("tmp/logs/unit.log").is_file(),
+        "the log is not named for the tier: {}",
+        printed(&out)
+    );
+
+    let out = caller.core(
+        &[
+            "tier",
+            "loud",
+            "--",
+            "bash",
+            "-c",
+            "echo one; echo two; echo three",
+        ],
+        &[],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "the row's budget was not applied: {}",
+        printed(&out)
+    );
+
+    let out = caller.core(&["tier", "absent", "--", "echo", "hi"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("tier-budgets.txt"),
+        "the refusal does not name the table: {}",
+        printed(&out)
+    );
+
+    // The gates apply to the table form too.
+    let out = caller.core(
+        &["tier", "--refuse-skips", "unit", "--", "echo", "SKIP: x"],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(66), "{}", printed(&out));
+}
+
+/// No table at all is refused, naming the file that would provide one.
+#[test]
+fn the_tier_runner_refuses_the_table_form_without_a_table() {
+    let caller = Caller::new("tier-no-table");
+    let out = caller.core(&["tier", "unit", "--", "echo", "hi"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("scripts/tier-budgets.txt"),
+        "{}",
+        printed(&out)
+    );
+}
