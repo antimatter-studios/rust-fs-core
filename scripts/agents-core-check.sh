@@ -19,7 +19,7 @@ EXPECTED_SHA256="38af4d2c5377d38ab382baa4eab4aa679841e2b4eba4f4d01dacd255ffa7d32
 BEGIN='<!-- BEGIN SHARED BLOCK: agent-core v2'
 END='<!-- END SHARED BLOCK: agent-core v2 -->'
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 FILE="$ROOT/AGENTS.md"
 
 die() { echo "agents-core-check: $*" >&2; exit 1; }

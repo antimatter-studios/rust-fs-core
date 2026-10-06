@@ -647,3 +647,28 @@ fn per_target_floors_catch_a_suite_that_emptied_inside_a_healthy_total() {
         printed(&emptied)
     );
 }
+
+/// The agent-core check reads the AGENTS.md of the repository it is run
+/// from. Run in place, a check that read this crate's own AGENTS.md would
+/// pass every caller, whatever its guide said.
+#[test]
+fn the_agent_core_check_reads_the_callers_guide_not_this_repositorys() {
+    let caller = Caller::new("agents-core");
+    fs::write(
+        caller.root.join("AGENTS.md"),
+        "# A guide with no shared block\n",
+    )
+    .unwrap();
+    let out = caller.core(&["agents-core-check"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("BEGIN marker"),
+        "the refusal does not name the missing marker: {}",
+        printed(&out)
+    );
+
+    // The caller's guide with the block intact passes.
+    fs::copy(repo().join("AGENTS.md"), caller.root.join("AGENTS.md")).unwrap();
+    let out = caller.core(&["agents-core-check"], &[]);
+    assert!(out.status.success(), "{}", printed(&out));
+}
