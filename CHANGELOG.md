@@ -9,6 +9,15 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`release-cli.yml` packages the tools again.** It ran
+  `scripts/core.sh package-cli` in the caller's checkout, and no caller has
+  carried that shim since the family scripts started running in place
+  (#212), so both packaging legs failed with `No such file or directory` and
+  a release published its crate without tarballs. It now runs
+  `../rust-fs-core/scripts/package-cli.sh`, from the sibling it clones.
+
 ## [0.3.6] — 2026-10-06
 
 ### Changed
