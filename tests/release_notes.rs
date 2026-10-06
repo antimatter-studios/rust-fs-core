@@ -291,3 +291,44 @@ fn the_draft_can_be_written_under_unreleased() {
         "the draft is not under [Unreleased]:\n{text}"
     );
 }
+
+/// A CHANGELOG that heads its sections `## vX.Y.Z` or `## X.Y.Z`, rather than
+/// Keep a Changelog's `## [X.Y.Z]`, is read the same way: several
+/// repositories in the family use the `v` form, and one has a hook that
+/// requires it.
+#[test]
+fn a_section_headed_without_brackets_is_found_too() {
+    for (style, heading) in [("v", "v{}"), ("bare", "{}")] {
+        let caller = Caller::new(style);
+        let changelog = CHANGELOG
+            .replace("## [Unreleased]", "## Unreleased")
+            .replace(
+                "## [0.2.0]",
+                &format!("## {}", heading.replace("{}", "0.2.0")),
+            )
+            .replace(
+                "## [0.1.0]",
+                &format!("## {}", heading.replace("{}", "0.1.0")),
+            );
+        caller.write("CHANGELOG.md", &changelog);
+        let out = caller.core(&["release-notes", "0.2.0"]);
+        assert!(out.status.success(), "{style}: {}", printed(&out));
+        let notes = String::from_utf8_lossy(&out.stdout);
+        assert!(notes.contains("### Breaking"), "{style}: {notes}");
+        assert!(
+            !notes.contains("The first release."),
+            "{style}: another version's section leaked in:\n{notes}"
+        );
+        assert!(
+            notes.contains("compare/v0.1.0...v0.2.0"),
+            "{style}: no link to the diff from the previous version:\n{notes}"
+        );
+        let missing = caller.core(&["release-notes", "0.3.0"]);
+        assert_eq!(
+            missing.status.code(),
+            Some(1),
+            "{style}: {}",
+            printed(&missing)
+        );
+    }
+}
