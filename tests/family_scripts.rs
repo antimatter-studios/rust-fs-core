@@ -259,6 +259,30 @@ fn semver_check_checks_the_callers_package() {
 }
 
 #[test]
+fn semver_check_names_the_former_name_a_renamed_crate_is_compared_with() {
+    let caller = Caller::new("semver-former");
+    fs::write(
+        caller.root.join("Cargo.toml"),
+        "[package]\nname = \"rust-example\"\nversion = \"0.2.0\"\n\n\
+         [package.metadata.semver]\nformer-name = \"am-example\"\n",
+    )
+    .unwrap();
+    let out = caller.core(&["semver-check"], &[("SEMVER_CHECK_DRY_RUN", "1")]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("--package rust-example"),
+        "it did not check the crate under its new name: {}",
+        printed(&out)
+    );
+    assert!(
+        said.contains("against am-example's newest release"),
+        "it did not say the former name is the baseline: {}",
+        printed(&out)
+    );
+}
+
+#[test]
 fn the_bootstrap_refuses_what_it_cannot_vouch_for() {
     let caller = Caller::new("refuse");
     let unknown = caller.core(&["no-such-script"], &[]);
