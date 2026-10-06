@@ -35,6 +35,11 @@ const WORKFLOW: &str = ".github/workflows/release-cli.yml";
 /// The action that signs the attestation, up to its `@`.
 const ATTEST: &str = "actions/attest-build-provenance@";
 
+/// How the packaging step runs core's script: in place, from the sibling
+/// checkout the workflow clones beside the caller. No caller keeps a copy,
+/// and none keeps the scripts/core.sh shim either (#212).
+const PACKAGE: &str = "bash ../rust-fs-core/scripts/package-cli.sh";
+
 /// The grants the attaching job needs, each at `write`: an OIDC token to
 /// sign with, the attestation store, and the release to attach to.
 const GRANTS: &[&str] = &["id-token", "attestations", "contents"];
@@ -212,17 +217,22 @@ fn gaps(yaml: &str) -> Vec<String> {
             }
             if commands(step)
                 .iter()
-                .any(|c| c.contains("scripts/package-cli.sh"))
+                .any(|c| c.contains("scripts/package-cli.sh") && !c.contains(PACKAGE))
             {
                 gaps.push(format!(
-                    "job {name} runs a local scripts/package-cli.sh, not core.sh package-cli"
+                    "job {name} runs a local scripts/package-cli.sh, not {PACKAGE}"
+                ));
+            }
+            // The caller keeps no scripts/core.sh: the family runs core's
+            // scripts in place (#212), so a step that reaches for the shim
+            // fails on every caller with "No such file or directory".
+            if commands(step).iter().any(|c| c.contains("scripts/core.sh")) {
+                gaps.push(format!(
+                    "job {name} runs scripts/core.sh, which no caller carries; run {PACKAGE}"
                 ));
             }
         }
-        if steps
-            .iter()
-            .any(|s| runs(s, "bash scripts/core.sh package-cli"))
-        {
+        if steps.iter().any(|s| runs(s, PACKAGE)) {
             packaging.push(name.clone());
         }
         if steps.iter().any(|s| uses(s).starts_with(ATTEST)) {
@@ -232,7 +242,7 @@ fn gaps(yaml: &str) -> Vec<String> {
 
     if packaging.len() != 1 {
         gaps.push(format!(
-            "{} jobs run `bash scripts/core.sh package-cli`, not one: {packaging:?}",
+            "{} jobs run `{PACKAGE}`, not one: {packaging:?}",
             packaging.len()
         ));
     }
@@ -277,7 +287,7 @@ fn gaps(yaml: &str) -> Vec<String> {
     let pack_steps = steps(pack_job);
     let packs_at = pack_steps
         .iter()
-        .position(|s| runs(s, "bash scripts/core.sh package-cli"))
+        .position(|s| runs(s, PACKAGE))
         .expect("found above");
     if !pack_steps[..packs_at]
         .iter()
@@ -357,7 +367,7 @@ fn the_release_cli_workflow_packages_attests_and_attaches_from_one_place() {
     assert!(
         gaps.is_empty(),
         "{WORKFLOW} must be callable only, package every platform through \
-         core.sh, and attest and attach from the one privileged job: {gaps:#?}"
+         core's package-cli.sh in place, and attest and attach from the one privileged job: {gaps:#?}"
     );
 }
 
@@ -375,7 +385,7 @@ fn the_reader_discriminates() {
          \x20   steps:\n      - uses: actions/checkout@{sha} # v5\n\
          \x20     - env:\n          T: ${{{{ inputs.toolchain }}}}\n        run: echo \"$T\"\n\
          \x20     - run: cargo build --release --locked --features cli --bin x\n\
-         \x20     - run: bash scripts/core.sh package-cli 1 l\n\
+         \x20     - run: bash ../rust-fs-core/scripts/package-cli.sh 1 l\n\
          \x20     - uses: actions/upload-artifact@{sha} # v4\n\
          \x20 attach:\n    needs: package\n    permissions:\n      id-token: write\n      attestations: write\n      contents: write\n\
          \x20   steps:\n      - uses: actions/download-artifact@{sha} # v4\n\
@@ -421,10 +431,18 @@ fn the_reader_discriminates() {
     // A local copy of the script.
     expect(
         good.replace(
-            "bash scripts/core.sh package-cli 1 l",
+            "bash ../rust-fs-core/scripts/package-cli.sh 1 l",
             "scripts/package-cli.sh 1 l",
         ),
-        "jobs run `bash scripts/core.sh package-cli`, not one",
+        "jobs run `bash ../rust-fs-core/scripts/package-cli.sh`, not one",
+    );
+    // The shim no caller carries.
+    expect(
+        good.replace(
+            "bash ../rust-fs-core/scripts/package-cli.sh 1 l",
+            "bash scripts/core.sh package-cli 1 l",
+        ),
+        "runs scripts/core.sh, which no caller carries",
     );
     expect(
         good.replace(
