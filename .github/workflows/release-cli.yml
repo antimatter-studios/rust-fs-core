@@ -102,6 +102,27 @@ jobs:
           CORE_REF: ${{ inputs.core-ref }}
         run: git clone --depth 1 --branch "$CORE_REF" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
+      # THE NOTES BEFORE ANYTHING IS BUILT (#209). A release's body is its
+      # CHANGELOG section; a tag the CHANGELOG does not describe stops here,
+      # before a tarball exists, rather than publishing "See CHANGELOG.md".
+      # One leg writes the file the attach job uses: that job checks nothing
+      # out, so the notes travel as an artifact.
+      - name: the CHANGELOG describes this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p notes
+          FS_CORE_CALLER="$PWD" bash ../rust-fs-core/scripts/release-notes.sh "$GITHUB_REF_NAME" > notes/release-notes.md
+
+      - name: keep the notes for the attach job
+        if: matrix.label == 'linux-x86_64'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-notes
+          path: notes/release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
         with:
           toolchain: ${{ inputs.toolchain }}
@@ -162,6 +183,12 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: the release notes the package job read from the CHANGELOG
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes
+          path: notes
+
       - name: one tarball per platform, no more and no fewer
         shell: bash
         run: |
@@ -184,7 +211,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes/release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes/release-notes.md
           fi
           gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz --clobber

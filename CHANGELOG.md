@@ -7,6 +7,24 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [Unreleased]
+
+### Added
+
+- **`scripts/core.sh release-notes VERSION`: a release's notes are its
+  CHANGELOG section** (#209). It prints the `## [VERSION]` section, a link
+  to the diff from the previous version and the provenance line, and refuses
+  a version the CHANGELOG does not describe. `release.yml` runs it before
+  `cargo publish`, so such a tag stops before anything is uploaded, and uses
+  it as the GitHub release's body; the shared `release-cli.yml` does the same
+  before building a tarball. Releases used to say only "See CHANGELOG.md".
+- **`scripts/core.sh changelog-draft [--write]`: a draft entry from the
+  commits since the newest tag.** Squash subjects become Added (`feat:`),
+  Fixed (`fix:`) and Changed bullets, each linking its pull request, release
+  commits skipped; `--write` puts them under `## [Unreleased]`. A starting
+  point: the explanation of a breaking or visible change is still written by
+  hand.
+
 ## [0.3.0] — 2026-10-06
 
 ### Changed

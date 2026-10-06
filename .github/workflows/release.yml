@@ -108,6 +108,15 @@ jobs:
       # whose attestation did not can still finish the job. The same
       # packaging `cargo publish` does, and cargo's archive is
       # reproducible: the file `cargo publish` uploads is this one.
+      # THE NOTES BEFORE THE UPLOAD (#209): the release body is this
+      # version's CHANGELOG section, and a tag the CHANGELOG does not
+      # describe stops here, before crates.io has anything.
+      - name: the CHANGELOG describes this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+
       - name: package the crate
         shell: bash
         run: cargo package --no-verify
@@ -180,8 +189,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
             gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
-              --notes "See CHANGELOG.md. The .crate attached here is the file published to crates.io for this version, with a build-provenance attestation from this repository's release workflow."
+              --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
           gh release upload "$GITHUB_REF_NAME" target/package/*.crate --clobber
