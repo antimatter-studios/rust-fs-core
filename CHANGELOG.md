@@ -9,6 +9,19 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-10-06
+
+### Added
+
+- **`tier.sh --refuse-ignored`** fails a passing tier whose libtest summaries
+  report ignored tests (exit 66), the gate rust-fs-squashfs kept in its own
+  copy. It combines with `--refuse-skips`.
+
+### Changed
+
+- **A failing tier keeps its own status.** `--refuse-skips` overwrote it with
+  66; both gates now refuse only a run that otherwise passed.
+
 ## [0.3.2] — 2026-10-06
 
 ### Changed
@@ -753,7 +766,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.2.24...v0.3.0
