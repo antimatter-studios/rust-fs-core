@@ -9,6 +9,8 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.3.7] — 2026-10-07
+
 ### Fixed
 
 - **`release-cli.yml` packages the tools again.** It ran
@@ -815,7 +817,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.3...v0.3.4
