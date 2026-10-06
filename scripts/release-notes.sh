@@ -27,7 +27,7 @@ fi
 [ $# -eq 1 ] || { echo "usage: release-notes.sh VERSION" >&2; exit 2; }
 version="${1#v}"
 
-ROOT="${FS_CORE_CALLER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ROOT="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 changelog="$ROOT/CHANGELOG.md"
 [ -f "$changelog" ] || { echo "release-notes: $changelog does not exist" >&2; exit 1; }
 

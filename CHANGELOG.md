@@ -9,6 +9,21 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Changed
+
+- **The family's scripts run in place; no repository keeps a copy** (#212).
+  Every script works on the repository it is run from (`FS_CORE_CALLER`,
+  else the git top-level of the current directory), so a repository runs
+  `bash ../rust-fs-core/scripts/NAME.sh` from the checkout beside it, at the
+  version it pins, and a bump upgrades the scripts with nothing to recopy.
+  `family-check` now refuses a committed `scripts/core.sh` or
+  `scripts/tier.sh`, the two wrappers that existed only to find this crate,
+  and any call through them. `scripts/core.sh` stays here for repositories
+  still on an older version.
+- **One tier runner for the family.** `scripts/tier.sh` logs in the caller's
+  `tmp/logs/` and takes `--refuse-skips`, the check three repositories had in
+  their own copies, failing a run that printed `SKIP:` lines (exit 66).
+
 ## [0.3.1] — 2026-10-06
 
 ### Added

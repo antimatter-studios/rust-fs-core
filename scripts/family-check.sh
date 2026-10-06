@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
 # family-check.sh -- the calling repository runs the family's scripts from
 # rust-fs-core and keeps no copy of its own. Run it as
-# `scripts/core.sh family-check`; this file is the only copy.
+# `bash ../rust-fs-core/scripts/family-check.sh`; this file is the only copy.
 #
 # The family scripts were once copied into every repository and the copies
 # drifted, a fix reaching one repository and none of the others. A rule that
 # a copy must not come back is only a rule if something fails when one does,
-# so every repository runs this in CI, and it checks three things:
+# so every repository runs this in CI, and it checks two things:
 #
-#   1. NO COPY. scripts/output-budget.sh, scripts/test-floor.sh,
-#      scripts/semver-check.sh, scripts/guest-rust-toolchain.sh,
-#      scripts/ci-gate.sh, scripts/package-cli.sh, scripts/stage-siblings.sh
-#      and scripts/guest-rust-run.sh are not committed in the caller.
-#   2. ONE BOOTSTRAP. The caller's scripts/core.sh is byte-identical to this
-#      repository's, so the way core is found is the same everywhere, and
-#      executable -- in the mode git records, where git tracks it.
-#   3. NOTHING CALLS A COPY. No workflow, chores.yml or script in the caller
-#      runs scripts/test-floor.sh, scripts/semver-check.sh,
-#      scripts/guest-rust-toolchain.sh, scripts/ci-gate.sh,
-#      scripts/package-cli.sh, scripts/stage-siblings.sh or
-#      scripts/guest-rust-run.sh directly; the calls go through scripts/core.sh.
+#   1. NO COPY. No family script is committed in the caller: not the scripts
+#      themselves, and not scripts/core.sh or scripts/tier.sh, which existed
+#      only to find this crate and drifted like any other copy (#212).
+#   2. NOTHING CALLS A COPY. No workflow, chores.yml or script in the caller
+#      runs a bare scripts/NAME.sh of the family's; the calls run rust-fs-core's
+#      scripts in place, from its checkout beside the caller
+#      (../rust-fs-core/scripts/NAME.sh) at the version the caller pins.
 #
 # Run here, in rust-fs-core itself, there is nothing to compare against but
 # itself, and the checks are skipped by being trivially true -- this
@@ -34,53 +29,44 @@ fi
 [ $# -eq 0 ] || { echo "usage: family-check.sh" >&2; exit 2; }
 
 CORE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CALLER="${FS_CORE_CALLER:-$CORE}"
+CALLER="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 CALLER="$(cd "$CALLER" && pwd)"
 
 fails=0
 fail() { printf 'FAIL  family-check: %s\n' "$1"; fails=$((fails + 1)); }
 
 if [ "$CALLER" != "$CORE" ]; then
-    # 1. No copy.
-    for script in output-budget.sh test-floor.sh semver-check.sh guest-rust-toolchain.sh \
-                  ci-gate.sh package-cli.sh stage-siblings.sh guest-rust-run.sh; do
-        if [ -e "$CALLER/scripts/$script" ]; then
-            fail "scripts/$script is a copy of rust-fs-core's; delete it and run it as scripts/core.sh ${script%.sh}"
+    NAMES="output-budget test-floor semver-check guest-rust-toolchain ci-gate package-cli stage-siblings guest-rust-run tier core release-notes changelog-draft family-check agents-core-check"
+
+    # 1. No copy, the bootstrap and the tier runner included: each existed
+    #    only to find this crate, and a copy nothing updates drifts (#212).
+    for name in $NAMES; do
+        if [ -e "$CALLER/scripts/$name.sh" ] && [ -f "$CORE/scripts/$name.sh" ]; then
+            fail "scripts/$name.sh is a copy of rust-fs-core's; delete it and run ../rust-fs-core/scripts/$name.sh in place"
         fi
     done
 
-    # 2. One bootstrap.
-    if [ ! -f "$CALLER/scripts/core.sh" ]; then
-        fail "scripts/core.sh is missing; copy rust-fs-core's scripts/core.sh unchanged"
-    else
-        if ! cmp -s "$CALLER/scripts/core.sh" "$CORE/scripts/core.sh"; then
-            fail "scripts/core.sh differs from rust-fs-core's; copy it again, unchanged"
-        fi
-        # cmp compares bytes, not the mode, and a copy that lost its
-        # executable bit fails far from here, wherever it is run directly
-        # (#200). Where git tracks the file its recorded mode decides, since
-        # the mode on disk depends on core.fileMode; otherwise the disk does.
-        mode="$(git -C "$CALLER" ls-files -s -- scripts/core.sh 2>/dev/null | cut -d' ' -f1)"
-        if [ -n "$mode" ]; then
-            [ "$mode" = 100755 ] \
-                || fail "scripts/core.sh is not executable (git records mode $mode); run git update-index --chmod=+x scripts/core.sh"
-        elif [ ! -x "$CALLER/scripts/core.sh" ]; then
-            fail "scripts/core.sh is not executable; chmod +x scripts/core.sh"
-        fi
-    fi
-
-    # 3. Nothing calls a copy. Only files a run reads: workflows, chores.yml,
-    #    and the repository's own scripts.
+    # 2. Nothing calls a copy. Only files a run reads: workflows, chores.yml,
+    #    and the repository's own scripts. A call in place names the script
+    #    under rust-fs-core's checkout (../rust-fs-core/scripts/NAME.sh, or a
+    #    staged sibling's path); a call to a bare scripts/NAME.sh is a copy's.
     targets=()
     for path in "$CALLER"/.github/workflows/*.yml "$CALLER"/.github/workflows/*.yaml \
                 "$CALLER"/chores.yml "$CALLER"/scripts/*.sh; do
         [ -f "$path" ] && targets+=("$path")
     done
     if [ "${#targets[@]}" -gt 0 ]; then
-        hits="$(grep -nE 'scripts/(test-floor|semver-check|guest-rust-toolchain|ci-gate|package-cli|stage-siblings|guest-rust-run)\.sh' "${targets[@]}" 2>/dev/null \
-            | grep -vE '^\s*#|:[0-9]+:\s*#' || true)"
+        alternation="$(printf '%s' "$NAMES" | tr ' ' '|')"
+        # Every reference to a family script, minus the ones that run core's
+        # in place: through a rust-fs-core checkout, or $FS_CORE_ROOT.
+        hits="$(grep -nHE "scripts/($alternation)\.sh" "${targets[@]}" 2>/dev/null \
+            | grep -vE ':[0-9]+:[[:space:]]*#' \
+            | while IFS= read -r line; do
+                rest="$(printf '%s' "$line" | sed -E "s#(rust-fs-core|FS_CORE_ROOT\}?)/scripts/($alternation)\.sh##g")"
+                printf '%s' "$rest" | grep -qE "scripts/($alternation)\.sh" && printf '%s\n' "$line"
+              done || true)"
         if [ -n "$hits" ]; then
-            fail "these run a local copy instead of scripts/core.sh:"$'\n'"${hits//$CALLER\//}"
+            fail "these run a local copy instead of ../rust-fs-core/scripts in place:"$'\n'"${hits//$CALLER\//}"
         fi
     fi
 fi
@@ -89,4 +75,4 @@ if [ "$fails" -gt 0 ]; then
     echo "family-check: $fails check(s) failed" >&2
     exit 1
 fi
-echo "PASS  family-check: no copy of a family script, and scripts/core.sh is rust-fs-core's"
+echo "PASS  family-check: no copy of a family script, and every call runs rust-fs-core's in place"

@@ -84,7 +84,7 @@ shift
     die "FLTH_GUEST is not 1: this runs INSIDE the harness VM ('chore test:vm'), and touches nothing here."
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CALLER="${FS_CORE_CALLER:-$(cd "$HERE/.." && pwd)}"
+CALLER="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 PARENT="$(dirname "$CALLER")"
 
 # 2. The siblings, every one checked before any is linked.

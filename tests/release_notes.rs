@@ -66,12 +66,15 @@ impl Caller {
         ));
         let _ = fs::remove_dir_all(&root);
         let caller = Caller { root };
-        fs::create_dir_all(caller.root.join("scripts")).unwrap();
-        fs::copy(
-            repo().join("scripts").join("core.sh"),
-            caller.root.join("scripts").join("core.sh"),
-        )
-        .unwrap();
+        fs::create_dir_all(&caller.root).unwrap();
+        // A repository of its own: a script run in place works on the
+        // repository it is run from, and this tree is inside this crate's.
+        let out = Command::new("git")
+            .current_dir(&caller.root)
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init: {}", printed(&out));
         caller
     }
 
@@ -81,12 +84,14 @@ impl Caller {
         fs::write(path, text).unwrap();
     }
 
+    /// The script run in place from this crate, from the caller's directory.
     fn core(&self, args: &[&str]) -> Output {
+        let (name, rest) = args.split_first().expect("a script name");
         Command::new(bash())
             .current_dir(&self.root)
-            .arg("scripts/core.sh")
-            .args(args)
-            .env("FS_CORE_ROOT", repo())
+            .arg(repo().join("scripts").join(format!("{name}.sh")))
+            .args(rest)
+            .env_remove("FS_CORE_CALLER")
             .env("GITHUB_REPOSITORY", "example-org/rust-example")
             .output()
             .unwrap()
@@ -229,7 +234,6 @@ fn a_version_the_changelog_does_not_describe_is_refused() {
 fn the_draft_groups_the_commits_since_the_newest_tag() {
     let caller = Caller::new("draft");
     caller.write("CHANGELOG.md", CHANGELOG);
-    caller.git(&["init", "-q", "-b", "main"]);
     caller.git(&["add", "-A"]);
     caller.commit("chore(release): 0.2.0 (#20)");
     caller.git(&["tag", "v0.2.0"]);
@@ -269,7 +273,6 @@ fn the_draft_groups_the_commits_since_the_newest_tag() {
 fn the_draft_can_be_written_under_unreleased() {
     let caller = Caller::new("write");
     caller.write("CHANGELOG.md", CHANGELOG);
-    caller.git(&["init", "-q", "-b", "main"]);
     caller.git(&["add", "-A"]);
     caller.commit("chore(release): 0.2.0 (#20)");
     caller.git(&["tag", "v0.2.0"]);

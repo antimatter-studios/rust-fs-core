@@ -763,11 +763,13 @@ fn a_working_directory_that_cannot_be_made_leaves_no_tarball() {
 #[test]
 fn family_check_refuses_a_copy_of_package_cli() {
     let caller = Caller::new("family");
+    // A caller keeps no bootstrap now (#212); family-check runs in place.
+    fs::remove_file(caller.root.join("scripts/core.sh")).unwrap();
     let check = |caller: &Caller| {
         Command::new("bash")
             .current_dir(&caller.root)
-            .args(["scripts/core.sh", "family-check"])
-            .env("FS_CORE_ROOT", repo())
+            .arg(repo().join("scripts").join("family-check.sh"))
+            .env("FS_CORE_CALLER", &caller.root)
             .output()
             .unwrap()
     };

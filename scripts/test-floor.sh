@@ -50,7 +50,7 @@ usage() {
     echo "       test-floor.sh --targets FLOORS-FILE TIER" >&2
     exit 2
 }
-REPO="${FS_CORE_CALLER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+REPO="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 refuse_ignored=0
 targets=""

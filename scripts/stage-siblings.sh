@@ -50,7 +50,7 @@ die() {
     exit 1
 }
 
-CALLER="${FS_CORE_CALLER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CALLER="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 [ $# -ge 1 ] || usage
 SHARE="$1"
