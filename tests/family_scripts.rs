@@ -13,6 +13,14 @@
 //! is not this one -- because that is the only way they are used. Each caller
 //! tree is built under this repository's `tmp/`, never the OS temporary
 //! directory, and removed afterwards.
+//!
+//! THE SCRIPTS RUN IN PLACE (#212). A caller used to carry a byte-identical
+//! bootstrap, `scripts/core.sh`, and fourteen of them a `scripts/tier.sh`, each
+//! there only to find this crate; the copies had to be recopied on every bump,
+//! and the tier wrappers drifted fourteen ways. Now a caller runs
+//! `bash ../rust-fs-core/scripts/NAME.sh` from its own checkout, the script
+//! works on the repository it is run from, and family-check refuses a copy of
+//! either file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,8 +55,9 @@ fn printed(output: &Output) -> String {
     )
 }
 
-/// A throwaway repository under this one's `tmp/`, removed on drop. It holds
-/// a copy of `scripts/core.sh`, as every consumer does, and a log directory.
+/// A throwaway repository under this one's `tmp/`, removed on drop: a git
+/// repository of its own, so a script run from it treats it as the caller,
+/// with a log directory and no copy of anything of this crate's.
 struct Caller {
     root: PathBuf,
 }
@@ -68,16 +77,17 @@ impl Caller {
         let caller = Caller { root };
         fs::create_dir_all(caller.root.join("scripts")).unwrap();
         fs::create_dir_all(caller.root.join("tmp").join("logs")).unwrap();
-        fs::copy(
-            repo().join("scripts").join("core.sh"),
-            caller.root.join("scripts").join("core.sh"),
-        )
-        .expect("rust-fs-core ships scripts/core.sh for its consumers");
         fs::write(
             caller.root.join("Cargo.toml"),
             "[package]\nname = \"am-example\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
+        let out = Command::new("git")
+            .current_dir(&caller.root)
+            .args(["init", "-q"])
+            .output()
+            .expect("git is needed to build a caller repository");
+        assert!(out.status.success(), "git init: {}", printed(&out));
         caller
     }
 
@@ -92,15 +102,18 @@ impl Caller {
         .unwrap();
     }
 
-    /// `bash scripts/core.sh ARGS...` from the caller, finding this crate
-    /// through FS_CORE_ROOT the way a CI job with a checkout does.
+    /// `bash <this crate>/scripts/NAME.sh ARGS...` from the caller's own
+    /// directory, with nothing set to say which repository it is: the script
+    /// finds that from where it is run, as a consumer's CI runs it.
     fn core(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let (name, rest) = args.split_first().expect("a script name");
         let mut command = Command::new(bash());
         command
             .current_dir(&self.root)
-            .arg("scripts/core.sh")
-            .args(args)
-            .env("FS_CORE_ROOT", repo());
+            .arg(repo().join("scripts").join(format!("{name}.sh")))
+            .args(rest)
+            .env_remove("FS_CORE_CALLER")
+            .env_remove("FS_CORE_ROOT");
         for (key, value) in env {
             command.env(key, value);
         }
@@ -143,12 +156,11 @@ fn each_family_script_states_its_contract() {
     assert_eq!(version_of("package-cli.sh"), "rust-fs-core-package-cli 1");
 }
 
-/// `ci-gate` is served the way the others are: by name, through the
-/// bootstrap, with its contract checked before it runs. Its behaviour against
+/// `ci-gate` runs in place like the others. Its behaviour against
 /// a caller's `ci.yml` and `.github-guard` is `tests/scripts/test-ci-gate.sh`,
 /// which needs python3's yaml module and so runs where CI provides one.
 #[test]
-fn the_bootstrap_serves_ci_gate() {
+fn ci_gate_runs_in_place() {
     let caller = Caller::new("ci-gate");
     let out = caller.core(&["ci-gate", "--version"], &[]);
     assert!(out.status.success(), "{}", printed(&out));
@@ -282,50 +294,45 @@ fn semver_check_names_the_former_name_a_renamed_crate_is_compared_with() {
     );
 }
 
+/// A script run in place works on the repository it is run from, and a
+/// script run from somewhere that is no repository at all says so rather
+/// than reading this crate's own files as if they were the caller's.
 #[test]
-fn the_bootstrap_refuses_what_it_cannot_vouch_for() {
-    let caller = Caller::new("refuse");
-    let unknown = caller.core(&["no-such-script"], &[]);
-    assert_eq!(unknown.status.code(), Some(2), "{}", printed(&unknown));
+fn a_script_run_in_place_works_on_the_repository_it_is_run_from() {
+    let caller = Caller::new("in-place");
+    caller.log("unit", "test result: ok. 2 passed; 0 failed\n");
+    let out = caller.core(&["test-floor", "unit", "2"], &[]);
+    assert!(out.status.success(), "{}", printed(&out));
 
-    // A core that is not there.
-    let missing = Command::new(bash())
-        .current_dir(&caller.root)
-        .args(["scripts/core.sh", "test-floor", "unit", "1"])
-        .env("FS_CORE_ROOT", caller.root.join("no-core-here"))
+    // A subdirectory of the caller is still the caller.
+    let nested = caller.root.join("src");
+    fs::create_dir_all(&nested).unwrap();
+    let out = Command::new(bash())
+        .current_dir(&nested)
+        .arg(repo().join("scripts").join("test-floor.sh"))
+        .args(["unit", "2"])
+        .env_remove("FS_CORE_CALLER")
         .output()
         .unwrap();
-    assert_eq!(missing.status.code(), Some(1), "{}", printed(&missing));
-    assert!(
-        String::from_utf8_lossy(&missing.stderr).contains("test-floor.sh"),
-        "{}",
-        printed(&missing)
-    );
+    assert!(out.status.success(), "{}", printed(&out));
 
-    // A core whose script does not answer --version as the bootstrap asks.
-    let fake = caller.root.join("fake-core");
-    fs::create_dir_all(fake.join("scripts")).unwrap();
-    fs::write(fake.join("scripts/test-floor.sh"), "echo something-else\n").unwrap();
-    let wrong = Command::new(bash())
-        .current_dir(&caller.root)
-        .args(["scripts/core.sh", "test-floor", "unit", "1"])
-        .env("FS_CORE_ROOT", &fake)
+    // FS_CORE_CALLER still names the caller outright, wherever it is run.
+    let elsewhere = Command::new(bash())
+        .current_dir(repo())
+        .arg(repo().join("scripts").join("test-floor.sh"))
+        .args(["unit", "2"])
+        .env("FS_CORE_CALLER", &caller.root)
         .output()
         .unwrap();
-    assert_eq!(wrong.status.code(), Some(1), "{}", printed(&wrong));
-    assert!(
-        String::from_utf8_lossy(&wrong.stderr).contains("--version"),
-        "{}",
-        printed(&wrong)
-    );
+    assert!(elsewhere.status.success(), "{}", printed(&elsewhere));
 }
 
 #[test]
-fn this_repository_runs_its_own_scripts_through_the_same_bootstrap() {
-    // No FS_CORE_ROOT, no sibling: cargo names this crate as rust-fs-core.
+fn this_repository_runs_its_own_scripts_in_place_too() {
     let out = Command::new(bash())
         .current_dir(repo())
-        .args(["scripts/core.sh", "test-floor", "--version"])
+        .arg(repo().join("scripts").join("test-floor.sh"))
+        .arg("--version")
         .env_remove("FS_CORE_ROOT")
         .output()
         .unwrap();
@@ -360,6 +367,9 @@ fn the_package_ships_every_family_script() {
         "package-cli.sh",
         "stage-siblings.sh",
         "guest-rust-run.sh",
+        "tier.sh",
+        "release-notes.sh",
+        "changelog-draft.sh",
     ] {
         assert!(
             Path::new(&repo().join("scripts").join(script)).is_file(),
@@ -370,10 +380,11 @@ fn the_package_ships_every_family_script() {
 
 #[test]
 fn family_check_passes_a_clean_caller_and_refuses_each_kind_of_copy() {
+    // Clean: the scripts are run in place from the rust-fs-core checkout.
     let clean = Caller::new("family-clean");
     fs::write(
         clean.root.join("chores.yml"),
-        "tasks:\n  t:\n    cmds:\n      - 'bash scripts/core.sh test-floor debug 1'\n",
+        "tasks:\n  t:\n    cmds:\n      - 'bash ../rust-fs-core/scripts/test-floor.sh debug 1'\n",
     )
     .unwrap();
     let ok = clean.core(&["family-check"], &[]);
@@ -390,162 +401,74 @@ fn family_check_passes_a_clean_caller_and_refuses_each_kind_of_copy() {
     let out = copy.core(&["family-check"], &[]);
     assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("scripts/test-floor.sh is a copy"),
+        String::from_utf8_lossy(&out.stdout).contains(
+            "scripts/test-floor.sh is a copy of rust-fs-core's; delete it and run ../rust-fs-core/scripts/test-floor.sh in place"
+        ),
         "{}",
         printed(&out)
     );
 
-    // The guest toolchain install is a family script like the others: five
-    // repositories carried a copy of it once, and only one recovered from an
-    // interrupted install. A copy, or a call that bypasses core.sh, is refused.
-    let guest = Caller::new("family-guest-copy");
-    fs::write(
-        guest.root.join("scripts/guest-rust-toolchain.sh"),
-        "echo mine\n",
-    )
-    .unwrap();
-    fs::write(
-        guest.root.join("scripts/guest-suite.sh"),
-        "bash scripts/guest-rust-toolchain.sh\n",
-    )
-    .unwrap();
-    let out = guest.core(&["family-check"], &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        said.contains("scripts/guest-rust-toolchain.sh is a copy"),
-        "{}",
-        printed(&out)
-    );
-    assert!(
-        said.contains("scripts/guest-suite.sh:1:bash scripts/guest-rust-toolchain.sh"),
-        "{}",
-        printed(&out)
-    );
-
-    // A committed copy of ci-gate, the one every repository used to carry.
-    let gate = Caller::new("family-gate-copy");
-    fs::write(gate.root.join("scripts/ci-gate.sh"), "echo mine\n").unwrap();
-    let out = gate.core(&["family-check"], &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
-    assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .contains("scripts/ci-gate.sh is a copy of rust-fs-core's; delete it and run it as scripts/core.sh ci-gate"),
-        "{}",
-        printed(&out)
-    );
-
-    // The rest of the guest's Rust layer is family scripts too: the staging
-    // of path siblings on the host and the linking, environment and install
-    // in the guest were copied into five drivers' test:vm and guest-suite.sh
-    // (#195). A copy, or a call that bypasses core.sh, is refused.
-    let layer = Caller::new("family-guest-layer-copy");
-    for script in ["stage-siblings.sh", "guest-rust-run.sh"] {
-        fs::write(layer.root.join("scripts").join(script), "echo mine\n").unwrap();
-    }
-    fs::write(
-        layer.root.join("chores.yml"),
-        "tasks:\n  test:vm:\n    cmds:\n      - 'bash scripts/stage-siblings.sh /share rust-fs-core'\n",
-    )
-    .unwrap();
-    fs::write(
-        layer.root.join("scripts/guest-suite.sh"),
-        "exec bash scripts/guest-rust-run.sh fs-x /share rust-fs-core -- true\n",
-    )
-    .unwrap();
-    let out = layer.core(&["family-check"], &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
-    let said = String::from_utf8_lossy(&out.stdout);
-    for expected in [
-        "scripts/stage-siblings.sh is a copy",
-        "scripts/guest-rust-run.sh is a copy",
-        "chores.yml:4:      - 'bash scripts/stage-siblings.sh /share rust-fs-core'",
-        "scripts/guest-suite.sh:1:exec bash scripts/guest-rust-run.sh",
-    ] {
-        assert!(said.contains(expected), "{expected}: {}", printed(&out));
+    // The bootstrap and the tier wrapper are copies too: each existed only to
+    // find this crate, and both drifted (#212).
+    for wrapper in ["core.sh", "tier.sh"] {
+        let kept = Caller::new("family-wrapper");
+        fs::write(kept.root.join("scripts").join(wrapper), "echo mine\n").unwrap();
+        let out = kept.core(&["family-check"], &[]);
+        assert_eq!(out.status.code(), Some(1), "{wrapper}: {}", printed(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stdout)
+                .contains(&format!("scripts/{wrapper} is a copy of rust-fs-core's")),
+            "{wrapper}: {}",
+            printed(&out)
+        );
     }
 
-    // A driver's own guest command is its scripts/guest-suite.sh, and the
-    // family script it runs is named so that file is not taken for a copy.
-    let driver = Caller::new("family-guest-suite-is-the-drivers");
-    fs::write(
-        driver.root.join("scripts/guest-suite.sh"),
-        "FS_CORE_ROOT=/share/siblings/rust-fs-core exec bash scripts/core.sh guest-rust-run fs-x /share rust-fs-core -- scripts/test.sh\n",
-    )
-    .unwrap();
-    fs::write(
-        driver.root.join("chores.yml"),
-        "tasks:\n  test:vm:\n    cmds:\n      - 'bash scripts/core.sh stage-siblings /share rust-fs-core -- true'\n",
-    )
-    .unwrap();
-    let out = driver.core(&["family-check"], &[]);
-    assert!(out.status.success(), "{}", printed(&out));
-
-    // A bootstrap edited away from core's.
-    let edited = Caller::new("family-edited");
-    let path = edited.root.join("scripts/core.sh");
-    let mut text = fs::read_to_string(&path).unwrap();
-    text.push_str("# local tweak\n");
-    fs::write(&path, text).unwrap();
-    let out = edited.core(&["family-check"], &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("differs from rust-fs-core's"),
-        "{}",
-        printed(&out)
-    );
-
-    // A workflow still calling a local copy -- and a comment naming one is fine.
+    // A call through a copy, or through the old bootstrap or tier wrapper,
+    // is refused; a comment naming one is fine.
     let calls = Caller::new("family-calls");
     fs::create_dir_all(calls.root.join(".github/workflows")).unwrap();
     fs::write(
         calls.root.join(".github/workflows/ci.yml"),
-        "jobs:\n  t:\n    steps:\n      # see scripts/semver-check.sh\n      - run: bash scripts/test-floor.sh debug 1\n",
+        "jobs:\n  t:\n    steps:\n      # see scripts/semver-check.sh\n      - run: bash scripts/test-floor.sh debug 1\n      - run: bash scripts/core.sh test-floor debug 1\n      - run: scripts/tier.sh unit unit 10 100 -- cargo test\n",
     )
     .unwrap();
     let out = calls.core(&["family-check"], &[]);
     assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
     let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        said.contains("bash scripts/test-floor.sh debug 1"),
-        "{}",
-        printed(&out)
-    );
+    for expected in [
+        "bash scripts/test-floor.sh debug 1",
+        "bash scripts/core.sh test-floor debug 1",
+        "scripts/tier.sh unit unit 10 100",
+    ] {
+        assert!(said.contains(expected), "{expected}: {}", printed(&out));
+    }
     assert!(
         !said.contains("see scripts/semver-check.sh"),
         "a comment was counted as a call: {}",
         printed(&out)
     );
 
-    // chores.yml still naming the local ci-gate, as eleven of them did.
-    let gate_call = Caller::new("family-gate-call");
+    // A driver's own guest command is its scripts/guest-suite.sh, and the
+    // family script it runs is run in place from the staged sibling.
+    let driver = Caller::new("family-guest-suite-is-the-drivers");
     fs::write(
-        gate_call.root.join("chores.yml"),
-        "tasks:\n  check:ci-gate:\n    cmds:\n      - scripts/ci-gate.sh\n",
+        driver.root.join("scripts/guest-suite.sh"),
+        "exec bash /share/siblings/rust-fs-core/scripts/guest-rust-run.sh fs-x /share rust-fs-core -- scripts/test.sh\n",
     )
     .unwrap();
-    let out = gate_call.core(&["family-check"], &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("- scripts/ci-gate.sh"),
-        "{}",
-        printed(&out)
-    );
+    fs::write(
+        driver.root.join("chores.yml"),
+        "tasks:\n  test:vm:\n    cmds:\n      - 'bash ../rust-fs-core/scripts/stage-siblings.sh /share rust-fs-core -- true'\n",
+    )
+    .unwrap();
+    let out = driver.core(&["family-check"], &[]);
+    assert!(out.status.success(), "{}", printed(&out));
 }
 
-/// `cmp` compares bytes, not the mode: a byte-identical `scripts/core.sh`
-/// that lost its executable bit passed family-check and then failed with
-/// `Permission denied` wherever a caller ran it directly (rust-fs-core#200).
-/// Where the caller is a git repository the mode is the one git records,
-/// because the mode on disk depends on `core.fileMode`.
+/// The bootstrap is refused whatever its mode: it used to be required, and
+/// executable (rust-fs-core#200); it is now a copy like any other (#212).
 #[test]
-fn family_check_refuses_a_bootstrap_that_is_not_executable() {
-    #[cfg(unix)]
-    let chmod = |caller: &Caller, mode: u32| {
-        use std::os::unix::fs::PermissionsExt;
-        let path = caller.root.join("scripts").join("core.sh");
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
-    };
+fn family_check_refuses_a_committed_bootstrap_however_it_is_kept() {
     let git = |caller: &Caller, args: &[&str]| {
         let out = Command::new("git")
             .current_dir(&caller.root)
@@ -554,40 +477,93 @@ fn family_check_refuses_a_bootstrap_that_is_not_executable() {
             .expect("git is needed to build a caller repository");
         assert!(out.status.success(), "git {args:?}: {}", printed(&out));
     };
-    let refused = |out: &Output| {
-        assert_eq!(out.status.code(), Some(1), "{}", printed(out));
-        assert!(
-            String::from_utf8_lossy(&out.stdout).contains("scripts/core.sh is not executable"),
-            "{}",
-            printed(out)
-        );
-    };
+    let caller = Caller::new("family-bootstrap-committed");
+    fs::copy(
+        repo().join("scripts").join("core.sh"),
+        caller.root.join("scripts").join("core.sh"),
+    )
+    .unwrap();
+    git(&caller, &["add", "scripts/core.sh"]);
+    git(&caller, &["update-index", "--chmod=+x", "scripts/core.sh"]);
+    let out = caller.core(&["family-check"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("scripts/core.sh is a copy of rust-fs-core's"),
+        "{}",
+        printed(&out)
+    );
+}
 
-    // Outside git, the mode on disk is all there is. Windows has no mode
-    // to clear, so this case is Unix's; the git cases below run everywhere.
-    #[cfg(unix)]
-    {
-        let plain = Caller::new("family-mode-plain");
-        chmod(&plain, 0o644);
-        refused(&plain.core(&["family-check"], &[]));
-    }
-
-    // In git, the recorded mode decides, whatever the disk says.
-    let lost = Caller::new("family-mode-git-lost");
-    git(&lost, &["init", "-q"]);
-    git(&lost, &["add", "scripts/core.sh"]);
-    git(&lost, &["update-index", "--chmod=-x", "scripts/core.sh"]);
-    refused(&lost.core(&["family-check"], &[]));
-
-    let kept = Caller::new("family-mode-git-kept");
-    git(&kept, &["init", "-q"]);
-    git(&kept, &["config", "core.fileMode", "false"]);
-    git(&kept, &["add", "scripts/core.sh"]);
-    git(&kept, &["update-index", "--chmod=+x", "scripts/core.sh"]);
-    #[cfg(unix)]
-    chmod(&kept, 0o644);
-    let out = kept.core(&["family-check"], &[]);
+/// One tier runner for the family (#212): run in place, it writes the log
+/// under the caller's `tmp/logs/`, not this crate's.
+#[test]
+fn the_tier_runner_runs_in_place_and_logs_in_the_caller() {
+    let caller = Caller::new("tier");
+    let out = caller.core(
+        &[
+            "tier",
+            "unit",
+            "unit",
+            "50",
+            "5000",
+            "--",
+            "echo",
+            "hello from the caller",
+        ],
+        &[],
+    );
     assert!(out.status.success(), "{}", printed(&out));
+    let log = fs::read_to_string(caller.root.join("tmp/logs/unit.log"))
+        .expect("the tier's log is in the caller's tmp/logs");
+    assert!(log.contains("hello from the caller"), "{log}");
+}
+
+/// The check three repositories carried in their own tier wrappers, shared:
+/// a run that printed SKIP lines counted them as passes, and a skipped test
+/// reads exactly like a passing one (#212).
+#[test]
+fn the_tier_runner_refuses_a_skip_when_asked() {
+    let caller = Caller::new("tier-skips");
+    let refused = caller.core(
+        &[
+            "tier",
+            "--refuse-skips",
+            "unit",
+            "unit",
+            "50",
+            "5000",
+            "--",
+            "echo",
+            "SKIP: no fixture",
+        ],
+        &[],
+    );
+    assert_eq!(refused.status.code(), Some(66), "{}", printed(&refused));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("SKIP"),
+        "the refusal does not name the skip: {}",
+        printed(&refused)
+    );
+
+    let allowed = caller.core(
+        &[
+            "tier",
+            "unit",
+            "unit",
+            "50",
+            "5000",
+            "--",
+            "echo",
+            "SKIP: no fixture",
+        ],
+        &[],
+    );
+    assert!(
+        allowed.status.success(),
+        "a skip is only refused when asked: {}",
+        printed(&allowed)
+    );
 }
 
 #[test]
