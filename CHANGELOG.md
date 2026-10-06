@@ -7,6 +7,16 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+## [0.2.24] — 2026-10-06
+
+### Changed
+
+- **The last version published as `am-fs-core`.** The crate is renamed to
+  `rust-fs-core`, the repository's name; every later version is published
+  under that name only. The code is 0.2.23's; only the description and the
+  README change, to say where the crate went. The import (`fs_core`) and the
+  C symbols are unchanged.
+
 ## [0.2.23] — 2026-10-03
 
 ### Added

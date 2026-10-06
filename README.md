@@ -1,5 +1,19 @@
 # fs-core
 
+> **Renamed to [`rust-fs-core`](https://crates.io/crates/rust-fs-core).**
+> `am-fs-core` 0.2.24 is the last version published under this name, and it
+> is the same code as 0.2.23. New versions are published only as
+> `rust-fs-core`. To move, change one line in `Cargo.toml`:
+>
+> ```toml
+> # before
+> am-fs-core = "0.2"
+> # after
+> rust-fs-core = "0.2"
+> ```
+>
+> The import is unchanged: `use fs_core::...` keeps working.
+
 Pure-Rust block-device framework. The shared substrate every filesystem
 driver and disk-image reader plugs into.
 
