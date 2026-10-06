@@ -15,8 +15,8 @@ reaches all of them.
 
 - **`release-notes` reads a section headed `## vX.Y.Z` or `## X.Y.Z`** as
   well as `## [X.Y.Z]`, and finds the previous version for the diff link the
-  same way. Several repositories in the family use the `v` form, and
-  diskjockey's pre-push hook requires it for a tag.
+  same way. Several repositories in the family use the `v` form, and one
+  has a pre-push hook that requires it for a tag.
 
 ### Added
 
