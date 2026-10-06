@@ -9,6 +9,17 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.3.6] — 2026-10-06
+
+### Changed
+
+- **A release's notes come from github-guard's changelog extraction.**
+  `release.yml` and the shared `release-cli.yml` call agent-skills'
+  `changelog-notes` action, the same code github-guard's pre-push guard checks
+  a tag with, instead of this crate's `release-notes.sh`, a second
+  implementation that should not have been written. A tag the CHANGELOG does
+  not describe still stops before anything is published.
+
 ## [0.3.5] — 2026-10-06
 
 ### Fixed
@@ -795,7 +806,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.2...v0.3.3

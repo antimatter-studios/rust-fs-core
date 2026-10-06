@@ -102,17 +102,18 @@ jobs:
           CORE_REF: ${{ inputs.core-ref }}
         run: git clone --depth 1 --branch "$CORE_REF" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
-      # THE NOTES BEFORE ANYTHING IS BUILT (#209). A release's body is its
-      # CHANGELOG section; a tag the CHANGELOG does not describe stops here,
-      # before a tarball exists, rather than publishing "See CHANGELOG.md".
+      # THE NOTES BEFORE ANYTHING IS BUILT. A release's body is its CHANGELOG
+      # section, written by github-guard's changelog extraction through
+      # agent-skills' changelog-notes action: the same code the git-changelog
+      # pre-push guard checks the tag with, so the two cannot disagree. A tag
+      # the CHANGELOG does not describe stops here, before a tarball exists.
       # One leg writes the file the attach job uses: that job checks nothing
       # out, so the notes travel as an artifact.
       - name: the CHANGELOG describes this version
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p notes
-          FS_CORE_CALLER="$PWD" bash ../rust-fs-core/scripts/release-notes.sh "$GITHUB_REF_NAME" > notes/release-notes.md
+        uses: antimatter-studios/agent-skills/.github/actions/changelog-notes@ed0b96812c5908478dcd84543debf4d5f8bf87e3
+        with:
+          tag: ${{ github.ref_name }}
+          output-file: notes/release-notes.md
 
       - name: keep the notes for the attach job
         if: matrix.label == 'linux-x86_64'

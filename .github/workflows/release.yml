@@ -108,14 +108,16 @@ jobs:
       # whose attestation did not can still finish the job. The same
       # packaging `cargo publish` does, and cargo's archive is
       # reproducible: the file `cargo publish` uploads is this one.
-      # THE NOTES BEFORE THE UPLOAD (#209): the release body is this
-      # version's CHANGELOG section, and a tag the CHANGELOG does not
-      # describe stops here, before crates.io has anything.
+      # THE NOTES BEFORE THE UPLOAD: the release body is this version's
+      # CHANGELOG section, from github-guard's changelog extraction through
+      # agent-skills' changelog-notes action (the same code the pre-push guard
+      # checks the tag with). A tag the CHANGELOG does not describe stops
+      # here, before crates.io has anything.
       - name: the CHANGELOG describes this version
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+        uses: antimatter-studios/agent-skills/.github/actions/changelog-notes@ed0b96812c5908478dcd84543debf4d5f8bf87e3
+        with:
+          tag: ${{ github.ref_name }}
+          output-file: ${{ runner.temp }}/release-notes.md
 
       - name: package the crate
         shell: bash
