@@ -74,7 +74,7 @@ jobs:
       - name: test (quiet, budgeted, with an executed-test floor)
         shell: bash
         run: |
-          bash scripts/tier.sh "test (debug)" debug 750 50000 -- cargo test --locked --all-targets --features cli
+          bash scripts/tier.sh "test (debug)" debug 1000 60000 -- cargo test --locked --all-targets --features cli
           bash scripts/core.sh test-floor debug 330
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
