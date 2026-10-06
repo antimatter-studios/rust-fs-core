@@ -142,7 +142,7 @@ jobs:
           LABEL: ${{ matrix.label }}
         run: |
           set -euo pipefail
-          bash scripts/core.sh package-cli "${GITHUB_REF_NAME#v}" "$LABEL" > "$RUNNER_TEMP/tarball"
+          bash ../rust-fs-core/scripts/package-cli.sh "${GITHUB_REF_NAME#v}" "$LABEL" > "$RUNNER_TEMP/tarball"
           tarball="$(tail -n 1 "$RUNNER_TEMP/tarball")"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           # A formula needs this to verify the download; in the job summary,
