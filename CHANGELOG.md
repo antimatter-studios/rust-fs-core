@@ -9,6 +9,15 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-10-06
+
+### Changed
+
+- **`release-notes` reads a section headed `## vX.Y.Z` or `## X.Y.Z`** as
+  well as `## [X.Y.Z]`, and finds the previous version for the diff link the
+  same way. Several repositories in the family use the `v` form, and
+  diskjockey's pre-push hook requires it for a tag.
+
 ## [0.3.3] — 2026-10-06
 
 ### Added
@@ -771,7 +780,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.0...v0.3.1
