@@ -9,6 +9,15 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-10-06
+
+### Fixed
+
+- **The release notes' diff link compares with the previous release.** It
+  took the next heading starting with a digit, so a CHANGELOG keeping history
+  under `## 0.2.0-dev` linked to a tag that does not exist. The previous
+  version is now the next plain `X.Y.Z`.
+
 ## [0.3.4] — 2026-10-06
 
 ### Changed
@@ -786,7 +795,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.1...v0.3.2

@@ -65,7 +65,9 @@ fi
 previous="$(awk -v v="$version" "$HEADING_VERSION"'
     /^## / {
         h = heading_version($0)
-        if (h !~ /^[0-9]/) next
+        # Only a release: a plain X.Y.Z. `## 0.2.0-dev` or `## Before ...`
+        # is history under a heading, and names no tag to diff against.
+        if (h !~ /^[0-9]+\.[0-9]+\.[0-9]+$/ && h != v) next
         if (found) { print h; exit }
         if (h == v) found = 1
     }
