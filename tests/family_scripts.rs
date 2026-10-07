@@ -368,7 +368,6 @@ fn the_package_ships_every_family_script() {
         "stage-siblings.sh",
         "guest-rust-run.sh",
         "tier.sh",
-        "release-notes.sh",
         "changelog-draft.sh",
     ] {
         assert!(

@@ -9,6 +9,15 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Removed
+
+- **`scripts/release-notes.sh` and its tests.** Every release workflow in the
+  family takes its notes from agent-skills' `changelog-notes` action, the code
+  github-guard's pre-push guard checks a tag with, and the action has now
+  written the notes of rust-fs-core 0.3.7, rust-fs-btrfs 0.10.2 and
+  rust-fs-xfs 0.12.1. No repository runs the script, so it is gone rather than
+  left to drift from the code that replaced it.
+
 ## [0.3.7] — 2026-10-07
 
 ### Fixed
