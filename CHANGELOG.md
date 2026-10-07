@@ -11,6 +11,9 @@ reaches all of them.
 
 ### Removed
 
+- **`scripts/changelog-draft.sh`.** The commit skill writes a change's
+  CHANGELOG entry, and the README's, as part of the commit; a second drafter
+  in this crate did the same job differently, and no repository ran it.
 - **`scripts/release-notes.sh` and its tests.** Every release workflow in the
   family takes its notes from agent-skills' `changelog-notes` action, the code
   github-guard's pre-push guard checks a tag with, and the action has now
