@@ -36,7 +36,7 @@ fails=0
 fail() { printf 'FAIL  family-check: %s\n' "$1"; fails=$((fails + 1)); }
 
 if [ "$CALLER" != "$CORE" ]; then
-    NAMES="output-budget test-floor semver-check guest-rust-toolchain ci-gate package-cli stage-siblings guest-rust-run tier core release-notes changelog-draft family-check agents-core-check"
+    NAMES="output-budget test-floor semver-check guest-rust-toolchain ci-gate package-cli stage-siblings guest-rust-run tier core changelog-draft family-check agents-core-check"
 
     # 1. No copy, the bootstrap and the tier runner included: each existed
     #    only to find this crate, and a copy nothing updates drifts (#212).
