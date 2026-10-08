@@ -9,6 +9,16 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Changed
+
+- **The shared agent-core block says red and green happen in one pull
+  request, on one branch (v3).** The failing test is pushed alone and CI shows
+  it red; the fix is pushed to the same branch until the same pull request is
+  green. A fix in a second, stacked pull request is forbidden: a pull request
+  holding only a red commit can never merge, and it blocks everything built on
+  it. Every repository carrying the block moves to v3 with its rust-fs-core
+  pin, because `scripts/agents-core-check.sh` now expects the v3 digest.
+
 ### Removed
 
 - **`scripts/changelog-draft.sh`.** The commit skill writes a change's
