@@ -248,6 +248,84 @@ else
     fail "relative overrides were not resolved against the caller (status $status):"$'\n'"$said"
 fi
 
+# --- 10. Path-gated jobs: skipped when only documentation changed. -------
+# A `changes` job says whether anything but documentation changed
+# (scripts/code-changed.sh); a job gated on exactly that output may carry an
+# `if:` and still be in ci-ok's needs, because ci-ok needs `changes` too and
+# reads its output, so a skip is accepted only when `changes` said so. Any
+# other condition stays refused, as case 2's rule says.
+GATED='on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.c.outputs.code }}
+    steps: [{id: c, run: "echo code=true >> $GITHUB_OUTPUT"}]
+  lint:
+    runs-on: ubuntu-latest
+    steps: [{run: "true"}]
+  heavy:
+    needs: changes
+    if: needs.changes.outputs.code == '"'"'true'"'"'
+    runs-on: ubuntu-latest
+    steps: [{run: "true"}]
+  after:
+    needs: heavy
+    runs-on: ubuntu-latest
+    steps: [{run: "true"}]
+  ci-ok:
+    if: always()
+    needs: [changes, lint, heavy, after]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+          CODE: ${{ needs.changes.outputs.code }}
+        run: echo "$NEEDS $CODE"
+'
+dir="$(caller gated "$ONE" <<<"$GATED")"
+gate "$dir"
+if [ "$status" -eq 0 ]; then
+    ok "a job gated on the changes job's code output may sit in ci-ok's needs"
+else
+    fail "a path-gated job was refused (status $status):"$'\n'"$said"
+fi
+Q="'"
+braces="${GATED/"if: needs.changes.outputs.code == ${Q}true${Q}"/"if: \${{ needs.changes.outputs.code == ${Q}true${Q} }}"}"
+dir="$(caller gated-braces "$ONE" <<<"$braces")"
+gate "$dir"
+if [ "$status" -eq 0 ]; then
+    ok "the path gate may be written inside \${{ }}"
+else
+    fail "a path gate inside \${{ }} was refused (status $status):"$'\n'"$said"
+fi
+other="${GATED/"needs.changes.outputs.code == ${Q}true${Q}"/"github.event_name == ${Q}push${Q}"}"
+dir="$(caller gated-other "$ONE" <<<"$other")"
+gate "$dir"
+if [ "$status" -eq 1 ] && grep -qF '`heavy` carries a job-level' <<<"$said"; then
+    ok "any other job-level condition is still refused"
+else
+    fail "a job gated on something else was accepted (status $status):"$'\n'"$said"
+fi
+unread="${GATED/          CODE: \$\{\{ needs.changes.outputs.code \}\}
+/}"
+dir="$(caller gated-unread "$ONE" <<<"$unread")"
+gate "$dir"
+if [ "$status" -eq 1 ] && grep -qF 'needs.changes.outputs.code' <<<"$said"; then
+    ok "ci-ok must read the changes job's code output when it accepts path-gated skips"
+else
+    fail "an aggregate that never reads the code output was accepted (status $status):"$'\n'"$said"
+fi
+noneed="${GATED/"needs: [changes, lint, heavy, after]"/"needs: [lint, heavy, after]"}"
+dir="$(caller gated-noneed "$ONE" <<<"$noneed")"
+gate "$dir"
+if [ "$status" -eq 1 ] && grep -qF '`ci-ok` does not need `changes`' <<<"$said"; then
+    ok "ci-ok must need the changes job a path-gated job hangs on"
+else
+    fail "an aggregate that does not need changes was accepted (status $status):"$'\n'"$said"
+fi
+
 if [ "$fails" -gt 0 ]; then
     echo "test-ci-gate: $fails check(s) failed" >&2
     exit 1
