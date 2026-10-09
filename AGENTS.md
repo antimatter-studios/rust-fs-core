@@ -379,10 +379,13 @@ silent break in ten repositories rather than a failure here.
 ## What gates a merge
 
 **One required check: `ci-ok`.** It carries `if: always()`, `needs:` every
-other job in `ci.yml` — `test` (the ubuntu / macOS / Windows matrix), `fmt`
-and `coverage` — and fails when any of them failed, was cancelled or was
-**skipped**. It runs no tests of its own, deliberately: it is a claim about the
-other jobs, so it must not be able to pass work of its own off as theirs.
+other job in `ci.yml` — `changes`, `test` (the ubuntu / macOS / Windows
+matrix), `fmt`, `coverage` and `semver` — and fails when any of them failed,
+was cancelled or was **skipped**, except that a documentation-only change
+(`changes` says `code` is `false`) skips `test` and `coverage`, and then their
+skip is accepted. It runs no tests of its own, deliberately: it is a claim
+about the other jobs, so it must not be able to pass work of its own off as
+theirs. `ci.yml` triggers on `merge_group`, so the merge queue sees it.
 
 `.github-guard` requires that one name and nothing else, and github-guard reads
 it **from the server copy of the default branch**, never from the working tree
