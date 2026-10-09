@@ -16,7 +16,7 @@ with every repository in this family**. Do not edit it here: change the
 canonical copy and propagate it, or `chore lint` will fail. Everything after
 the END marker is specific to this repository.
 
-<!-- BEGIN SHARED BLOCK: agent-core v4 sha256:7cb6d4d1cb4b1b78c700f747a09e4d6847ada5642cd480d89b7976206f611cc7 -->
+<!-- BEGIN SHARED BLOCK: agent-core v4 sha256:3e4a15da4b0d017f7dbcaae536dbe428dc69e3bb2bd8851364457dab76a46c71 -->
 ## Claiming work
 
 Several agents work these repositories at the same time. Before you start on
@@ -162,7 +162,9 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
   resolving any conflicts then, while they are small. `main` takes only
   up-to-date branches, so a run on a stale branch can pass and still not
   merge: the next run is paid for twice, for nothing. Synced first, the run
-  tests the branch as it will merge, and a green one merges directly.
+  tests the branch as it will merge, and a green one merges directly. And a
+  branch synced at every push never goes stale: each sync takes in only what
+  landed since the last one, so conflicts stay few and small.
 
 ## Project rules
 

@@ -15,7 +15,7 @@
 # running last month's rules.
 set -euo pipefail
 
-EXPECTED_SHA256="7cb6d4d1cb4b1b78c700f747a09e4d6847ada5642cd480d89b7976206f611cc7"
+EXPECTED_SHA256="3e4a15da4b0d017f7dbcaae536dbe428dc69e3bb2bd8851364457dab76a46c71"
 BEGIN='<!-- BEGIN SHARED BLOCK: agent-core v4'
 END='<!-- END SHARED BLOCK: agent-core v4 -->'
 
