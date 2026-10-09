@@ -16,7 +16,7 @@ with every repository in this family**. Do not edit it here: change the
 canonical copy and propagate it, or `chore lint` will fail. Everything after
 the END marker is specific to this repository.
 
-<!-- BEGIN SHARED BLOCK: agent-core v4 sha256:3e4a15da4b0d017f7dbcaae536dbe428dc69e3bb2bd8851364457dab76a46c71 -->
+<!-- BEGIN SHARED BLOCK: agent-core v5 sha256:93dca03d900fede9964388123030f779939bc99b8b9943f092051be6c9134126 -->
 ## Claiming work
 
 Several agents work these repositories at the same time. Before you start on
@@ -159,12 +159,21 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
 - `main` takes **squash merges only**.
 - **Bring a branch up to date before every push.** `git fetch origin`, and
   if `main` has moved past the branch, rebase onto `origin/main` first,
-  resolving any conflicts then, while they are small. `main` takes only
-  up-to-date branches, so a run on a stale branch can pass and still not
-  merge: the next run is paid for twice, for nothing. Synced first, the run
-  tests the branch as it will merge, and a green one merges directly. And a
-  branch synced at every push never goes stale: each sync takes in only what
-  landed since the last one, so conflicts stay few and small.
+  resolving any conflicts then, while they are small. Synced first, the run
+  tests the branch close to how it will land. And a branch synced at every
+  push never goes stale: each sync takes in only what landed since the last
+  one, so conflicts stay few and small. Sync when you are pushing anyway; a
+  push made only to bring a branch up to date buys a whole CI run and
+  nothing else.
+- **`main` merges through a merge queue.** A pull request whose own CI is
+  green goes into the queue: `gh pr merge --squash` adds it. The queue tests
+  each group on a temporary branch, `main` plus the queued pull requests in
+  order, and squash-merges each one only when that run is green, so what
+  lands is exactly the tree CI ran. That run is what "branches must be up to
+  date" used to buy, at one run per group instead of one per pull request per
+  merge: never update a branch only so that it can merge. Every workflow
+  that gates `main` triggers on `merge_group`, or the queue never sees its
+  result and nothing merges.
 
 ## Project rules
 
@@ -173,7 +182,7 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
   copying it is not.
 - **Each of these is a standalone project.** Never mention a consuming
   application in the README, the source, or CLI help.
-<!-- END SHARED BLOCK: agent-core v4 -->
+<!-- END SHARED BLOCK: agent-core v5 -->
 
 ## Skills specific to this repository
 

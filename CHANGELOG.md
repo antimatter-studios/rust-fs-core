@@ -12,11 +12,15 @@ reaches all of them.
 ### Changed
 
 - **The shared agent-core block says a branch is brought up to date before
-  every push (v4).** `git fetch origin`, and rebase onto `origin/main` when
-  `main` has moved past the branch. `main` takes only up-to-date branches,
-  so a run on a stale branch can pass and still not merge, and the next run
-  is paid for twice. Every repository carrying the block moves to v4 with
-  its rust-fs-core pin, past v3, which is not yet released.
+  every push, and that `main` merges through a merge queue (v5).** `git fetch
+  origin`, and rebase onto `origin/main` when `main` has moved past the
+  branch, so conflicts stay small. A green pull request goes into `main`'s
+  merge queue, which tests each group of queued pull requests on top of
+  `main` once and squash-merges each, replacing "branches must be up to
+  date" and the CI run every merge used to cost every other open pull
+  request. Every workflow that gates `main` triggers on `merge_group`. Every
+  repository carrying the block moves to v5 with its rust-fs-core pin, past
+  v3, which is not yet released, and v4, which never was.
 - **The shared agent-core block says red and green happen in one pull
   request, on one branch (v3).** The failing test is pushed alone and CI shows
   it red; the fix is pushed to the same branch until the same pull request is
