@@ -9,6 +9,17 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Added
+
+- **A pull request that changes only documentation skips the heavy jobs,
+  family-wide.** `scripts/code-changed.sh` reads a change's paths and says
+  whether any is not documentation (`*.md`, `LICENSE*`, `.claude/**`); an
+  empty or unknown list means the full pipeline. `ci-gate` accepts a job
+  gated on exactly `needs.changes.outputs.code == 'true'`, provided `ci-ok`
+  needs `changes` and reads its output. Each repository adopts it with its
+  rust-fs-core pin: a `changes` job, the condition on its VM and fixture
+  jobs, and `ci-ok` accepting their skip when `code` is `false`.
+
 ### Changed
 
 - **The shared agent-core block says a branch is brought up to date before

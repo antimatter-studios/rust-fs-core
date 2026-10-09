@@ -282,6 +282,18 @@ runs it against the calling repository:
   python3 with PyYAML, and git. A repository with no `Cargo.toml` (a Go one)
   has no cargo to find core through, so its CI checks out rust-fs-core
   beside it or sets `FS_CORE_ROOT`.
+- **Documentation-only pull requests skip the heavy jobs.** A `changes` job
+  pipes the pull request's paths to `scripts/code-changed.sh` (run in place
+  from the rust-fs-core sibling), which prints `true` unless every path is
+  documentation (`*.md`, `LICENSE*`, `.claude/**`), and exposes it as
+  `outputs.code`; on a push or a tag it is always `true`. A heavy job whose
+  only condition is `if: needs.changes.outputs.code == 'true'` (and which
+  needs `changes`) may sit in `ci-ok`'s needs: the gate accepts it as long as
+  `ci-ok` needs `changes` and reads `needs.changes.outputs.code`, so `ci-ok`
+  can accept that job's skip when, and only when, `code` is `false`. Any
+  other job-level condition is still refused. Lint, unit and semver stay
+  unconditional: they are cheap, and lint is what checks a documentation
+  change.
 
 - `scripts/core.sh guest-rust-toolchain`, run inside a driver's test VM,
   installs the toolchain the caller's `rust-toolchain.toml` pins into
