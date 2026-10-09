@@ -16,7 +16,7 @@ with every repository in this family**. Do not edit it here: change the
 canonical copy and propagate it, or `chore lint` will fail. Everything after
 the END marker is specific to this repository.
 
-<!-- BEGIN SHARED BLOCK: agent-core v3 sha256:0e5edb02c69c1ffd4af6cbfbef216ef273bbc44ebca7fe072495819b2e4ab691 -->
+<!-- BEGIN SHARED BLOCK: agent-core v4 sha256:97af32e2d3b8e7361481395b2bb43d3e2a3d553d570401ddf0ab5476c6a2bc5e -->
 ## Claiming work
 
 Several agents work these repositories at the same time. Before you start on
@@ -157,6 +157,10 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
 - **No AI attribution and no co-author trailers**, in commits or in pull
   request descriptions.
 - `main` takes **squash merges only**.
+- **Bring a branch up to date before every push.** `git fetch origin`, and
+  if `main` has moved past the branch, rebase onto `origin/main` first.
+  `main` takes only up-to-date branches, so a run on a stale branch can pass
+  and still not merge: the next run is paid for twice, for nothing.
 
 ## Project rules
 
@@ -165,7 +169,7 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
   copying it is not.
 - **Each of these is a standalone project.** Never mention a consuming
   application in the README, the source, or CLI help.
-<!-- END SHARED BLOCK: agent-core v3 -->
+<!-- END SHARED BLOCK: agent-core v4 -->
 
 ## Skills specific to this repository
 

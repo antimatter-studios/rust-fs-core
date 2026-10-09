@@ -11,6 +11,12 @@ reaches all of them.
 
 ### Changed
 
+- **The shared agent-core block says a branch is brought up to date before
+  every push (v4).** `git fetch origin`, and rebase onto `origin/main` when
+  `main` has moved past the branch. `main` takes only up-to-date branches,
+  so a run on a stale branch can pass and still not merge, and the next run
+  is paid for twice. Every repository carrying the block moves to v4 with
+  its rust-fs-core pin, past v3, which is not yet released.
 - **The shared agent-core block says red and green happen in one pull
   request, on one branch (v3).** The failing test is pushed alone and CI shows
   it red; the fix is pushed to the same branch until the same pull request is
