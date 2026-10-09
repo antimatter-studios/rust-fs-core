@@ -22,6 +22,8 @@
 #   CI_GATE_AGGREGATE    the aggregate job     (ci-ok)
 #   CI_GATE_NON_GATING   space-separated jobs that carry `if:` or
 #                        `continue-on-error:` and are deliberately advisory
+#   CI_GATE_CHANGES      the job whose `code` output path-gated jobs hang on
+#                        (changes); see "PATH-GATED JOBS" below
 #
 # WHY THIS IS A SCRIPT AND NOT A TEST. It parses a YAML file and compares
 # strings; it exercises nothing a crate ships. As a `cargo test` it also
@@ -58,14 +60,18 @@ GUARD="${CI_GATE_GUARD:-.github-guard}"
 # deliberately advisory. Space separated. An exemption for a job that does not
 # exist is an exemption waiting to silently cover a future job of that name.
 NON_GATING="${CI_GATE_NON_GATING:-}"
+# The job that says whether a change needs the full pipeline (#path-gated jobs
+# below); a job gated on its `code` output may be skipped.
+CHANGES="${CI_GATE_CHANGES:-changes}"
 
 cd "$ROOT" || exit 1
 command -v python3 >/dev/null || { echo "ci-gate: python3 is required" >&2; exit 2; }
 command -v git >/dev/null || { echo "ci-gate: git is required to read $GUARD" >&2; exit 2; }
 
-python3 - "$WORKFLOW" "$AGGREGATE" "$GUARD" "$NON_GATING" <<'PY'
+python3 - "$WORKFLOW" "$AGGREGATE" "$GUARD" "$NON_GATING" "$CHANGES" <<'PY'
 import sys, os, re, subprocess
 wf, agg, guard, non_gating = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].split()
+changes = sys.argv[5]
 fails = []
 
 try:
@@ -167,11 +173,39 @@ else:
                 f"`continue-on-error:`. It runs unconditionally and its failure is a real "
                 f"failure, so exempting it takes a working gate off a working job.")
 
+    # PATH-GATED JOBS: a job whose only condition is the changes job's code
+    # output (`needs.<changes>.outputs.code == 'true'`, written by
+    # scripts/code-changed.sh) is skipped when a pull request changes only
+    # documentation. It may sit in the aggregate's needs, because the
+    # aggregate needs the changes job too and reads that output, so its skip
+    # can be accepted exactly when the changes job said so and no other time.
+    def path_gate(jb):
+        c = str(jb.get("if", "")).strip()
+        c = c[3:-2].strip() if c.startswith("${{") and c.endswith("}}") else c
+        jn = jb.get("needs") or []
+        jn = [jn] if isinstance(jn, str) else jn
+        return (re.fullmatch(r"needs\." + re.escape(changes) +
+                             r"\.outputs\.code\s*==\s*'true'", c) is not None
+                and changes in jn and "continue-on-error" not in jb)
+
+    gated = [n for n, jb in jobs.items() if n != agg and path_gate(jb or {})]
+    if gated:
+        if changes not in needs:
+            fails.append(
+                f"`{agg}` does not need `{changes}`, which {gated} are gated on, so it "
+                f"cannot tell a skip the changes job asked for from any other skip.")
+        if not re.search(r"\bneeds(\." + re.escape(changes) + r"|\[\s*['\"]" +
+                         re.escape(changes) + r"['\"]\s*\])\.outputs\.code\b", text):
+            fails.append(
+                f"`{agg}` needs path-gated jobs {gated} but no step of it reads "
+                f"`needs.{changes}.outputs.code`, so it cannot accept their skip only when "
+                f"the change was documentation alone.")
+
     for name, jb in jobs.items():
         if name == agg:
             continue
         jb = jb or {}
-        conditional = ("if" in jb) or ("continue-on-error" in jb)
+        conditional = (("if" in jb) or ("continue-on-error" in jb)) and name not in gated
         declared = name in non_gating
         in_needs = name in needs
         if not conditional and not declared and not in_needs:
