@@ -20,7 +20,8 @@ reaches all of them.
   there. The man pages, completions, CAVEATS and licences are the same as on
   every other leg, and the zip is checked as a tarball is. `attach` expects
   one asset per leg that ran, and attests and attaches everything in
-  `dist/`.
+  `dist/`. `doctor` looks each name up as `<name>.exe` on Windows, the way a
+  shell there finds it, where it reported every installed name missing.
 
 ## [0.3.8] — 2026-10-09
 

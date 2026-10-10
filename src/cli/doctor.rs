@@ -98,7 +98,7 @@ pub fn diagnose_path(family: &Family, path: &OsStr) -> Vec<Finding> {
 fn diagnose_one(family: &Family, name: &str, dirs: &[PathBuf]) -> Finding {
     let found: Vec<PathBuf> = dirs
         .iter()
-        .map(|dir| dir.join(name))
+        .map(|dir| dir.join(program_file(name)))
         .filter(|candidate| is_executable(candidate))
         .collect();
     let Some(winner) = found.first().cloned() else {
@@ -287,6 +287,17 @@ fn spawn_version(program: &Path) -> Option<std::process::Child> {
             }
             Err(_) => return None,
         }
+    }
+}
+
+/// The file a program called `name` is in a PATH directory: `name` itself,
+/// or on Windows `name.exe`, which is how a shell there finds it (PATHEXT),
+/// and how a Windows release ships each dotted name.
+fn program_file(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
     }
 }
 
