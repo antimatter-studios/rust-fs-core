@@ -523,6 +523,49 @@ fn a_windows_build_is_a_zip_of_copies_not_symlinks() {
     all_ok(results);
 }
 
+/// Python on Windows ends every line it prints with CRLF. What the script
+/// reads back from it -- the crate, the repository, each name -- must not
+/// keep the CR: on a real windows-latest runner it looked for
+/// `rust-fs-erofs\r.exe` and found nothing (rust-fs-erofs#199). Reproduced
+/// here with a `python3` first on PATH that writes CRLF as Windows' does.
+#[test]
+fn a_python_that_ends_lines_with_crlf_packages_the_same_zip() {
+    let caller = Caller::new("windows-crlf");
+    let exe = format!("{REPO}.exe");
+    caller.build("target/release", &exe, &Stub::default());
+    let real = Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .unwrap();
+    let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+    assert!(!real.is_empty(), "python3 is needed to run package-cli.sh");
+    caller.write(
+        "crlf-bin/python3",
+        &format!("#!/usr/bin/env bash\nset -o pipefail\n\"{real}\" \"$@\" | sed 's/$/\\r/'\n"),
+    );
+    fs::set_permissions(
+        caller.root.join("crlf-bin/python3"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let path = format!(
+        "{}:{}",
+        caller.root.join("crlf-bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let run = caller.package(&["9.9.9", "windows-x86_64"], "", &[("PATH", path)]);
+    let zip = run.tarball();
+    assert_eq!(
+        zip.file_name().unwrap().to_string_lossy(),
+        "am-fs-example-9.9.9-windows-x86_64.zip"
+    );
+    assert!(
+        zip_members(&zip).contains(&"bin/fs.example.exe".to_string()),
+        "{:?}",
+        zip_members(&zip)
+    );
+}
+
 /// The Windows mode refuses what every leg refuses, and leaves no zip --
 /// not even a previous run's -- and a Windows build is looked for as
 /// `<repo>.exe`, which is what cargo writes there.
