@@ -51,6 +51,18 @@ const INPUTS: &[&str] = &["core-ref", "toolchain"];
 /// The platforms every repository ships, one native runner each.
 const LABELS: &[&str] = &["darwin-arm64", "linux-x86_64"];
 
+/// The input a caller sets to ship Windows too. Off unless asked for: a
+/// repository whose tools have never been built for Windows must not find
+/// its next release failing on a leg it did not ask for (#232).
+const OPT_IN: &str = "windows";
+
+/// The Windows legs, label and native runner, packaged only when a caller
+/// opts in.
+const WINDOWS: &[(&str, &str)] = &[
+    ("windows-x86_64", "windows-latest"),
+    ("windows-arm64", "windows-11-arm"),
+];
+
 fn load(yaml: &str) -> Yaml<'static> {
     let mut docs = Yaml::load_from_str(yaml).expect("the workflow parses as YAML");
     assert_eq!(docs.len(), 1, "one YAML document");
@@ -137,19 +149,57 @@ fn needs(job: &Yaml) -> Vec<String> {
     }
 }
 
-/// The `label` of every `strategy.matrix.include` entry.
-fn labels(job: &Yaml) -> BTreeSet<String> {
-    job.as_mapping_get("strategy")
-        .and_then(|s| s.as_mapping_get("matrix"))
-        .and_then(|m| m.as_mapping_get("include"))
-        .and_then(Yaml::as_sequence)
+/// `(label, runner)` of every entry in a sequence of matrix entries.
+fn legs(entries: &Yaml) -> BTreeSet<(String, String)> {
+    entries
+        .as_sequence()
         .map(|s| {
             s.iter()
-                .filter_map(|e| e.as_mapping_get("label").and_then(Yaml::as_str))
-                .map(str::to_owned)
+                .filter_map(|e| {
+                    let label = e.as_mapping_get("label").and_then(Yaml::as_str)?;
+                    let runner = e.as_mapping_get("runner").and_then(Yaml::as_str)?;
+                    Some((label.to_owned(), runner.to_owned()))
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+type Legs = BTreeSet<(String, String)>;
+
+/// The legs `strategy.matrix.include` runs, `(label, runner)`, for a caller
+/// that leaves the opt-in off and for one that sets it. A static list runs
+/// the same legs for both. The only other shape read is the one the
+/// workflow uses,
+///
+/// ```text
+/// ${{ fromJSON(inputs.windows && '<legs when on>' || '<legs when off>') }}
+/// ```
+///
+/// with each list in JSON, which is YAML's flow style; anything else is
+/// read as no legs at all, which no caller can release with.
+fn labels(job: &Yaml) -> (Legs, Legs) {
+    let Some(include) = job
+        .as_mapping_get("strategy")
+        .and_then(|s| s.as_mapping_get("matrix"))
+        .and_then(|m| m.as_mapping_get("include"))
+    else {
+        return Default::default();
+    };
+    if include.as_sequence().is_some() {
+        let both = legs(include);
+        return (both.clone(), both);
+    }
+    let expr = include.as_str().unwrap_or("").trim();
+    let on_prefix = format!("${{{{ fromJSON(inputs.{OPT_IN} && '");
+    let parsed = expr
+        .strip_prefix(on_prefix.as_str())
+        .and_then(|rest| rest.strip_suffix("') }}"))
+        .and_then(|rest| rest.split_once("' || '"));
+    let Some((on, off)) = parsed else {
+        return Default::default();
+    };
+    (legs(&load(off)), legs(&load(on)))
 }
 
 /// Everything wrong with `yaml` as the family's release-tarball workflow;
@@ -180,6 +230,17 @@ fn gaps(yaml: &str) -> Vec<String> {
         if required != Some(true) {
             gaps.push(format!("input {input} is not declared required"));
         }
+    }
+    let opt_in = inputs.and_then(|i| i.as_mapping_get(OPT_IN));
+    let off_by_default = opt_in.is_some_and(|i| {
+        i.as_mapping_get("type").and_then(Yaml::as_str) == Some("boolean")
+            && i.as_mapping_get("default").and_then(Yaml::as_bool) == Some(false)
+            && i.as_mapping_get("required").and_then(Yaml::as_bool) != Some(true)
+    });
+    if !off_by_default {
+        gaps.push(format!(
+            "input {OPT_IN} is not an optional boolean that defaults to false"
+        ));
     }
 
     for grant in write_grants(doc.as_mapping_get("permissions")) {
@@ -278,10 +339,28 @@ fn gaps(yaml: &str) -> Vec<String> {
     }
 
     let want: BTreeSet<String> = LABELS.iter().map(|l| (*l).to_owned()).collect();
-    let have = labels(pack_job);
+    let (off, on) = labels(pack_job);
+    let have: BTreeSet<String> = off.iter().map(|(l, _)| l.clone()).collect();
     if have != want {
         gaps.push(format!(
             "job {pack} packages for {have:?}, not every platform the family ships {want:?}"
+        ));
+    }
+    // With the opt-in set: the same legs, plus each Windows one on its own
+    // native runner, and nothing else.
+    let mut want_on: BTreeSet<(String, String)> = off
+        .iter()
+        .filter(|(l, _)| want.contains(l))
+        .cloned()
+        .collect();
+    want_on.extend(
+        WINDOWS
+            .iter()
+            .map(|(l, r)| ((*l).to_owned(), (*r).to_owned())),
+    );
+    if on != want_on {
+        gaps.push(format!(
+            "job {pack} packages for {on:?} when {OPT_IN} is set, not {want_on:?}"
         ));
     }
     let pack_steps = steps(pack_job);
@@ -324,32 +403,44 @@ fn gaps(yaml: &str) -> Vec<String> {
             "job {attach} attests before collecting the legs' tarballs"
         ));
     }
-    let count = format!("-ne {}", LABELS.len());
-    if !attach_steps[..at]
-        .iter()
-        .any(|s| commands(s).iter().any(|c| c.contains(&count)))
-    {
+    // One asset per leg that ran: the count follows the opt-in, so a
+    // release can never carry the Windows assets without the others, nor
+    // the others with a Windows leg missing.
+    let count = format!(
+        "${{{{ inputs.{OPT_IN} && {} || {} }}}}",
+        LABELS.len() + WINDOWS.len(),
+        LABELS.len()
+    );
+    if !attach_steps[..at].iter().any(|s| {
+        s.as_mapping_get("env")
+            .and_then(|e| e.as_mapping_get("EXPECTED"))
+            .and_then(Yaml::as_str)
+            == Some(count.as_str())
+            && commands(s).iter().any(|c| c.contains("-ne \"$EXPECTED\""))
+    }) {
         gaps.push(format!(
-            "job {attach} does not refuse a set of tarballs other than one per platform ({count})"
+            "job {attach} does not refuse a set of assets other than one per leg (EXPECTED: {count})"
         ));
     }
+    // dist/ holds the legs' assets and nothing else, a .tar.gz or a .zip
+    // each: attesting and uploading all of it attests and uploads them all.
     let subject = attach_steps[at]
         .as_mapping_get("with")
         .and_then(|w| w.as_mapping_get("subject-path"))
         .and_then(Yaml::as_str)
         .unwrap_or("");
-    if !subject.ends_with(".tar.gz") {
+    if subject != "dist/*" {
         gaps.push(format!(
-            "job {attach} attests {subject:?}, not the tarballs"
+            "job {attach} attests {subject:?}, not every asset in dist/*"
         ));
     }
     if !attach_steps[at + 1..].iter().any(|s| {
         commands(s)
             .iter()
-            .any(|c| c.starts_with("gh release upload") && c.contains(".tar.gz"))
+            .any(|c| c.starts_with("gh release upload") && c.contains(" dist/* "))
     }) {
         gaps.push(format!(
-            "job {attach} does not attach the attested tarballs to the GitHub release"
+            "job {attach} does not attach every attested asset in dist/* to the GitHub release"
         ));
     }
     let granted = write_grants(attach_job.as_mapping_get("permissions"));
@@ -376,23 +467,62 @@ fn the_release_cli_workflow_packages_attests_and_attaches_from_one_place() {
 #[test]
 fn the_reader_discriminates() {
     let sha = "0123456789abcdef0123456789abcdef01234567";
-    let good = format!(
-        "on:\n  workflow_call:\n    inputs:\n      core-ref:\n        required: true\n        type: string\n\
-         \x20     toolchain:\n        required: true\n        type: string\n\
-         permissions: {{}}\n\
-         jobs:\n  package:\n    permissions:\n      contents: read\n\
-         \x20   strategy:\n      matrix:\n        include:\n          - label: darwin-arm64\n          - label: linux-x86_64\n\
-         \x20   steps:\n      - uses: actions/checkout@{sha} # v5\n\
-         \x20     - env:\n          T: ${{{{ inputs.toolchain }}}}\n        run: echo \"$T\"\n\
-         \x20     - run: cargo build --release --locked --features cli --bin x\n\
-         \x20     - run: bash ../rust-fs-core/scripts/package-cli.sh 1 l\n\
-         \x20     - uses: actions/upload-artifact@{sha} # v4\n\
-         \x20 attach:\n    needs: package\n    permissions:\n      id-token: write\n      attestations: write\n      contents: write\n\
-         \x20   steps:\n      - uses: actions/download-artifact@{sha} # v4\n\
-         \x20     - run: |\n          if [ \"${{#a[@]}}\" -ne 2 ]; then exit 1; fi\n\
-         \x20     - uses: {ATTEST}{sha} # v4.2.2\n        with:\n          subject-path: dist/*.tar.gz\n\
-         \x20     - run: gh release upload \"$GITHUB_REF_NAME\" dist/*.tar.gz --clobber\n"
-    );
+    // The legs, as the workflow writes them: JSON, one list for a caller
+    // that leaves the opt-in off and one for a caller that sets it.
+    let unix = r#"{"runner":"macos-latest","label":"darwin-arm64"},{"runner":"ubuntu-latest","label":"linux-x86_64"}"#;
+    let win = r#"{"runner":"windows-latest","label":"windows-x86_64"},{"runner":"windows-11-arm","label":"windows-arm64"}"#;
+    let off = format!("[{unix}]");
+    let on = format!("[{unix},{win}]");
+    let good = r#"on:
+  workflow_call:
+    inputs:
+      core-ref:
+        required: true
+        type: string
+      toolchain:
+        required: true
+        type: string
+      windows:
+        required: false
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  package:
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include: ${{ fromJSON(inputs.windows && '@ON@' || '@OFF@') }}
+    steps:
+      - uses: actions/checkout@SHA # v5
+      - env:
+          T: ${{ inputs.toolchain }}
+        run: echo "$T"
+      - run: cargo build --release --locked --features cli --bin x
+      - run: bash ../rust-fs-core/scripts/package-cli.sh 1 l
+      - uses: actions/upload-artifact@SHA # v4
+  attach:
+    needs: package
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    steps:
+      - uses: actions/download-artifact@SHA # v4
+      - env:
+          EXPECTED: ${{ inputs.windows && 4 || 2 }}
+        run: |
+          if [ "${#a[@]}" -ne "$EXPECTED" ]; then exit 1; fi
+      - uses: ATTESTSHA # v4.2.2
+        with:
+          subject-path: dist/*
+      - run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+"#
+    .replace("@ON@", &on)
+    .replace("@OFF@", &off)
+    .replace("ATTEST", ATTEST)
+    .replace("SHA", sha);
     assert_eq!(gaps(&good), Vec::<String>::new(), "{good}");
 
     let expect = |yaml: String, want: &str| {
@@ -453,7 +583,7 @@ fn the_reader_discriminates() {
     );
     // A platform dropped.
     expect(
-        good.replace("          - label: darwin-arm64\n", ""),
+        good.replace(r#"{"runner":"macos-latest","label":"darwin-arm64"},"#, ""),
         "not every platform the family ships",
     );
     // Packaged before building, or never handed on.
@@ -477,7 +607,44 @@ fn the_reader_discriminates() {
         "does not need package",
     );
     // No count of the tarballs, or the wrong one.
-    expect(good.replace("-ne 2", "-ne 1"), "one per platform (-ne 2)");
+    expect(
+        good.replace("&& 4 || 2", "&& 2 || 2"),
+        "one per leg (EXPECTED: ${{ inputs.windows && 4 || 2 }})",
+    );
+    expect(good.replace("-ne \"$EXPECTED\"", "-ne 2"), "one per leg");
+    // The opt-in missing, required, or on by default.
+    expect(
+        good.replace("      windows:\n        required: false\n        type: boolean\n        default: false\n", ""),
+        "input windows is not an optional boolean that defaults to false",
+    );
+    expect(
+        good.replace("default: false", "default: true"),
+        "input windows is not an optional boolean that defaults to false",
+    );
+    expect(
+        good.replace("required: false", "required: true"),
+        "input windows is not an optional boolean that defaults to false",
+    );
+    // A Windows leg dropped, on the wrong runner, or run for a caller that
+    // did not ask.
+    expect(
+        good.replace(
+            r#",{"runner":"windows-11-arm","label":"windows-arm64"}"#,
+            "",
+        ),
+        "when windows is set",
+    );
+    expect(
+        good.replace(
+            r#""runner":"windows-11-arm""#,
+            r#""runner":"windows-latest""#,
+        ),
+        "when windows is set",
+    );
+    expect(
+        good.replace(&format!("|| '{off}'"), &format!("|| '{on}'")),
+        "not every platform the family ships",
+    );
     // Each grant dropped in turn.
     for grant in GRANTS {
         expect(
@@ -496,17 +663,17 @@ fn the_reader_discriminates() {
     );
     // Attesting the wrong thing, or not attaching it.
     expect(
-        good.replace("subject-path: dist/*.tar.gz", "subject-path: Cargo.toml"),
-        "not the tarballs",
+        good.replace("subject-path: dist/*", "subject-path: dist/*.tar.gz"),
+        "not every asset in dist/*",
     );
     expect(
         good.replace("gh release upload", "echo gh-release-upload"),
-        "does not attach the attested tarballs",
+        "does not attach every attested asset",
     );
     // The attest step gone, or only named in a comment.
     expect(
         good.replace(
-            &format!("      - uses: {ATTEST}{sha} # v4.2.2\n        with:\n          subject-path: dist/*.tar.gz\n"),
+            &format!("      - uses: {ATTEST}{sha} # v4.2.2\n        with:\n          subject-path: dist/*\n"),
             "      # uses: actions/attest-build-provenance\n",
         ),
         "jobs use actions/attest-build-provenance@<sha>, not one",
