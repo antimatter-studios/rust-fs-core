@@ -6,7 +6,8 @@
 # only copy.
 #
 #   VERSION     the release version, without the leading `v`
-#   LABEL       the platform, e.g. darwin-arm64 or linux-x86_64
+#   LABEL       the platform, e.g. darwin-arm64 or linux-x86_64; a label
+#               starting windows- packages for Windows (below)
 #   TARGET-DIR  where cargo put the release build (default: the caller's
 #               target/release); a relative path is taken from the current
 #               directory, which is also where the tarball is written
@@ -43,7 +44,17 @@
 #   <licence files>
 #
 # where <name> is each dotted name and <repo> itself, whose page is section
-# 1. The pages and completions are written by the binary (`<repo> generate
+# 1.
+#
+# ON WINDOWS (a windows- LABEL) the archive is <crate>-<version>-<label>.zip,
+# and bin/ holds bin/<repo>.exe, the binary cargo wrote, and each dotted name
+# as a byte-identical COPY, bin/<name>.exe: a symlink needs Developer Mode or
+# an administrator there, and a zip holds no symlink anyway. The binary
+# answers as the name it was started under with .exe dropped
+# (rust-fs-core's cli::dispatch::invoked_name), so a copy is as good as a
+# link. Everything under share/ and the licences are the same as on every
+# other platform. Python's zipfile writes and reads the zip on every host,
+# because neither zip nor unzip is on a Windows runner (#232). The pages and completions are written by the binary (`<repo> generate
 # man|completions SHARE`, rust-fs-core's `cli` module), from the clap commands
 # it parses with, so they cannot describe a flag it does not take.
 #
@@ -56,7 +67,8 @@
 # THEN IT CHECKS WHAT IT BUILT, from the unpacked tarball, because a tarball
 # whose tools do not run is worse than no tarball: the failure would surface
 # as a user's bug report rather than a red release. Exactly the members
-# above; every dotted name a relative symlink to bin/<repo>; a page in its
+# above; every dotted name a relative symlink to bin/<repo> (on Windows, a
+# copy of bin/<repo>.exe); a page in its
 # declared section and three completions for every name; CAVEATS at most
 # four lines; the licences and CAVEATS the repository's own; and every name
 # answering --help, and --version as `<name> (<crate>) <version>`, which
@@ -95,14 +107,24 @@ target_dir="${3:-$CALLER/target/release}"
 
 # ---- What the caller ships, from its Cargo.toml. ---------------------------
 command -v cargo >/dev/null 2>&1 || die "cargo is needed to read $CALLER/Cargo.toml"
-command -v python3 >/dev/null 2>&1 || die "python3 is needed to read cargo's metadata"
+# python3, or `python` where that is what Python 3 is called, as on a
+# Windows runner. Each is run, not merely found: Windows answers `python3`
+# with a stub that opens the Store.
+PYTHON=""
+for candidate in python3 python; do
+    if "$candidate" -c 'import sys; sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1; then
+        PYTHON="$candidate"
+        break
+    fi
+done
+[ -n "$PYTHON" ] || die "python3 is needed to read cargo's metadata"
 [ -f "$CALLER/Cargo.toml" ] || die "no Cargo.toml in $CALLER"
 metadata="$(cargo metadata --no-deps --offline --format-version 1 \
     --manifest-path "$CALLER/Cargo.toml")" || die "cargo could not read $CALLER/Cargo.toml"
 
 # One line per fact, tab-separated, for the shell to read: `crate NAME`,
 # `repo NAME`, `caveats PATH`, `licence FILE`..., `name NAME SECTION`....
-config="$(printf '%s' "$metadata" | python3 -c '
+config="$(printf '%s' "$metadata" | "$PYTHON" -c '
 import json, os, re, sys
 
 manifest = os.path.realpath(sys.argv[1])
@@ -196,7 +218,30 @@ section_of() {
     return 1
 }
 
-tarball="$crate-$version-$label.tar.gz"
+# x is what a binary's name ends in on the platform being packaged.
+case "$label" in
+    windows-*) x=".exe"; tarball="$crate-$version-$label.zip" ;;
+    *) x=""; tarball="$crate-$version-$label.tar.gz" ;;
+esac
+
+# The zip, written, listed and unpacked by Python's zipfile on every host.
+zip_py='
+import os, sys, zipfile
+verb, archive = sys.argv[1], sys.argv[2]
+if verb == "pack":
+    root = sys.argv[3]
+    members = sorted(
+        os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/")
+        for d, _, files in os.walk(root) for f in files)
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
+        for m in members:
+            z.write(os.path.join(root, m), m)
+elif verb == "list":
+    for n in zipfile.ZipFile(archive).namelist():
+        print(n)
+elif verb == "unpack":
+    zipfile.ZipFile(archive).extractall(sys.argv[3])
+'
 
 # ON ANY FAILURE, NO TARBALL: not a partial one, and not one a previous run
 # left under the same name, which a caller could otherwise take for this
@@ -215,16 +260,16 @@ work="$(mktemp -d)" || die "could not make a working directory"
 [ -d "$work" ] || die "could not make a working directory"
 
 # ---- Stage the prefix. ------------------------------------------------------
-built="$target_dir/$repo"
+built="$target_dir/$repo$x"
 [ -f "$built" ] && [ -x "$built" ] \
-    || die "no built $repo at $built (cargo build --release --locked --features cli --bin $repo)"
+    || die "no built $repo$x at $built (cargo build --release --locked --features cli --bin $repo)"
 
 stage="$work/stage"
 mkdir -p "$stage/bin" "$stage/share/$repo"
-cp "$built" "$stage/bin/$repo"
-chmod 755 "$stage/bin/$repo"
+cp "$built" "$stage/bin/$repo$x"
+chmod 755 "$stage/bin/$repo$x"
 
-listed="$("$stage/bin/$repo" generate names)" || die "$repo generate names failed"
+listed="$("$stage/bin/$repo$x" generate names)" || die "$repo generate names failed"
 [ -n "$listed" ] || die "$repo generate names listed no tool names"
 # Split on whitespace, never globbed: the names are the binary's output.
 set -f
@@ -240,11 +285,15 @@ want_names="$(printf '%s\n' "${names[@]}" | sort | tr '\n' ' ')"
 [ "$got_names" = "$want_names" ] \
     || die "$repo generate names lists [${got_names% }], but Cargo.toml's [package.metadata.package-cli] names [${want_names% }]"
 for name in "${names[@]}"; do
-    ln -s "$repo" "$stage/bin/$name"
+    if [ -n "$x" ]; then
+        cp "$stage/bin/$repo$x" "$stage/bin/$name$x"
+    else
+        ln -s "$repo" "$stage/bin/$name"
+    fi
 done
 
-"$stage/bin/$repo" generate man "$stage/share" >/dev/null || die "$repo generate man failed"
-"$stage/bin/$repo" generate completions "$stage/share" >/dev/null \
+"$stage/bin/$repo$x" generate man "$stage/share" >/dev/null || die "$repo generate man failed"
+"$stage/bin/$repo$x" generate completions "$stage/share" >/dev/null \
     || die "$repo generate completions failed"
 
 source_caveats="$CALLER/$caveats"
@@ -264,8 +313,11 @@ done
 placed() {
     local member="$1" n page section
     case "$member" in
-        "bin/$repo" | "share/$repo/CAVEATS") return 0 ;;
-        bin/*) section_of "${member#bin/}" >/dev/null; return ;;
+        "bin/$repo$x" | "share/$repo/CAVEATS") return 0 ;;
+        bin/*"$x")
+            n="${member#bin/}"
+            section_of "${n%"$x"}" >/dev/null
+            return ;;
         share/zsh/site-functions/_*) section_of "${member#share/zsh/site-functions/_}" >/dev/null; return ;;
         share/bash-completion/completions/*) section_of "${member#share/bash-completion/completions/}" >/dev/null; return ;;
         share/fish/vendor_completions.d/*.fish)
@@ -296,27 +348,43 @@ while IFS= read -r member; do
 done <<<"$staged"
 [ -z "$stray" ] || die "$repo staged files outside the install layout:$stray"
 
-# COPYFILE_DISABLE keeps macOS tar from adding ._ AppleDouble members.
-COPYFILE_DISABLE=1 tar -czf "$tarball" -C "$stage" bin share "${licences[@]}"
-
-# ---- The checks, on what was packed rather than on what was staged. --------
-# Files and links only: whether a tar lists the directories themselves
-# varies by tar.
-packed="$(tar -tzf "$tarball" | sed 's|^\./||' | grep -v '/$' | sort)"
+u="$work/unpacked"
+mkdir -p "$u"
+if [ -n "$x" ]; then
+    "$PYTHON" -c "$zip_py" pack "$tarball" "$stage" || die "could not write $tarball"
+    # ---- The checks, on what was packed rather than on what was staged. ----
+    packed="$("$PYTHON" -c "$zip_py" list "$tarball" | tr -d '\r' | grep -v '/$' | sort)"
+    "$PYTHON" -c "$zip_py" unpack "$tarball" "$u" || die "could not unpack $tarball"
+    # A zip keeps no mode a Windows user's unpacker would apply; Windows runs
+    # a .exe by its name, and this host runs it once it is marked so.
+    chmod 755 "$u/bin/"*"$x"
+else
+    # COPYFILE_DISABLE keeps macOS tar from adding ._ AppleDouble members.
+    COPYFILE_DISABLE=1 tar -czf "$tarball" -C "$stage" bin share "${licences[@]}"
+    # ---- The checks, on what was packed rather than on what was staged. ----
+    # Files and links only: whether a tar lists the directories themselves
+    # varies by tar.
+    packed="$(tar -tzf "$tarball" | sed 's|^\./||' | grep -v '/$' | sort)"
+    tar -xzf "$tarball" -C "$u"
+fi
 [ "$packed" = "$staged" ] \
     || die "$tarball holds [$(echo $packed)], expected [$(echo $staged)]"
 
-u="$work/unpacked"
-mkdir -p "$u"
-tar -xzf "$tarball" -C "$u"
-
-[ -f "$u/bin/$repo" ] && [ ! -L "$u/bin/$repo" ] || die "bin/$repo is not a regular file in $tarball"
-[ -x "$u/bin/$repo" ] || die "bin/$repo is not executable in $tarball"
-cmp -s "$u/bin/$repo" "$built" || die "bin/$repo is not the built $built"
+[ -f "$u/bin/$repo$x" ] && [ ! -L "$u/bin/$repo$x" ] \
+    || die "bin/$repo$x is not a regular file in $tarball"
+[ -x "$u/bin/$repo$x" ] || die "bin/$repo$x is not executable in $tarball"
+cmp -s "$u/bin/$repo$x" "$built" || die "bin/$repo$x is not the built $built"
 for name in "${names[@]}"; do
-    [ -L "$u/bin/$name" ] || die "bin/$name is not a symlink in $tarball"
-    target="$(readlink "$u/bin/$name")"
-    [ "$target" = "$repo" ] || die "bin/$name points at '$target', not the relative '$repo'"
+    if [ -n "$x" ]; then
+        [ -f "$u/bin/$name$x" ] && [ ! -L "$u/bin/$name$x" ] \
+            || die "bin/$name$x is not a regular file in $tarball"
+        cmp -s "$u/bin/$name$x" "$u/bin/$repo$x" \
+            || die "bin/$name$x is not a copy of bin/$repo$x"
+    else
+        [ -L "$u/bin/$name" ] || die "bin/$name is not a symlink in $tarball"
+        target="$(readlink "$u/bin/$name")"
+        [ "$target" = "$repo" ] || die "bin/$name points at '$target', not the relative '$repo'"
+    fi
 done
 cmp -s "$u/share/$repo/CAVEATS" "$source_caveats" || die "share/$repo/CAVEATS is not $caveats"
 for f in "${licences[@]}"; do
@@ -331,7 +399,7 @@ for name in "$repo" "${names[@]}"; do
                "share/fish/vendor_completions.d/$name.fish"; do
         [ -s "$u/$doc" ] || die "no $doc for $name in $tarball"
     done
-    exe="$u/bin/$name"
+    exe="$u/bin/$name$x"
     "$exe" --help >/dev/null || die "$name --help failed"
     reported="$("$exe" --version)" || die "$name --version failed"
     [ "$reported" = "$name ($crate) $version" ] \

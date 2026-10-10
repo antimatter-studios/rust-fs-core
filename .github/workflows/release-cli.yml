@@ -17,6 +17,7 @@ name: release-cli
 #     with:
 #       core-ref: vX.Y.Z
 #       toolchain: 1.95.0
+#       windows: true    # optional, off by default: see the package job
 #
 # Everything about WHAT is shipped is the caller's, in its Cargo.toml
 # (`[package.metadata.package-cli]`, read by scripts/package-cli.sh); this
@@ -55,16 +56,27 @@ on:
         description: The Rust toolchain the caller pins.
         required: true
         type: string
+      windows:
+        description: Package Windows too, on windows-x86_64 and windows-arm64 legs, as a .zip each.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   # Native builds, one runner per platform: cross-compiling needs a cross
-  # toolchain or an emulator, and GitHub provides both platforms natively.
-  # Read-only. A leg hands its tarball on as an artifact; `attach` publishes
+  # toolchain or an emulator, and GitHub provides every platform natively.
+  # Read-only. A leg hands its asset on as an artifact; `attach` publishes
   # them together once every leg has passed, so a release never carries one
-  # platform without the other.
+  # platform without the others.
+  #
+  # THE WINDOWS LEGS RUN ONLY FOR A CALLER THAT SETS `windows`. A repository
+  # whose tools have never been built for Windows would otherwise find its
+  # next release failing on a leg it never asked for (#232). The two lists
+  # are JSON, one per answer, because a matrix cannot add an entry on a
+  # condition; tests/release_cli_workflow.rs reads both.
   package:
     name: package the tools (${{ matrix.label }})
     permissions:
@@ -73,11 +85,10 @@ jobs:
       # One platform failing should not hide whether the other built.
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-latest
-            label: darwin-arm64
-          - runner: ubuntu-latest
-            label: linux-x86_64
+        include: >-
+          ${{ fromJSON(inputs.windows
+          && '[{"runner":"macos-latest","label":"darwin-arm64"},{"runner":"ubuntu-latest","label":"linux-x86_64"},{"runner":"windows-latest","label":"windows-x86_64"},{"runner":"windows-11-arm","label":"windows-arm64"}]'
+          || '[{"runner":"macos-latest","label":"darwin-arm64"},{"runner":"ubuntu-latest","label":"linux-x86_64"}]') }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -108,8 +119,12 @@ jobs:
       # pre-push guard checks the tag with, so the two cannot disagree. A tag
       # the CHANGELOG does not describe stops here, before a tarball exists.
       # One leg writes the file the attach job uses: that job checks nothing
-      # out, so the notes travel as an artifact.
+      # out, so the notes travel as an artifact. Not on a Windows leg: the
+      # guard is a bash script run by its #! line, and the unix legs have
+      # already refused the tag, so `attach`, which needs every leg, never
+      # runs for it.
       - name: the CHANGELOG describes this version
+        if: runner.os != 'Windows'
         uses: antimatter-studios/agent-skills/.github/actions/changelog-notes@ed0b96812c5908478dcd84543debf4d5f8bf87e3
         with:
           tag: ${{ github.ref_name }}
@@ -132,9 +147,10 @@ jobs:
         shell: bash
         run: cargo build --release --locked --features cli --bin "${GITHUB_REPOSITORY##*/}"
 
-      # package-cli.sh prints the tarball's name on stdout and checks the
-      # tarball it built: exactly the contracted members, every dotted name
-      # a relative symlink, and every name answering --help and --version.
+      # package-cli.sh prints the asset's name on stdout and checks the
+      # asset it built: exactly the contracted members, every dotted name
+      # a relative symlink (a copy of bin/<repo>.exe in a Windows leg's
+      # .zip), and every name answering --help and --version.
       - name: package and check the tarball
         id: pack
         shell: bash
@@ -151,7 +167,13 @@ jobs:
             echo "### $tarball"
             echo ""
             echo '```'
-            echo "sha256 $(shasum -a 256 "$tarball" | cut -d' ' -f1)"
+            # sha256sum where there is one (Linux, Git Bash on Windows),
+            # shasum on macOS, which has no sha256sum.
+            if command -v sha256sum >/dev/null 2>&1; then
+              echo "sha256 $(sha256sum "$tarball" | cut -d' ' -f1)"
+            else
+              echo "sha256 $(shasum -a 256 "$tarball" | cut -d' ' -f1)"
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -190,20 +212,25 @@ jobs:
           name: release-notes
           path: notes
 
-      - name: one tarball per platform, no more and no fewer
+      # One asset per leg that ran, and nothing else in dist/: what is
+      # attested and attached below is everything in it.
+      - name: one asset per platform, no more and no fewer
         shell: bash
+        env:
+          EXPECTED: ${{ inputs.windows && 4 || 2 }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/*.tar.gz)
-          if [ "${#assets[@]}" -ne 2 ]; then
-            echo "::error::expected 2 tarballs (one per package leg), found ${#assets[@]}: ${assets[*]}" >&2
+          assets=(dist/*.tar.gz dist/*.zip)
+          everything=(dist/*)
+          if [ "${#assets[@]}" -ne "$EXPECTED" ] || [ "${#everything[@]}" -ne "${#assets[@]}" ]; then
+            echo "::error::expected $EXPECTED assets (one per package leg) and nothing else, found ${everything[*]}" >&2
             exit 1
           fi
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/*.tar.gz
+          subject-path: dist/*
 
       - name: attach the tarballs to the GitHub release
         shell: bash
@@ -217,4 +244,4 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes/release-notes.md
           fi
-          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
