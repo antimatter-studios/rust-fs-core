@@ -966,3 +966,29 @@ fn render_is_what_finish_would_print() {
     let r = output::render("t", cli::Format::Json, Ok(Outcome::report(Json::from("v"))));
     assert_eq!(r.stdout, "\"v\"\n");
 }
+
+/// Windows finds a program by its name with `.exe` added, so a release's
+/// `fs.demo` is the file `fs.demo.exe` there: package-cli.sh ships each
+/// dotted name that way (#232). doctor has to look for it the same way, or
+/// it reports every installed name as missing.
+#[cfg(windows)]
+mod on_windows_path {
+    use super::*;
+    use fs_core::cli::doctor;
+
+    #[test]
+    fn a_name_is_found_as_its_exe() {
+        let dir = scratch("windows-exe");
+        // Any program will do: what is asserted is that it is found, not
+        // what it answers. This test binary rejects --version, so it is
+        // reported as foreign rather than ours.
+        let exe = dir.join("fs.demo.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        let path = std::env::join_paths([&dir]).unwrap();
+        let findings = doctor::diagnose_path(&FAMILY, &path);
+        let f = findings.iter().find(|f| f.name == "fs.demo").unwrap();
+        assert_ne!(f.status, doctor::Status::Missing, "{f:?}");
+        assert_eq!(f.path.as_deref(), Some(exe.as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

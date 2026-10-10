@@ -14,8 +14,11 @@
 //! callers' own CI jobs run the same script against their real binaries.
 //!
 //! UNIX ONLY, AND NOT A SKIP: a release tarball is an install prefix of
-//! relative symlinks, packaged on the darwin and linux release legs. Git
-//! Bash on Windows makes `ln -s` a copy, and no repository packages there.
+//! relative symlinks, packaged on the darwin and linux release legs. The
+//! Windows mode (a `windows-` label: a `.zip` whose dotted names are copies
+//! of `bin/<repo>.exe`, #232) is tested here too, from a stand-in named
+//! `.exe`, because the script itself is bash on every platform; the run on
+//! a real Windows runner, against a real binary, is a caller's CI job.
 
 #![cfg(unix)]
 
@@ -150,6 +153,7 @@ impl Caller {
         let script = format!(
             r##"#!/usr/bin/env bash
 me="$(basename "$0")"
+me="${{me%.exe}}"
 case "$1" in
     --help) echo "Usage: $me"; exit {help} ;;
     --version) echo "$me ({CRATE}) {version}" ;;
@@ -235,7 +239,7 @@ impl Packaged {
         fs::read_dir(&self.out)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .filter(|n| n.ends_with(".tar.gz"))
+            .filter(|n| n.ends_with(".tar.gz") || n.ends_with(".zip"))
             .collect()
     }
 
@@ -312,6 +316,52 @@ fn unpack(caller: &Caller, tarball: &Path) -> PathBuf {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", printed(&out));
+    into
+}
+
+/// The files in a `.zip`, directories dropped, in byte order. Read by
+/// Python's zipfile, the reader package-cli.sh writes them with on every
+/// platform; `unzip` is not on a Windows runner.
+fn zip_members(zip: &Path) -> Vec<String> {
+    let out = Command::new("python3")
+        .args([
+            "-c",
+            "import sys, zipfile\nfor n in zipfile.ZipFile(sys.argv[1]).namelist(): print(n)",
+        ])
+        .arg(zip)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", printed(&out));
+    let mut members: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty() && !l.ends_with('/'))
+        .map(str::to_owned)
+        .collect();
+    members.sort();
+    members
+}
+
+/// Unpacks a `.zip` as a Windows user's tool would: regular files only, no
+/// mode bits. The executable bit is set afterwards so this host can run the
+/// stand-in; Windows runs a `.exe` by its name.
+fn unzip(caller: &Caller, zip: &Path) -> PathBuf {
+    let into = caller.root.join("unzipped");
+    let _ = fs::remove_dir_all(&into);
+    fs::create_dir_all(&into).unwrap();
+    let out = Command::new("python3")
+        .args([
+            "-c",
+            "import sys, zipfile\nzipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])",
+        ])
+        .arg(zip)
+        .arg(&into)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", printed(&out));
+    for entry in fs::read_dir(into.join("bin")).unwrap() {
+        let path = entry.unwrap().path();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     into
 }
 
@@ -400,6 +450,164 @@ fn a_good_build_is_exactly_the_install_prefix() {
         fs::read(u.join("LICENSE")).unwrap(),
         fs::read(caller.root.join("LICENSE")).unwrap()
     );
+}
+
+/// A `windows-` label packages for Windows: a `.zip`, not a tarball, whose
+/// binary is `bin/<repo>.exe` and whose dotted names are byte-identical
+/// COPIES of it, `bin/<name>.exe`. A symlink needs Developer Mode or an
+/// administrator on Windows, and a zip cannot hold one anyway; the binary
+/// answers as the name it was started under, `.exe` dropped. The pages,
+/// completions, CAVEATS and licences are the same as every other leg's.
+#[test]
+fn a_windows_build_is_a_zip_of_copies_not_symlinks() {
+    let caller = Caller::new("windows");
+    let exe = format!("{REPO}.exe");
+    let built = caller.build("target/release", &exe, &Stub::default());
+    let mut results = Vec::new();
+    for label in ["windows-x86_64", "windows-arm64"] {
+        let run = caller.package(&["9.9.9", label], "", &[]);
+        if !run.output.status.success() {
+            results.push(Err(format!("{label}: {}", printed(&run.output))));
+            continue;
+        }
+        let zip = run.tarball();
+        assert_eq!(
+            zip.file_name().unwrap().to_string_lossy(),
+            format!("am-fs-example-9.9.9-{label}.zip"),
+            "the asset is <crate>-<version>-<label>.zip"
+        );
+        assert_eq!(run.tarballs().len(), 1, "a zip and no tarball beside it");
+        assert_eq!(
+            zip_members(&zip),
+            sorted(&[
+                "LICENSE",
+                "bin/fs.example.exe",
+                "bin/mkfs.example.exe",
+                "bin/rust-fs-example.exe",
+                "share/bash-completion/completions/fs.example",
+                "share/bash-completion/completions/mkfs.example",
+                "share/bash-completion/completions/rust-fs-example",
+                "share/fish/vendor_completions.d/fs.example.fish",
+                "share/fish/vendor_completions.d/mkfs.example.fish",
+                "share/fish/vendor_completions.d/rust-fs-example.fish",
+                "share/man/man1/fs.example-ls.1",
+                "share/man/man1/fs.example.1",
+                "share/man/man1/rust-fs-example-doctor.1",
+                "share/man/man1/rust-fs-example.1",
+                "share/man/man8/mkfs.example.8",
+                "share/rust-fs-example/CAVEATS",
+                "share/zsh/site-functions/_fs.example",
+                "share/zsh/site-functions/_mkfs.example",
+                "share/zsh/site-functions/_rust-fs-example",
+            ]),
+            "{label}"
+        );
+        let u = unzip(&caller, &zip);
+        let binary = fs::read(built.join(&exe)).unwrap();
+        for name in [REPO, "mkfs.example", "fs.example"] {
+            let path = u.join("bin").join(format!("{name}.exe"));
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                binary,
+                "{label}: bin/{name}.exe is a copy of the built {exe}"
+            );
+            let answer = Command::new(&path).arg("--version").output().unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&answer.stdout).trim(),
+                format!("{name} ({CRATE}) 9.9.9"),
+                "{label}: bin/{name}.exe answers as {name}"
+            );
+        }
+        results.push(Ok(()));
+    }
+    all_ok(results);
+}
+
+/// Python on Windows ends every line it prints with CRLF. What the script
+/// reads back from it -- the crate, the repository, each name -- must not
+/// keep the CR: on a real windows-latest runner it looked for
+/// `rust-fs-erofs\r.exe` and found nothing (rust-fs-erofs#199). Reproduced
+/// here with a `python3` first on PATH that writes CRLF as Windows' does.
+#[test]
+fn a_python_that_ends_lines_with_crlf_packages_the_same_zip() {
+    let caller = Caller::new("windows-crlf");
+    let exe = format!("{REPO}.exe");
+    caller.build("target/release", &exe, &Stub::default());
+    let real = Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .unwrap();
+    let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+    assert!(!real.is_empty(), "python3 is needed to run package-cli.sh");
+    caller.write(
+        "crlf-bin/python3",
+        &format!("#!/usr/bin/env bash\nset -o pipefail\n\"{real}\" \"$@\" | sed 's/$/\\r/'\n"),
+    );
+    fs::set_permissions(
+        caller.root.join("crlf-bin/python3"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let path = format!(
+        "{}:{}",
+        caller.root.join("crlf-bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let run = caller.package(&["9.9.9", "windows-x86_64"], "", &[("PATH", path)]);
+    let zip = run.tarball();
+    assert_eq!(
+        zip.file_name().unwrap().to_string_lossy(),
+        "am-fs-example-9.9.9-windows-x86_64.zip"
+    );
+    assert!(
+        zip_members(&zip).contains(&"bin/fs.example.exe".to_string()),
+        "{:?}",
+        zip_members(&zip)
+    );
+}
+
+/// The Windows mode refuses what every leg refuses, and leaves no zip --
+/// not even a previous run's -- and a Windows build is looked for as
+/// `<repo>.exe`, which is what cargo writes there.
+#[test]
+fn a_wrong_windows_build_is_refused_and_leaves_no_zip() {
+    let caller = Caller::new("windows-refused");
+    let stale = "am-fs-example-9.9.9-windows-x86_64.zip";
+    let exe = format!("{REPO}.exe");
+    let mut results = Vec::new();
+    let cases: Vec<(&str, Stub, &str)> = vec![
+        (
+            "a binary that forgets a name",
+            Stub { names: "mkfs.example", ..Stub::default() },
+            "generate names lists [mkfs.example]",
+        ),
+        (
+            "a binary reporting a version other than the tag's",
+            Stub { version: "1.0.0", ..Stub::default() },
+            "--version says 'rust-fs-example (am-fs-example) 1.0.0', expected 'rust-fs-example (am-fs-example) 9.9.9'",
+        ),
+    ];
+    for (i, (case, stub, why)) in cases.into_iter().enumerate() {
+        let dir = format!("build-{i}");
+        caller.build(&dir, &exe, &stub);
+        let target = caller.root.join(&dir);
+        let run = caller.package(
+            &["9.9.9", "windows-x86_64", target.to_str().unwrap()],
+            stale,
+            &[],
+        );
+        results.push(run.refused(case, why));
+    }
+    // Built without the `.exe`, as a unix leg's binary is named.
+    caller.build("unix-named", REPO, &Stub::default());
+    let target = caller.root.join("unix-named");
+    let run = caller.package(
+        &["9.9.9", "windows-x86_64", target.to_str().unwrap()],
+        stale,
+        &[],
+    );
+    results.push(run.refused("a binary without .exe", "no built rust-fs-example.exe at"));
+    all_ok(results);
 }
 
 /// The names, sections, licences and CAVEATS path are each repository's own,

@@ -9,6 +9,20 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Added
+
+- **`release-cli.yml` packages Windows for a caller that asks.** An optional
+  `windows` input, off by default, adds `windows-x86_64` and `windows-arm64`
+  legs, so no repository's release changes until it sets it. A `windows-`
+  label makes `scripts/package-cli.sh` write `<crate>-<version>-<label>.zip`,
+  with `bin/<repo>.exe` and each dotted name a byte-identical copy,
+  `bin/<name>.exe`, since a symlink needs Developer Mode or an administrator
+  there. The man pages, completions, CAVEATS and licences are the same as on
+  every other leg, and the zip is checked as a tarball is. `attach` expects
+  one asset per leg that ran, and attests and attaches everything in
+  `dist/`. `doctor` looks each name up as `<name>.exe` on Windows, the way a
+  shell there finds it, where it reported every installed name missing.
+
 ## [0.3.8] — 2026-10-09
 
 ### Added
