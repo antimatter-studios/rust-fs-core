@@ -124,6 +124,8 @@ metadata="$(cargo metadata --no-deps --offline --format-version 1 \
 
 # One line per fact, tab-separated, for the shell to read: `crate NAME`,
 # `repo NAME`, `caveats PATH`, `licence FILE`..., `name NAME SECTION`....
+# Without the CR Python on Windows ends each line with: `read` would keep it,
+# and the binary would be looked for as `<repo>\r.exe`.
 config="$(printf '%s' "$metadata" | "$PYTHON" -c '
 import json, os, re, sys
 
@@ -188,7 +190,7 @@ for f in licenses:
     print("licence\t" + f)
 for name in sorted(names):
     print("name\t%s\t%d" % (name, names[name]))
-' "$CALLER/Cargo.toml")" || exit 1
+' "$CALLER/Cargo.toml" | tr -d '\r')" || exit 1
 
 crate=""
 repo=""
