@@ -7,6 +7,9 @@ never does.
 Every other driver in this family depends on this crate, so a change here
 reaches all of them.
 
+Changes not yet released are fragments in [`changelog.d/`](changelog.d/), one per
+pull request; a release gathers them into a section here.
+
 ## [Unreleased]
 
 ## [0.3.10] — 2026-10-11
