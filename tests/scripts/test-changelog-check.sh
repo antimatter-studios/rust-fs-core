@@ -72,6 +72,9 @@ expect pass "an empty Unreleased heading left in CHANGELOG.md"
 printf '# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- **Written straight in.**\n\n## [0.1.0] — 2026-01-01\n\n- **A start.**\n' >"$work/r/CHANGELOG.md"
 expect fail "an entry written into CHANGELOG.md's Unreleased section"
 
+printf '# Changelog\n\n## [Unreleased]\n\n[Unreleased]: https://example.com/r/compare/v0.1.0...HEAD\n' >"$work/r/CHANGELOG.md"
+expect pass "an empty Unreleased heading with only link definitions after it"
+
 rm -rf "$work/r/changelog.d"
 expect fail "no changelog.d/ at all"
 

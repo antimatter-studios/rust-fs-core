@@ -15,7 +15,8 @@
 #     one `- ` entry, and nothing before the first heading or above level 3
 #     (the release supplies the `## [version]` heading);
 #   - CHANGELOG.md has no unreleased entries of its own: an `## [Unreleased]`
-#     section, if it still has one, is empty.
+#     section, if it keeps one, is empty up to the next heading or to the
+#     link definitions at the end.
 #
 # Usage: changelog-check.sh            (the calling repository)
 #   FS_CORE_CALLER names the repository when run in place from rust-fs-core.
@@ -70,7 +71,7 @@ done
 if [ -f "$ROOT/CHANGELOG.md" ]; then
     unreleased="$(awk '
         /^##[[:space:]]+\[?[Uu]nreleased\]?/ { inside = 1; next }
-        /^##[[:space:]]/ { inside = 0 }
+        /^##[[:space:]]/ || /^\[[^]]+\]:[[:space:]]/ { inside = 0 }
         inside && /[^[:space:]]/ { n++ }
         END { print n + 0 }
     ' "$ROOT/CHANGELOG.md")"

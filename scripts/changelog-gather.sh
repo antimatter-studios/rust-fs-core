@@ -13,9 +13,15 @@
 # fragments first use them. Fragments are read in file-name order, so the
 # release's entries come out the same on every machine.
 #
-# Where the section goes: in place of an `## [Unreleased]` heading if
-# CHANGELOG.md still has one (it must be empty; changelog-check.sh says so),
-# otherwise above the newest release, otherwise at the end.
+# Where the section goes: under an `## [Unreleased]` heading, which stays,
+# empty (changelog-check.sh keeps it so); with none, above the newest
+# release; with no release either, at the end.
+#
+# Links: a CHANGELOG.md that keeps Keep a Changelog's link definitions at the
+# end gets them kept up: `[Unreleased]: URL/compare/vPREV...HEAD` moves to
+# compare from the new version, and `[VERSION]: URL/compare/vPREV...vVERSION`
+# is added beneath it. Without an Unreleased link, the new version's link
+# goes above the newest one. A file with no compare links gets none.
 #
 # It refuses, changing nothing, when a fragment is malformed, when there are
 # no fragments (a release describes itself), or when CHANGELOG.md already has
@@ -95,19 +101,44 @@ section="$(awk -v version="$version" -v date="$date" '
     function emit(h) { printf "\n### %s\n\n%s", h, body[h] }
 ' "${fragments[@]}")"
 
-# Write it in: in place of an empty Unreleased heading, above the newest
-# release, or at the end.
+# Write it in: under the (empty) Unreleased heading, above the newest
+# release, or at the end; then keep the compare links up.
 tmp="$(mktemp "${TMPDIR:-/tmp}/changelog-gather.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 SECTION="$section" awk '
     BEGIN { section = ENVIRON["SECTION"] }
-    !done && /^##[[:space:]]+\[?[Uu]nreleased\]?/ { print section; print ""; done = 1; skipping = 1; next }
-    skipping && /^##[[:space:]]/ { skipping = 0 }
+    !done && /^##[[:space:]]+\[?[Uu]nreleased\]?/ {
+        print; print ""; print section; print ""; done = 1; skipping = 1; next
+    }
+    skipping && (/^##[[:space:]]/ || /^\[[^]]+\]:[[:space:]]/) { skipping = 0 }
     skipping { next }
-    !done && /^##[[:space:]]/ { print section; print ""; done = 1 }
+    !done && (/^##[[:space:]]/ || /^\[[^]]+\]:[[:space:]]/) { print section; print ""; done = 1 }
     { print }
     END { if (!done) { print ""; print section } }
-' "$LOG" >"$tmp"
+' "$LOG" | awk -v ver="$version" '
+    # [Unreleased]: URL/compare/PREV...HEAD
+    !done && /^\[[Uu]nreleased\]:[[:space:]]+[^[:space:]]+\/compare\/[^[:space:]]+\.\.\.HEAD[[:space:]]*$/ {
+        label = $0; sub(/\].*$/, "]", label)
+        url = $0; sub(/^[^]]*\]:[[:space:]]+/, "", url); sub(/[[:space:]]+$/, "", url)
+        base = url; sub(/\/compare\/.*$/, "", base)
+        prev = url; sub(/^.*\/compare\//, "", prev); sub(/\.\.\.HEAD$/, "", prev)
+        pre = (prev ~ /^v/) ? "v" : ""
+        print label ": " base "/compare/" pre ver "...HEAD"
+        print "[" ver "]: " base "/compare/" prev "..." pre ver
+        done = 1; next
+    }
+    # No Unreleased link: above the newest version link, comparing from it.
+    !done && !unrel && /^\[[0-9][^]]*\]:[[:space:]]+[^[:space:]]+\/compare\/[^[:space:]]+\.\.\.[^[:space:]]+[[:space:]]*$/ {
+        url = $0; sub(/^[^]]*\]:[[:space:]]+/, "", url); sub(/[[:space:]]+$/, "", url)
+        base = url; sub(/\/compare\/.*$/, "", base)
+        prev = url; sub(/^.*\.\.\./, "", prev)
+        pre = (prev ~ /^v/) ? "v" : ""
+        print "[" ver "]: " base "/compare/" prev "..." pre ver
+        done = 1
+    }
+    /^\[[Uu]nreleased\]:/ { unrel = 1 }
+    { print }
+' >"$tmp"
 cat "$tmp" >"$LOG"
 
 # The fragments move: tracked ones leave the index, so the release commit

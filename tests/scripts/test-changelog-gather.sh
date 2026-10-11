@@ -74,8 +74,12 @@ for unreleased in yes no; do
     fresh "$unreleased"
     out="$(gather 0.2.0 2026-10-11)"
     status=$?
-    if [ "$status" -eq 0 ] && [ "$(cat "$R/CHANGELOG.md")" = "$expected" ]; then
-        ok "Unreleased heading $unreleased: the section is written above the last release, headings in order"
+    want="$expected"
+    if [ "$unreleased" = yes ]; then
+        want="$(printf '%s\n' "$expected" | awk 'NR == 4 { print; print "## [Unreleased]"; print ""; next } { print }')"
+    fi
+    if [ "$status" -eq 0 ] && [ "$(cat "$R/CHANGELOG.md")" = "$want" ]; then
+        ok "Unreleased heading $unreleased: the section is written above the last release, headings in order, the Unreleased heading kept"
     else
         fail "Unreleased heading $unreleased: status $status ($out); CHANGELOG.md is:
 $(cat "$R/CHANGELOG.md")"
@@ -101,6 +105,53 @@ if grep -qE "^## \[0\.2\.0\] — $(date -u +%F)$" "$R/CHANGELOG.md"; then
     ok "a leading v is dropped, and the date defaults to today"
 else
     fail "v0.2.0 with no date: $(grep '^## ' "$R/CHANGELOG.md" | head -2 | tr '\n' '|')"
+fi
+
+# Keep a Changelog's link definitions are kept up.
+fresh yes
+printf '\n[Unreleased]: https://example.com/r/compare/v0.1.0...HEAD\n[0.1.0]: https://example.com/r/compare/v0.0.9...v0.1.0\n' >>"$R/CHANGELOG.md"
+gather 0.2.0 2026-10-11 >/dev/null
+got="$(grep -E '^\[' "$R/CHANGELOG.md")"
+want_links='[Unreleased]: https://example.com/r/compare/v0.2.0...HEAD
+[0.2.0]: https://example.com/r/compare/v0.1.0...v0.2.0
+[0.1.0]: https://example.com/r/compare/v0.0.9...v0.1.0'
+if [ "$got" = "$want_links" ]; then
+    ok "the Unreleased link compares from the new version, which gets its own link"
+else
+    fail "links after gathering with an Unreleased link:
+$got"
+fi
+fresh no
+printf '\n[0.1.0]: https://example.com/r/compare/v0.0.9...v0.1.0\n' >>"$R/CHANGELOG.md"
+gather 0.2.0 2026-10-11 >/dev/null
+got="$(grep -E '^\[' "$R/CHANGELOG.md")"
+want_links='[0.2.0]: https://example.com/r/compare/v0.1.0...v0.2.0
+[0.1.0]: https://example.com/r/compare/v0.0.9...v0.1.0'
+if [ "$got" = "$want_links" ]; then
+    ok "with no Unreleased link, the new version's link goes above the newest"
+else
+    fail "links after gathering without an Unreleased link:
+$got"
+fi
+fresh yes
+gather 0.2.0 2026-10-11 >/dev/null
+if ! grep -qE '^\[' "$R/CHANGELOG.md"; then
+    ok "a changelog with no links gets none"
+else
+    fail "a changelog with no links gained: $(grep -E '^\[' "$R/CHANGELOG.md")"
+fi
+# An Unreleased heading with only link definitions after it (no release yet).
+rm -rf "$R" && mkdir -p "$R/changelog.d"
+printf '# Changelog\n\n## [Unreleased]\n\n[Unreleased]: https://example.com/r/compare/v0.0.0...HEAD\n' >"$R/CHANGELOG.md"
+printf '### Added\n\n- **The first thing.**\n' >"$R/changelog.d/feat-first.md"
+g init -q -b main && g add -A && g commit -q -m base
+gather 0.1.0 2026-10-11 >/dev/null
+if grep -q '^\[Unreleased\]: https://example.com/r/compare/v0.1.0...HEAD$' "$R/CHANGELOG.md" &&
+    grep -q '^- \*\*The first thing.\*\*$' "$R/CHANGELOG.md" &&
+    [ "$(grep -c '^## ' "$R/CHANGELOG.md")" -eq 2 ]; then
+    ok "a first release under an Unreleased heading that only links follow"
+else
+    fail "first release: $(cat "$R/CHANGELOG.md")"
 fi
 
 # Refusals change nothing.
