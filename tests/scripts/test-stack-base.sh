@@ -45,7 +45,7 @@ g checkout -q mine
 # expect WANT DESCRIPTION SELF PRS: run on the current branch, WANT on stdout.
 expect() {
     local want="$1" what="$2" self="$3" prs="$4" got
-    got="$(STACK_BASE_REMOTE= STACK_BASE_MAIN=main STACK_BASE_SELF="$self" \
+    got="$(STACK_BASE_REMOTE='' STACK_BASE_MAIN=main STACK_BASE_SELF="$self" \
         STACK_BASE_PRS="$prs" bash "$SCRIPT" 2>&1)"
     if [ "$got" = "$want" ]; then
         ok "$what: $want"
@@ -78,7 +78,7 @@ expect pr-10 "a branch already built on a pull request stays on it" "" "10 pr-10
 11 pr-11"
 g checkout -q mine
 
-got="$(STACK_BASE_REMOTE= STACK_BASE_MAIN=main STACK_BASE_SELF= \
+got="$(STACK_BASE_REMOTE='' STACK_BASE_MAIN=main STACK_BASE_SELF='' \
     STACK_BASE_PRS="14 no-such-branch" bash "$SCRIPT" 2>&1)"
 status=$?
 if [ "$status" -ne 0 ] && [ "$got" != main ]; then
@@ -88,7 +88,7 @@ else
 fi
 
 g checkout -q --detach mine
-got="$(STACK_BASE_REMOTE= STACK_BASE_SELF= STACK_BASE_PRS= bash "$SCRIPT" 2>&1)"
+got="$(STACK_BASE_REMOTE='' STACK_BASE_SELF='' STACK_BASE_PRS='' bash "$SCRIPT" 2>&1)"
 status=$?
 if [ "$status" -ne 0 ]; then
     ok "a detached HEAD is refused"
