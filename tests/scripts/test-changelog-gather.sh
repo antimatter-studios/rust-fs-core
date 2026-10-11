@@ -154,6 +154,26 @@ else
     fail "first release: $(cat "$R/CHANGELOG.md")"
 fi
 
+# The version heading copies the newest existing one's style.
+style_case() {
+    local what="$1" existing="$2" want="$3"
+    rm -rf "$R" && mkdir -p "$R/changelog.d"
+    printf '# Changelog\n\n%s\n\n### Added\n\n- **A start.**\n' "$existing" >"$R/CHANGELOG.md"
+    printf '### Fixed\n\n- **A fix.**\n' >"$R/changelog.d/fix-a.md"
+    g init -q -b main && g add -A && g commit -q -m base
+    gather 0.2.0 2026-10-11 >/dev/null
+    got="$(grep -m1 '^## ' "$R/CHANGELOG.md")"
+    if [ "$got" = "$want" ]; then
+        ok "$what: $want"
+    else
+        fail "$what: wanted '$want', got '$got'"
+    fi
+}
+style_case "a v-prefixed changelog" '## v0.1.0 — 2026-01-01' '## v0.2.0 — 2026-10-11'
+style_case "a bare-version changelog" '## 0.1.0 — 2026-01-01' '## 0.2.0 — 2026-10-11'
+style_case "a hyphen separator" '## [0.1.0] - 2026-01-01' '## [0.2.0] - 2026-10-11'
+style_case "a v-prefixed heading with no date" '## v0.1.0' '## v0.2.0 — 2026-10-11'
+
 # Refusals change nothing.
 refused() {
     local what="$1"; shift

@@ -13,6 +13,11 @@
 # fragments first use them. Fragments are read in file-name order, so the
 # release's entries come out the same on every machine.
 #
+# The version heading copies the newest one CHANGELOG.md already has --
+# `## [1.2.3] — DATE`, `## v1.2.3 — DATE` or `## 1.2.3 — DATE`, with the
+# separator it uses -- so a repository keeps one style; a changelog with no
+# release yet gets `## [VERSION] — DATE`.
+#
 # Where the section goes: under an `## [Unreleased]` heading, which stays,
 # empty (changelog-check.sh keeps it so); with none, above the newest
 # release; with no release either, at the end.
@@ -70,8 +75,32 @@ if awk -v v="$version" '
     die "CHANGELOG.md already has a section for $version"
 fi
 
+# The heading's style: the newest version heading's.
+style="$(awk '
+    /^##[[:space:]]/ {
+        s = $0; sub(/^##[[:space:]]+/, "", s)
+        if (s ~ /^\[?[Uu]nreleased/) next
+        if (s ~ /^\[v?[0-9]/) kind = "bracket"
+        else if (s ~ /^v[0-9]/) kind = "v"
+        else if (s ~ /^[0-9]+\.[0-9]+/) kind = "bare"
+        else next
+        sep = (s ~ / - [0-9]/) ? "hyphen" : "emdash"
+        print kind, sep; exit
+    }
+' "$LOG")"
+case "${style%% *}" in
+    v) open_v="v"; close_v="" ;;
+    bare) open_v=""; close_v="" ;;
+    *) open_v="["; close_v="]" ;;
+esac
+case "${style##* }" in
+    hyphen) sep="-" ;;
+    *) sep="—" ;;
+esac
+heading="## ${open_v}${version}${close_v} ${sep} ${date}"
+
 # The section: every fragment's body under each heading, headings in order.
-section="$(awk -v version="$version" -v date="$date" '
+section="$(awk -v vhead="$heading" '
     BEGIN {
         split("Added Changed Deprecated Removed Fixed Security", canon, " ")
         for (i = 1; i <= 6; i++) rank[canon[i]] = i
@@ -94,7 +123,7 @@ section="$(awk -v version="$version" -v date="$date" '
         body[heading] = body[heading] $0 "\n"
     }
     END {
-        printf "## [%s] — %s\n", version, date
+        printf "%s\n", vhead
         for (i = 1; i <= 6; i++) if (canon[i] in body) emit(canon[i])
         for (i = 1; i <= n; i++) if (!(order[i] in rank)) emit(order[i])
     }
