@@ -9,6 +9,8 @@ reaches all of them.
 
 ## [Unreleased]
 
+## [0.3.10] — 2026-10-11
+
 ### Added
 
 - **`branch-reap.yml` deletes a merged pull request's branch when it
@@ -890,7 +892,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.9...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.10...HEAD
+[0.3.10]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.6...v0.3.7
