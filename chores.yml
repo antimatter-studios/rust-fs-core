@@ -165,6 +165,7 @@ tasks:
     # ever differ, this is the copy that is wrong.
     cmds:
       - scripts/agents-core-check.sh
+      - scripts/changelog-check.sh
       - cargo fmt --check
       - cargo clippy --locked --all-targets -- -D warnings
       - cargo clippy --locked --all-targets --features cli -- -D warnings
