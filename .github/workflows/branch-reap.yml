@@ -24,7 +24,7 @@ name: branch-reap
 # default or protected, a merge-queue or wip/ branch, the base or head of an
 # open pull request, or no longer at the commit that merged. The delete is
 # a push with --force-with-lease, so a commit pushed while it ran is never
-# deleted with it. What it keeps, diskjockey's am-branch-reap sweeps later
+# deleted with it. What it keeps, a family-wide sweep deletes later
 # under the same rules. Only a merged pull request from the calling
 # repository itself is considered: a fork's branch is not the caller's to
 # delete, and a closed pull request's branch may still be wanted.
@@ -51,14 +51,19 @@ jobs:
       contents: write
       pull-requests: read
     steps:
+      # A job holding a write token runs only actions fixed by commit, and
+      # leaves no token on disk (tests/scripts/test-write-jobs-pinned.sh).
       - name: rust-fs-core's branch-reap.sh, at the pinned tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: antimatter-studios/rust-fs-core
           ref: ${{ inputs.core-ref }}
           path: rust-fs-core
+          persist-credentials: false
           sparse-checkout: scripts/branch-reap.sh
           sparse-checkout-cone-mode: false
+      # git asks gh for the token at the push, and gh reads it from the
+      # step's env: it is never written to disk.
       - name: git pushes with this run's token
         env:
           GH_TOKEN: ${{ github.token }}

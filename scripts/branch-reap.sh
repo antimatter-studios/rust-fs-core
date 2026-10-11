@@ -15,8 +15,8 @@
 #     still has the branch at that commit, so a commit pushed while this
 #     ran is never deleted with it.
 # Anything else is kept, and says why. Keeping is never a failure: the
-# branch is left for a person or for a later sweep (diskjockey's
-# am-branch-reap), which applies the same rules.
+# branch is left for a person or for a later family-wide sweep,
+# which applies the same rules.
 #
 # WHY NOT GITHUB'S "AUTOMATICALLY DELETE HEAD BRANCHES". It deletes the
 # branch the moment its pull request merges, whatever is still based on it,
