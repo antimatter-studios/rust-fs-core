@@ -9,6 +9,18 @@ reaches all of them.
 
 ## [Unreleased]
 
+### Added
+
+- **`branch-reap.yml` deletes a merged pull request's branch when it
+  merges, unless something still needs it.** A repository calls it on
+  `pull_request: closed`. `scripts/branch-reap.sh` keeps the branch when it
+  is the default or protected, a merge-queue or `wip/` branch, the base or
+  head of an open pull request, or no longer at the commit that merged. The
+  delete is a `--force-with-lease` push, so a commit pushed meanwhile is
+  never deleted with it. Only a merged pull request from the calling
+  repository is considered. GitHub's own delete-on-merge stays off: it
+  deletes a branch a stacked pull request is still based on.
+
 ## [0.3.9] — 2026-10-11
 
 ### Added
