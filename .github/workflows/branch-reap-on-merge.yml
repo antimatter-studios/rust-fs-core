@@ -1,0 +1,28 @@
+name: branch-reap-on-merge
+
+# A merged pull request's branch is deleted when it merges, unless something
+# still needs it: the default, protected, merge-queue and wip/ branches, a
+# branch an open pull request is based on or headed by, and one pushed to
+# after its merge are all kept. The rules and the delete are rust-fs-core's
+# (branch-reap.yml, scripts/branch-reap.sh). GitHub's own delete-on-merge
+# stays off: it deletes a branch a stacked pull request is still based on.
+#
+# This repository's own caller, named apart from branch-reap.yml, the
+# reusable workflow every repository calls; it is pinned to a released
+# commit like theirs, so a change to the rules here reaches this
+# repository's branches only once it is released.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  reap:
+    permissions:
+      contents: write
+      pull-requests: read
+    uses: antimatter-studios/rust-fs-core/.github/workflows/branch-reap.yml@17e99aad9186bf14dbc78987ebc341a4810c19e0 # v0.3.10
+    with:
+      core-ref: v0.3.10
