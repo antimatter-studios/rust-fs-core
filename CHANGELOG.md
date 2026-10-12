@@ -12,6 +12,36 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.3.11] — 2026-10-12
+
+### Added
+
+- **`scripts/stack-base.sh` says which branch a pull request is based on.**
+  It prints `main`, or the branch of the newest older open pull request the
+  current branch would conflict with or is already built on. Overlap is a
+  conflict found by a trial merge (`git merge-tree`), not a shared file, so
+  pull requests that change one file in different places are not serialised.
+  Every agent asking about the same branches gets the same answer.
+- **Changelog fragments: `scripts/changelog-check.sh` and
+  `scripts/changelog-gather.sh`.** A pull request adds `changelog.d/<branch>.md`
+  instead of editing `CHANGELOG.md`, so open pull requests never conflict
+  there. `changelog-check.sh` (lint and CI) refuses a malformed fragment and
+  an unreleased entry written into `CHANGELOG.md`. `changelog-gather.sh
+  VERSION` is the release step: it writes every fragment into a dated
+  section, Keep a Changelog's headings first, and deletes the fragments in
+  the same commit. rust-fs-core keeps its own changelog this way from now on.
+
+### Changed
+
+- **The shared agent-core block is v6.** It adds three rules: a pull request
+  that would conflict with an older open one is stacked on it, as
+  `stack-base.sh` decides; changelog entries are fragments; and each finding
+  becomes its own issue before a tracking issue closes. Every repository
+  carrying the block moves to v6 with its rust-fs-core pin, and adopts
+  `changelog.d/` with `changelog-check.sh` in its lint.
+- **`family-check.sh` refuses a copy of the three new scripts**, as it does
+  the other family scripts: they run in place from rust-fs-core.
+
 ## [0.3.10] — 2026-10-11
 
 ### Added
@@ -895,7 +925,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.10...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.11...HEAD
+[0.3.11]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.7...v0.3.8
