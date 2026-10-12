@@ -858,17 +858,22 @@ fn semver_caller(tag: &str, codes: &[&str]) -> (Caller, String) {
             .arg(bin.join(script))
             .status();
     }
-    // Joined the platform's way: on Windows a `:` would split the drive
-    // letter off every entry, and bash would find the real curl instead.
-    let mut dirs = vec![bin];
-    dirs.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    let path = std::env::join_paths(dirs)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    (caller, path)
+    // The fakes go first on PATH from inside bash, through BASH_ENV, which
+    // bash reads after it starts. Git for Windows' bash.exe puts its own
+    // directories, curl among them, ahead of any PATH it is handed, so a
+    // PATH set from here lost to the real curl there.
+    let bin = bin.display().to_string().replace('\\', "/");
+    let env = caller.root.join("fakes-first.sh");
+    fs::write(
+        &env,
+        format!(
+            "bin='{bin}'\n\
+             command -v cygpath >/dev/null 2>&1 && bin=\"$(cygpath -u \"$bin\")\"\n\
+             PATH=\"$bin:$PATH\"\n"
+        ),
+    )
+    .unwrap();
+    (caller, env.display().to_string().replace('\\', "/"))
 }
 
 /// A crates.io refusal is not "unpublished". A transient
@@ -878,10 +883,10 @@ fn semver_caller(tag: &str, codes: &[&str]) -> (Caller, String) {
 /// every time, the check now says what crates.io answered.
 #[test]
 fn a_crates_io_refusal_is_reported_rather_than_taken_for_no_release() {
-    let (caller, path) = semver_caller("semver-403", &["403"]);
+    let (caller, bash_env) = semver_caller("semver-403", &["403"]);
     let out = caller.core(
         &["semver-check"],
-        &[("PATH", &path), ("SEMVER_CHECK_RETRY_DELAY", "0")],
+        &[("BASH_ENV", &bash_env), ("SEMVER_CHECK_RETRY_DELAY", "0")],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{}", printed(&out));
@@ -897,10 +902,10 @@ fn a_crates_io_refusal_is_reported_rather_than_taken_for_no_release() {
 /// the crate's own release.
 #[test]
 fn a_transient_crates_io_refusal_is_asked_again() {
-    let (caller, path) = semver_caller("semver-retry", &["403", "503", "200"]);
+    let (caller, bash_env) = semver_caller("semver-retry", &["403", "503", "200"]);
     let out = caller.core(
         &["semver-check"],
-        &[("PATH", &path), ("SEMVER_CHECK_RETRY_DELAY", "0")],
+        &[("BASH_ENV", &bash_env), ("SEMVER_CHECK_RETRY_DELAY", "0")],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", printed(&out));
