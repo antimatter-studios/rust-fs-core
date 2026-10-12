@@ -810,3 +810,109 @@ fn the_tier_runner_refuses_the_table_form_without_a_table() {
         printed(&out)
     );
 }
+
+/// A caller whose crate was renamed, with `curl` and `cargo` on PATH
+/// replaced by scripts in `bin/`: `curl` answers each status query with the
+/// next code in `codes` (the last one repeating) and fails every download,
+/// and `cargo semver-checks` reports its version and that it ran.
+fn semver_caller(tag: &str, codes: &[&str]) -> (Caller, String) {
+    let caller = Caller::new(tag);
+    fs::write(
+        caller.root.join("Cargo.toml"),
+        "[package]\nname = \"am-example\"\nversion = \"0.1.0\"\n\n\
+         [package.metadata.semver]\nformer-name = \"am-old\"\n",
+    )
+    .unwrap();
+    let bin = caller.root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(caller.root.join("codes"), codes.join("\n") + "\n").unwrap();
+    // The codes file is found from the fake's own path rather than through
+    // an absolute path baked in, which on Windows is a drive path bash
+    // would have to translate.
+    fs::write(
+        bin.join("curl"),
+        "#!/usr/bin/env bash\n\
+         codes=\"$(dirname \"$0\")/../codes\"\n\
+         case \" $* \" in\n\
+         *\" -w \"*)\n\
+           code=\"$(head -n1 \"$codes\")\"\n\
+           [ \"$(wc -l <\"$codes\")\" -gt 1 ] && sed -i.bak 1d \"$codes\"\n\
+           printf '%s' \"$code\" ;;\n\
+         *) exit 22 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    fs::write(
+        bin.join("cargo"),
+        "#!/usr/bin/env bash\n\
+         case \"$*\" in\n\
+         \"semver-checks --version\") echo 'cargo-semver-checks 0.50.0' ;;\n\
+         \"semver-checks check-release\"*) echo 'ran check-release' ;;\n\
+         *) exit 1 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    for script in ["curl", "cargo"] {
+        let _ = Command::new("chmod")
+            .arg("+x")
+            .arg(bin.join(script))
+            .status();
+    }
+    // The fakes go first on PATH from inside bash, through BASH_ENV, which
+    // bash reads after it starts. Git for Windows' bash.exe puts its own
+    // directories, curl among them, ahead of any PATH it is handed, so a
+    // PATH set from here lost to the real curl there.
+    let bin = bin.display().to_string().replace('\\', "/");
+    let env = caller.root.join("fakes-first.sh");
+    fs::write(
+        &env,
+        format!(
+            "bin='{bin}'\n\
+             command -v cygpath >/dev/null 2>&1 && bin=\"$(cygpath -u \"$bin\")\"\n\
+             PATH=\"$bin:$PATH\"\n"
+        ),
+    )
+    .unwrap();
+    (caller, env.display().to_string().replace('\\', "/"))
+}
+
+/// A crates.io refusal is not "unpublished". A transient
+/// 403 used to be taken for a crate with no release, which sent a renamed
+/// crate down the former-name path, whose own request then failed the same
+/// way and died in a JSON parse: rust-fs-ntfs's main run 38228688384. Refused
+/// every time, the check now says what crates.io answered.
+#[test]
+fn a_crates_io_refusal_is_reported_rather_than_taken_for_no_release() {
+    let (caller, bash_env) = semver_caller("semver-403", &["403"]);
+    let out = caller.core(
+        &["semver-check"],
+        &[("BASH_ENV", &bash_env), ("SEMVER_CHECK_RETRY_DELAY", "0")],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        stderr.contains("crates.io answered 403 for am-example"),
+        "{}",
+        printed(&out)
+    );
+    assert!(!stderr.contains("Traceback"), "{}", printed(&out));
+}
+
+/// A refusal that passes is asked again, and the check then runs against
+/// the crate's own release.
+#[test]
+fn a_transient_crates_io_refusal_is_asked_again() {
+    let (caller, bash_env) = semver_caller("semver-retry", &["403", "503", "200"]);
+    let out = caller.core(
+        &["semver-check"],
+        &[("BASH_ENV", &bash_env), ("SEMVER_CHECK_RETRY_DELAY", "0")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        stdout.contains("against the newest crates.io release"),
+        "{}",
+        printed(&out)
+    );
+    assert!(stdout.contains("ran check-release"), "{}", printed(&out));
+}

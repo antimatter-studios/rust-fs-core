@@ -81,13 +81,37 @@ if [ "${SEMVER_CHECK_DRY_RUN:-0}" = 1 ]; then
 fi
 
 UA="rust-fs-core semver-check (github.com/antimatter-studios/rust-fs-core)"
-published() { [ "$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "https://crates.io/api/v1/crates/$1")" = 200 ]; }
+RETRY_DELAY="${SEMVER_CHECK_RETRY_DELAY:-5}"
+# crates.io's answer for CRATE: 200 (it has a release) or 404 (it has none),
+# asked again while it answers anything else.
+#
+# A REFUSAL IS NOT AN ABSENCE. Any answer but 200 used to mean "unpublished",
+# so a transient 403 or 5xx sent a published, renamed crate down the
+# former-name path below, whose own request then failed the same way and
+# died in a JSON parse -- a red main run that said nothing about crates.io
+# (rust-fs-ntfs run 38228688384). Refused every time, the check says so.
+crate_status() {
+    local code=000 attempt
+    for attempt in 1 2 3 4 5; do
+        code="$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "https://crates.io/api/v1/crates/$1" || true)"
+        case "$code" in
+            200 | 404) echo "$code"; return 0 ;;
+        esac
+        sleep $((attempt * RETRY_DELAY))
+    done
+    echo "semver-check: crates.io answered $code for $1, five times; it is refusing or failing, not saying the crate has no release" >&2
+    return 1
+}
 baseline_from=""
-if [ -n "$former" ] && ! published "$crate"; then
-    newest="$(curl -fsS -A "$UA" "https://crates.io/api/v1/crates/$former" \
+status=200
+if [ -n "$former" ]; then
+    status="$(crate_status "$crate")" || exit 1
+fi
+if [ -n "$former" ] && [ "$status" = 404 ]; then
+    newest="$(curl -fsS --retry 4 --retry-all-errors -A "$UA" "https://crates.io/api/v1/crates/$former" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_stable_version"])')"
     base="$(mktemp -d)"
-    curl -fsSL -A "$UA" "https://static.crates.io/crates/$former/$former-$newest.crate" \
+    curl -fsSL --retry 4 --retry-all-errors -A "$UA" "https://static.crates.io/crates/$former/$former-$newest.crate" \
         | tar xz -C "$base"
     root="$base/$former-$newest"
     # Only the [package] name: the [lib] name, which is what the API is
