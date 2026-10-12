@@ -826,19 +826,20 @@ fn semver_caller(tag: &str, codes: &[&str]) -> (Caller, String) {
     let bin = caller.root.join("bin");
     fs::create_dir_all(&bin).unwrap();
     fs::write(caller.root.join("codes"), codes.join("\n") + "\n").unwrap();
-    let codes_file = caller.root.join("codes").display().to_string();
+    // The codes file is found from the fake's own path rather than through
+    // an absolute path baked in, which on Windows is a drive path bash
+    // would have to translate.
     fs::write(
         bin.join("curl"),
-        format!(
-            "#!/usr/bin/env bash\n\
-             case \" $* \" in\n\
-             *\" -w \"*)\n\
-               code=\"$(head -n1 '{codes_file}')\"\n\
-               [ \"$(wc -l <'{codes_file}')\" -gt 1 ] && sed -i.bak 1d '{codes_file}'\n\
-               printf '%s' \"$code\" ;;\n\
-             *) exit 22 ;;\n\
-             esac\n"
-        ),
+        "#!/usr/bin/env bash\n\
+         codes=\"$(dirname \"$0\")/../codes\"\n\
+         case \" $* \" in\n\
+         *\" -w \"*)\n\
+           code=\"$(head -n1 \"$codes\")\"\n\
+           [ \"$(wc -l <\"$codes\")\" -gt 1 ] && sed -i.bak 1d \"$codes\"\n\
+           printf '%s' \"$code\" ;;\n\
+         *) exit 22 ;;\n\
+         esac\n",
     )
     .unwrap();
     fs::write(
@@ -857,11 +858,16 @@ fn semver_caller(tag: &str, codes: &[&str]) -> (Caller, String) {
             .arg(bin.join(script))
             .status();
     }
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    // Joined the platform's way: on Windows a `:` would split the drive
+    // letter off every entry, and bash would find the real curl instead.
+    let mut dirs = vec![bin];
+    dirs.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(dirs)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     (caller, path)
 }
 
