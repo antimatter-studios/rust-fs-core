@@ -7,7 +7,7 @@
 use super::family::Family;
 
 /// The version clap prints after a command's name: `(<crate>) <version>`,
-/// so `fs.<fs> --version` reads `fs.<fs> (am-fs-<fs>) 1.2.3`.
+/// so `fs.<fs> --version` reads `fs.<fs> (rust-fs-<fs>) 1.2.3`.
 pub fn clap_version(family: &Family) -> &'static str {
     // clap takes a 'static str; one per process, a few dozen bytes.
     Box::leak(format!("({}) {}", family.crate_name, family.version).into_boxed_str())
