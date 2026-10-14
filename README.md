@@ -1,4 +1,4 @@
-# fs-core
+# rust-fs-core
 
 Published on crates.io as **`rust-fs-core`** (the repository's name) and
 imported as `fs_core`. Up to 0.2.24 it was published as `am-fs-core`.
@@ -57,18 +57,18 @@ re-exports the one this module is built against.
 
 ## Intended consumers
 
-Filesystem drivers — `fs-ext4`, `fs-ntfs`, future `am-fs-exfat`,
-`am-fs-hfsplus`, `am-fs-apfs`, `am-fs-fat32`, `am-fs-fat16`,
-`am-fs-squashfs`, `am-fs-iso9660`. Each only writes format-specific
-code; the block plumbing comes from here.
+Filesystem drivers — `rust-fs-ext4`, `rust-fs-ntfs`, `rust-fs-xfs`,
+`rust-fs-btrfs`, `rust-fs-erofs`, `rust-fs-squashfs`, `rust-fs-bcachefs`;
+future exFAT, HFS+, APFS, FAT and ISO 9660 drivers. Each only writes
+format-specific code; the block plumbing comes from here.
 
-Disk-image readers — `am-img-qcow2`, `am-img-vhd`, `am-img-vhdx`,
-`am-img-vmdk`; future `am-img-vdi`, `am-img-raw`. Same pattern:
+Disk-image readers — `rust-img-qcow2`, `rust-img-vhd`, `rust-img-vhdx`,
+`rust-img-vmdk`; future VDI and raw readers. Same pattern:
 format-specific container logic, shared block I/O.
 
-Block-layer utilities — `am-partitions` (GPT/MBR probe), future
-`am-block-luks`, `am-block-lvm`, `am-block-mdraid`. Same trait,
-opposite direction: consumes a `BlockRead` to expose slices of it.
+Block-layer utilities — `rust-disk-partitions` (GPT/MBR probe); future
+LUKS, LVM and MD-RAID layers. Same trait, opposite direction: consumes a
+`BlockRead` to expose slices of it.
 
 ## Layout
 

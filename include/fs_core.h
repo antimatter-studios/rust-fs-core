@@ -1,7 +1,7 @@
 /*
  * fs-core C ABI — block-device handle and error conventions shared
- * across rust-fs-core, am-img-qcow2, am-partitions, am-fs-ext4, and
- * future am-fs-* / am-img-* sibling crates.
+ * across rust-fs-core and the sibling crates built on it: the
+ * rust-fs-* drivers, the rust-img-* readers and rust-disk-partitions.
  *
  * Link with libfs_core.a (or its sister-crate equivalent that
  * re-exports the same symbols) and include this header.

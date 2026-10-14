@@ -63,10 +63,10 @@
 //!
 //! static FAMILY: Family = Family {
 //!     repo: "rust-fs-demo",
-//!     crate_name: "am-fs-demo",
+//!     crate_name: "rust-fs-demo",
 //!     version: "0.1.0",
 //!     about: "Demo tools",
-//!     install_hints: &["`cargo install am-fs-demo --features cli`"],
+//!     install_hints: &["`cargo install rust-fs-demo --features cli`"],
 //!     tools: &[Tool {
 //!         name: "fs.demo",
 //!         verb: "fs",
