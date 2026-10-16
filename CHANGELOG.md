@@ -12,6 +12,32 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.3.12] — 2026-10-16
+
+### Changed
+
+- **Every repository lands its pull requests as one stack (agent-core v7).**
+  A new pull request goes on the top of the stack, whether or not it touches
+  the same files as the layers below, with its conflicts resolved locally
+  before it is pushed; each layer is one squashed commit; the stack is queued
+  with `gh stack merge`; and a red layer is fixed in place, with the layers
+  above replayed by `git rebase --update-refs`. The block's digest changes,
+  so each repository moves to this release's pin together with its
+  `AGENTS.md`.
+- **`scripts/stack-base.sh` prints the top of the repository's stack.** It
+  reads GitHub's stack from the open pull requests: a pull request not yet in
+  the stack is based on its top, one already in it on the nearest open layer
+  below, and `main` when nothing is open. Open pull requests in more than one
+  stack are refused, naming them. It no longer decides by trial merge.
+
+### Fixed
+
+- **semver-check tells a crates.io refusal from a crate with no release.**
+  Any answer but 200 meant "unpublished", so a transient 403 sent a renamed
+  crate down the former-name path to die in a JSON parse. A 404 alone now
+  means no release; anything else is asked again, and reported if it keeps
+  coming.
+
 ## [0.3.11] — 2026-10-12
 
 ### Added
@@ -925,7 +951,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.11...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.12...HEAD
+[0.3.12]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.11...v0.3.12
 [0.3.11]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.8...v0.3.9
