@@ -12,6 +12,21 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.3.13] — 2026-10-16
+
+### Added
+
+- **Features-page rows are fragments, like changelog entries.** A pull
+  request adds a `features.d/` fragment of `docs/features.md` rows, keyed by
+  their first cell, with `remove:` and `rename:` lines, instead of editing the
+  page, so pull requests that change different rows no longer conflict in the
+  merge queue. `scripts/features-check.sh` (for `chore lint`) refuses a
+  fragment that does not apply and an `Unreleased` row on the page;
+  `scripts/features-gather.sh VERSION` (for the release commit) applies every
+  fragment, turns `Unreleased` into the version and deletes the fragments, or
+  changes nothing. Both are family scripts, and `docs/features-fragments.md`
+  holds the adoption steps.
+
 ## [0.3.12] — 2026-10-16
 
 ### Changed
@@ -951,7 +966,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.12...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.13...HEAD
+[0.3.13]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.12...v0.3.13
 [0.3.12]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.11...v0.3.12
 [0.3.11]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.9...v0.3.10
