@@ -418,6 +418,17 @@ runs it against the calling repository:
   moves every fragment into a dated section and deletes it.
   `tests/scripts/test-changelog-check.sh` and
   `tests/scripts/test-changelog-gather.sh` drive them.
+- `scripts/features-check.sh` (an adopting caller's `chore lint`) and
+  `scripts/features-gather.sh VERSION` (its release commit) do the same for
+  `docs/features.md`: a pull request adds a `features.d/` fragment of rows,
+  keyed by their first cell, instead of editing the page, so two pull
+  requests changing different rows never conflict in the merge queue. The
+  check refuses a fragment that does not apply and an `Unreleased` row on the
+  page; the gather applies every fragment, turns `Unreleased` into the
+  version and deletes them, or changes nothing. `docs/features-fragments.md`
+  is the contract and the adoption steps;
+  `tests/scripts/test-features-check.sh` and
+  `tests/scripts/test-features-gather.sh` drive them.
 - `scripts/core.sh family-check` fails the caller if it commits a copy of
   any of these, if its `scripts/core.sh` differs from this repository's or
   is not executable (in the mode git records, where git tracks it), or if
