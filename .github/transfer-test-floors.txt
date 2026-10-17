@@ -19,4 +19,5 @@ transfer_import 22
 # #264 adds eight portable recursive-import cases and a Unix symlink case.
 transfer_import_tree 8
 # #291 adds eight portable durable manifest storage cases.
-transfer_manifest 8
+# #295 adds ten portable resume-evidence cases; CI measures execution.
+transfer_manifest 18
