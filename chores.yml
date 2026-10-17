@@ -40,14 +40,16 @@ chore_min_version: 0.6.0
 # catches a tier that silently stops running a material part of the suite.
 # The floor rose to 344 with the fifteen transfer tests of #250 (fourteen on
 # Windows, which runs no symlink case), added to a suite already above 330.
+# The floor rises to 348 for #251's four additional verification cases
+# (three integration tests and one post-sync corruption test on every OS).
 # Release uses the same selection and measured the same 557 lines / 31,295
 # bytes after its cold LTO build. Coverage measured 575 lines / 32,607 bytes
 # and executed the same 374 tests as the post-change debug run:
 #
 #   tier       measured locally       budget           floor
-#   debug      557 / 31,250 bytes     1000 / 60,000     344
-#   release    751 lines (CI, cold)   1000 / 60,000     344
-#   coverage   575 / 32,607 bytes      800 / 60,000     344
+#   debug      557 / 31,250 bytes     1000 / 60,000     348
+#   release    751 lines (CI, cold)   1000 / 60,000     348
+#   coverage   575 / 32,607 bytes      800 / 60,000     348
 #   semver     (see below)              40 / 4,000       -
 #
 # THE DEBUG AND RELEASE ROWS MOVED ON 2026-10-06, from 750 / 50,000: the v0.3.5
@@ -180,13 +182,13 @@ tasks:
     desc: Debug-profile suite, including every target
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 1000 60000 -- cargo test --locked --all-targets --features cli'
-      - 'bash scripts/core.sh test-floor debug 344'
+      - 'bash scripts/core.sh test-floor debug 348'
 
   test:release:
     desc: Release-profile suite, including every target
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli'
-      - 'bash scripts/core.sh test-floor release 344'
+      - 'bash scripts/core.sh test-floor release 348'
 
   test:
     desc: Debug and release test tiers
@@ -198,7 +200,7 @@ tasks:
     desc: Instrumented suite with the same 90% line-coverage gate as CI
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90'
-      - 'bash scripts/core.sh test-floor coverage 344'
+      - 'bash scripts/core.sh test-floor coverage 348'
 
   clean:
     desc: Remove this crate's cargo output

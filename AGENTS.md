@@ -256,8 +256,8 @@ rather than in one consumer of it.
 ```sh
 chore lint            # cargo fmt --check, the agent-core check, clippy --locked -D warnings
 chore build           # debug build
-chore test:debug      # the whole suite, debug, overflow checks armed, budgeted, floor 344
-chore test:release    # the same selection under --release, budgeted, floor 344
+chore test:debug      # the whole suite, debug, overflow checks armed, budgeted, floor 348
+chore test:release    # the same selection under --release, budgeted, floor 348
 chore test            # both tiers
 chore test:scripts    # the shell tests (tests/scripts/*.sh)
 chore coverage        # the suite under llvm-cov with the same 90% line floor CI uses
@@ -299,7 +299,7 @@ Two more independent graders stand behind that, and neither is this crate
 marking its own homework:
 
 - `cargo llvm-cov --fail-under-lines 90` in the `coverage` job.
-- An **executed-test floor of 344** on every tier (`scripts/core.sh test-floor`). A
+- An **executed-test floor of 348** on every tier (`scripts/core.sh test-floor`). A
   suite that silently stops running a material part of itself otherwise reports
   exactly the same green as one that passes.
 
@@ -443,9 +443,9 @@ or bump it and every consumer's `core.sh` in the same pass.
 
 | tier | measured | budget | floor |
 |---|---|---|---|
-| debug | 557 lines / 31,250 bytes | 750 / 50,000 | 344 |
-| release | 557 lines / 31,295 bytes | 750 / 50,000 | 344 |
-| coverage | 575 lines / 32,607 bytes | 800 / 60,000 | 344 |
+| debug | 557 lines / 31,250 bytes | 750 / 50,000 | 348 |
+| release | 557 lines / 31,295 bytes | 750 / 50,000 | 348 |
+| coverage | 575 lines / 32,607 bytes | 800 / 60,000 | 348 |
 
 Exit **65** is a passing run that printed more than its budget.
 `AM_FS_CORE_VERBOSE=1`, or `chore test -- --verbose`, streams a run as well as
