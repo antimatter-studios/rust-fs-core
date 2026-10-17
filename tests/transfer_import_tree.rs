@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::SystemTime;
 
 #[derive(Default)]
 struct Sink {
@@ -99,7 +101,25 @@ impl Local {
             ImportTreeOptions {
                 recursive: true,
                 max_depth,
-                preserve_links: false,
+                ..ImportTreeOptions::default()
+            },
+        )
+        .unwrap()
+    }
+}
+#[cfg(unix)]
+impl Local {
+    fn run_capable(&self, sink: &mut Capable) -> Outcome {
+        transfer::import_tree(
+            &ImportRequest {
+                input: Input::File(self.0.clone()),
+                path: "/dest".into(),
+                replace: false,
+            },
+            Some(sink),
+            ImportTreeOptions {
+                recursive: true,
+                ..ImportTreeOptions::default()
             },
         )
         .unwrap()
@@ -272,7 +292,7 @@ fn symlinks_are_refused_without_following_their_targets() {
         .report
         .unwrap()
         .to_compact()
-        .contains("cannot preserve symbolic links"));
+        .contains("symbolic links not supported by this sink"));
 }
 
 #[cfg(target_os = "linux")]
@@ -319,4 +339,216 @@ fn a_regular_file_uses_the_checked_transaction_without_recursive() {
     assert_eq!(out.code, 0);
     assert_eq!(count(&out, "completed"), 1);
     assert_eq!(sink.files[Path::new("/dest")], b"abc");
+}
+
+/// The in-memory sink with every optional metadata capability switched on.
+#[cfg(unix)]
+#[derive(Default)]
+struct Capable {
+    inner: Sink,
+    hard_links: BTreeMap<PathBuf, PathBuf>,
+    symbolic_links: BTreeMap<PathBuf, PathBuf>,
+    times: Vec<(PathBuf, Option<SystemTime>, Option<SystemTime>)>,
+}
+#[cfg(unix)]
+impl FileSink for Capable {
+    fn stage(&mut self, path: &Path, replace: bool) -> Result<(), CliError> {
+        self.inner.stage(path, replace)
+    }
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), CliError> {
+        self.inner.write_at(offset, bytes)
+    }
+    fn persist(&mut self) -> Result<(), CliError> {
+        self.inner.persist()
+    }
+    fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<usize, CliError> {
+        self.inner.read_at(offset, bytes)
+    }
+    fn publish(&mut self, replace: bool) -> Result<bool, CliError> {
+        self.inner.publish(replace)
+    }
+    fn abort(&mut self) -> Result<(), CliError> {
+        self.inner.abort()
+    }
+}
+#[cfg(unix)]
+impl TreeSink for Capable {
+    fn format_name(&self) -> &str {
+        "memfs"
+    }
+    fn validate_name(&mut self, parent: &Path, name: &OsStr) -> Result<OsString, CliError> {
+        self.inner.validate_name(parent, name)
+    }
+    fn create_dir(&mut self, path: &Path) -> Result<bool, CliError> {
+        self.inner.create_dir(path)
+    }
+    fn create_symbolic_link(&mut self, path: &Path, target: &Path) -> Result<(), CliError> {
+        assert!(self
+            .symbolic_links
+            .insert(path.into(), target.into())
+            .is_none());
+        Ok(())
+    }
+    fn create_hard_link(&mut self, path: &Path, existing: &Path) -> Result<(), CliError> {
+        assert!(
+            self.inner.files.contains_key(existing),
+            "link to a published file"
+        );
+        assert!(self
+            .hard_links
+            .insert(path.into(), existing.into())
+            .is_none());
+        Ok(())
+    }
+    fn set_times(
+        &mut self,
+        path: &Path,
+        accessed: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> Result<(), CliError> {
+        self.times.push((path.into(), accessed, modified));
+        Ok(())
+    }
+}
+/// A tree holding a file, a second hard link to it, a symbolic link and a
+/// directory, every time pinned to a value the host filesystem reports back.
+#[cfg(unix)]
+fn metadata_tree(tag: &str) -> (Local, SystemTime) {
+    let local = Local::new(tag);
+    let pinned = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::write(local.0.join("a"), b"shared bytes").unwrap();
+    fs::hard_link(local.0.join("a"), local.0.join("b")).unwrap();
+    std::os::unix::fs::symlink("a", local.0.join("c")).unwrap();
+    fs::create_dir(local.0.join("d")).unwrap();
+    fs::write(local.0.join("d/x"), b"inner").unwrap();
+    for name in ["a", "d/x", "d", ""] {
+        let times = fs::FileTimes::new()
+            .set_accessed(pinned)
+            .set_modified(pinned);
+        fs::File::open(local.0.join(name))
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+    }
+    assert_eq!(
+        fs::metadata(local.0.join("d")).unwrap().modified().unwrap(),
+        pinned
+    );
+    (local, pinned)
+}
+#[cfg(unix)]
+fn preserve_everything() -> ImportTreeOptions {
+    let m = Command::new("import")
+        .args(transfer::import_args_with_tree())
+        .try_get_matches_from([
+            "import",
+            "--recursive",
+            "--preserve=times,links",
+            "src",
+            "/dest",
+        ])
+        .unwrap();
+    let options = ImportTreeOptions::from_matches(&m).unwrap();
+    assert!(options.preserve_links && options.preserve_times);
+    options
+}
+#[cfg(unix)]
+fn status_of(out: &Outcome, destination: &str) -> (String, String) {
+    let report = out.report.as_ref().unwrap().to_compact();
+    let at = report
+        .find(&format!("\"destination\":\"{destination}\""))
+        .unwrap_or_else(|| panic!("{destination} missing from {report}"));
+    let item = &report[at..report[at..].find('}').map_or(report.len(), |e| at + e)];
+    let field = |key: &str| {
+        let start = item.find(&format!("\"{key}\":\"")).unwrap() + key.len() + 4;
+        item[start..start + item[start..].find('"').unwrap()].to_string()
+    };
+    (field("status"), field("reason"))
+}
+#[cfg(unix)]
+#[test]
+fn capable_sinks_receive_times_hard_links_and_symbolic_links() {
+    let (local, pinned) = metadata_tree("capable");
+    let mut sink = Capable::default();
+    let request = ImportRequest {
+        input: Input::File(local.0.clone()),
+        path: "/dest".into(),
+        replace: false,
+    };
+    let out = transfer::import_tree(&request, Some(&mut sink), preserve_everything()).unwrap();
+    assert_eq!(out.code, 0, "{}", out.report.as_ref().unwrap().to_compact());
+    assert_eq!(count(&out, "completed"), 6);
+    assert_eq!(
+        sink.inner.files[Path::new("/dest/a")],
+        fs::read(local.0.join("a")).unwrap()
+    );
+    assert!(!sink.inner.files.contains_key(Path::new("/dest/b")));
+    assert_eq!(sink.hard_links[Path::new("/dest/b")], Path::new("/dest/a"));
+    assert_eq!(
+        sink.symbolic_links[Path::new("/dest/c")],
+        fs::read_link(local.0.join("c")).unwrap()
+    );
+    let set = |path: &str| {
+        sink.times
+            .iter()
+            .position(|(p, _, _)| p == Path::new(path))
+            .unwrap_or_else(|| panic!("no times set on {path}"))
+    };
+    for path in ["/dest", "/dest/a", "/dest/d", "/dest/d/x"] {
+        let (_, accessed, modified) = &sink.times[set(path)];
+        assert_eq!(
+            (*accessed, *modified),
+            (Some(pinned), Some(pinned)),
+            "{path}"
+        );
+    }
+    set("/dest/c");
+    assert!(
+        set("/dest/d") > set("/dest/d/x"),
+        "directory times follow children"
+    );
+    assert!(set("/dest") > set("/dest/d"), "root times come last");
+}
+#[cfg(unix)]
+#[test]
+fn sinks_lacking_capabilities_refuse_and_name_every_affected_item() {
+    let (local, _) = metadata_tree("incapable");
+    let mut sink = Sink::default();
+    let request = ImportRequest {
+        input: Input::File(local.0.clone()),
+        path: "/dest".into(),
+        replace: false,
+    };
+    let out = transfer::import_tree(&request, Some(&mut sink), preserve_everything()).unwrap();
+    assert_eq!(out.code, 1);
+    assert_eq!(count(&out, "completed"), 0);
+    assert_eq!(count(&out, "refused"), 6);
+    let times = "times not supported by this sink".to_string();
+    let refused = "refused".to_string();
+    for path in ["/dest", "/dest/a", "/dest/d", "/dest/d/x"] {
+        assert_eq!(
+            status_of(&out, path),
+            (refused.clone(), times.clone()),
+            "{path}"
+        );
+    }
+    let hard = "hard links not supported by this sink".to_string();
+    assert_eq!(status_of(&out, "/dest/b"), (refused.clone(), hard));
+    let symbolic = "symbolic links not supported by this sink".to_string();
+    assert_eq!(status_of(&out, "/dest/c"), (refused, symbolic));
+    assert_eq!(
+        sink.files.keys().collect::<Vec<_>>(),
+        [Path::new("/dest/a"), Path::new("/dest/d/x")]
+    );
+}
+#[cfg(unix)]
+#[test]
+fn without_preserve_hard_links_copy_and_no_times_are_set() {
+    let (local, _) = metadata_tree("plain");
+    fs::remove_file(local.0.join("c")).unwrap();
+    let mut sink = Capable::default();
+    let out = local.run_capable(&mut sink);
+    assert_eq!(out.code, 0);
+    assert!(sink.times.is_empty() && sink.hard_links.is_empty());
+    assert_eq!(sink.inner.files[Path::new("/dest/b")], b"shared bytes");
 }
