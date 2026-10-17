@@ -5,7 +5,7 @@ use fs_core::cli::transfer::{self, FileSink, ImportRequest, Input, CHUNK};
 use fs_core::cli::CliError;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 struct Counted;
@@ -288,6 +288,135 @@ fn local_files_and_replace_produce_a_structured_report() {
     assert!(report.contains("\"bytes\":3"));
     assert!(report.contains("\"replaced\":true"));
     assert!(report.contains("\"created\":false"));
+}
+
+// A real host file is the identity oracle; the reader mutates it between chunks.
+struct HookedLocal {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+    hook: Option<fn(&Path)>,
+    reads: usize,
+}
+impl Read for HookedLocal {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if self.reads == 1 {
+            if let Some(hook) = self.hook.take() {
+                hook(&self.path);
+            }
+        }
+        self.reads += 1;
+        self.file.read(bytes)
+    }
+}
+impl transfer::LocalSource for HookedLocal {
+    fn file(&self) -> &std::fs::File {
+        &self.file
+    }
+    fn local_path(&self) -> Option<&Path> {
+        Some(&self.path)
+    }
+}
+impl Drop for HookedLocal {
+    fn drop(&mut self) {
+        // The file may have been removed by the mutation under test.
+        if self.path.exists() {
+            std::fs::remove_file(&self.path).unwrap();
+        }
+    }
+}
+fn local_source(name: &str, hook: Option<fn(&Path)>) -> HookedLocal {
+    let path = std::env::temp_dir().join(format!("core-import-{}-{name}", std::process::id()));
+    std::fs::write(&path, vec![b'x'; 2 * CHUNK]).unwrap();
+    HookedLocal {
+        file: std::fs::File::open(&path).unwrap(),
+        path,
+        hook,
+        reads: 0,
+    }
+}
+fn changed_source(name: &str, hook: fn(&Path)) {
+    let mut source = local_source(name, Some(hook));
+    let mut sink = old_sink();
+    let error =
+        transfer::import_local_file(&mut source, Some(&mut sink), Path::new("/target"), true)
+            .unwrap_err();
+    assert_eq!(error.code, 1);
+    assert!(
+        error.message.contains("source changed during copy"),
+        "{error:?}"
+    );
+    assert_eq!(sink.old.as_deref(), Some(b"old".as_slice()));
+    assert!(sink.staged.is_none());
+}
+#[test]
+fn a_growing_local_source_is_not_published() {
+    changed_source("growing", |path| {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b"new bytes")
+            .unwrap();
+    });
+}
+#[test]
+fn a_shrinking_local_source_is_not_published() {
+    changed_source("shrinking", |path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(CHUNK as u64)
+            .unwrap();
+    });
+}
+#[test]
+fn a_replaced_local_source_name_is_not_published() {
+    changed_source("replaced", |path| {
+        std::fs::remove_file(path).unwrap();
+        std::fs::write(path, vec![b'x'; 2 * CHUNK]).unwrap();
+    });
+}
+#[test]
+fn a_removed_local_source_name_is_not_published() {
+    changed_source("removed", |path| std::fs::remove_file(path).unwrap());
+}
+#[test]
+fn an_unchanged_local_source_reports_the_digest_of_the_read_bytes() {
+    let mut source = local_source("unchanged", None);
+    let mut sink = Sink::default();
+    let copied =
+        transfer::import_local_file(&mut source, Some(&mut sink), Path::new("/target"), false)
+            .unwrap();
+    assert_eq!(copied.bytes, (2 * CHUNK) as u64);
+    // Compare with an uninterrupted import of the bytes the host exposes.
+    let bytes = std::fs::read(&source.path).unwrap();
+    let expected = copy(&mut bytes.as_slice(), Some(&mut Sink::default()), false).unwrap();
+    assert_eq!(copied.sha256, expected.sha256);
+    assert_eq!(sink.old.as_deref(), Some(bytes.as_slice()));
+}
+#[cfg(unix)]
+#[test]
+fn a_same_size_rewrite_with_restored_mtime_is_not_published() {
+    use std::os::unix::fs::MetadataExt;
+    changed_source("restored-mtime", |path| {
+        let before = std::fs::metadata(path).unwrap();
+        std::fs::write(path, vec![b'y'; 2 * CHUNK]).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = std::fs::metadata(path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_ne!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec()),
+            "the host must expose the rewrite through change time"
+        );
+    });
 }
 
 #[cfg(unix)]
