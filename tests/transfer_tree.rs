@@ -511,3 +511,285 @@ fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
         }
     }
 }
+
+#[test]
+fn link_arguments_are_opt_in_and_accept_only_links() {
+    use transfer::LinkOptions;
+    let cmd = || Cmd::new("export").args(transfer::export_args_with_links());
+    let m = cmd()
+        .try_get_matches_from(["export", "/", "out", "--preserve=links"])
+        .unwrap();
+    assert!(LinkOptions::from_matches(&m).unwrap().preserve_links);
+    let m = cmd().try_get_matches_from(["export", "/", "out"]).unwrap();
+    assert_eq!(
+        LinkOptions::from_matches(&m).unwrap(),
+        LinkOptions::default()
+    );
+    assert!(cmd()
+        .try_get_matches_from(["export", "/", "out", "--preserve=all"])
+        .is_err());
+    let m = Cmd::new("export")
+        .args(transfer::export_args_with_tree())
+        .try_get_matches_from(["export", "/", "out"])
+        .unwrap();
+    assert_eq!(
+        LinkOptions::from_matches(&m).unwrap(),
+        LinkOptions::default()
+    );
+}
+
+#[test]
+fn a_revisited_directory_is_reported_as_loop_without_another_listing() {
+    struct LoopTree(usize);
+    impl TreeSource for LoopTree {
+        fn metadata(&mut self, _: &Path) -> Result<TreeMetadata, CliError> {
+            Ok(TreeMetadata {
+                kind: TreeKind::Directory,
+                size: 0,
+                inode: 7,
+                accessed: None,
+                modified: None,
+            })
+        }
+        fn read_dir(&mut self, _: &Path) -> Result<Vec<TreeEntry>, CliError> {
+            self.0 += 1;
+            assert_eq!(self.0, 1, "the repeated inode was enumerated");
+            Ok(vec![TreeEntry {
+                name: "again".into(),
+                metadata: self.metadata(Path::new(""))?,
+            }])
+        }
+        fn read_file_at(&mut self, _: &Path, _: u64, _: &mut [u8]) -> Result<usize, CliError> {
+            panic!("a directory cannot be read as a file")
+        }
+    }
+    let (root, _, dest) = scratch("links-loop");
+    for preserve_links in [false, true] {
+        let dest = dest.with_extension(preserve_links.to_string());
+        let mut source = LoopTree(0);
+        let out = transfer::export_tree_with_links(
+            &request(&dest, false),
+            &mut source,
+            options(),
+            transfer::LinkOptions { preserve_links },
+        )
+        .unwrap();
+        assert_eq!(out.code, 1);
+        let report = out.report.unwrap();
+        assert_eq!(count(&report, "refused"), 1);
+        assert!(report.to_compact().contains("loop"));
+        assert_eq!(source.0, 1);
+        assert!(!dest.join("again").exists());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+mod links {
+    use super::*;
+    use std::os::unix::{
+        ffi::OsStringExt,
+        fs::{symlink, MetadataExt},
+    };
+
+    struct LinksHost {
+        host: Host,
+        reads: usize,
+    }
+    impl TreeSource for LinksHost {
+        fn metadata(&mut self, p: &Path) -> Result<TreeMetadata, CliError> {
+            let mut m = self.host.metadata(p)?;
+            m.inode = fs::symlink_metadata(self.host.root.join(p)).unwrap().ino();
+            Ok(m)
+        }
+        fn read_dir(&mut self, p: &Path) -> Result<Vec<TreeEntry>, CliError> {
+            let mut entries = self.host.read_dir(p)?;
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            for entry in &mut entries {
+                entry.metadata = self.metadata(&p.join(&entry.name))?;
+            }
+            Ok(entries)
+        }
+        fn symbolic_link(&mut self, p: &Path) -> Result<Option<transfer::SymbolicLink>, CliError> {
+            let p = self.host.root.join(p);
+            if fs::symlink_metadata(&p).unwrap().file_type().is_symlink() {
+                Ok(Some(transfer::SymbolicLink {
+                    target: fs::read_link(p).unwrap(),
+                    target_is_directory: false,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        fn read_file_at(
+            &mut self,
+            p: &Path,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> Result<usize, CliError> {
+            self.reads += 1;
+            self.host.read_file_at(p, offset, buf)
+        }
+    }
+    fn source(root: &Path) -> LinksHost {
+        LinksHost {
+            host: Host {
+                root: root.into(),
+                malicious: false,
+            },
+            reads: 0,
+        }
+    }
+    fn export(host: &mut LinksHost, dest: &Path, replace: bool) -> Outcome {
+        transfer::export_tree_with_links(
+            &request(dest, replace),
+            host,
+            options(),
+            transfer::LinkOptions {
+                preserve_links: true,
+            },
+        )
+        .unwrap()
+    }
+    fn hard_links(src: &Path) {
+        fs::create_dir(src.join("sub")).unwrap();
+        fs::write(src.join("a"), b"shared data").unwrap();
+        fs::hard_link(src.join("a"), src.join("b")).unwrap();
+        fs::hard_link(src.join("a"), src.join("sub/c")).unwrap();
+    }
+
+    #[test]
+    fn three_names_share_one_destination_inode_and_one_source_read() {
+        let (root, src, dest) = scratch("links-hard");
+        hard_links(&src);
+        let mut host = source(&src);
+        let out = export(&mut host, &dest, false);
+        assert_eq!(out.code, 0, "{:?}", out.report);
+        assert_eq!(host.reads, 1);
+        let first = fs::metadata(dest.join("a")).unwrap();
+        assert_eq!(first.nlink(), 3);
+        for name in ["a", "b", "sub/c"] {
+            let m = fs::metadata(dest.join(name)).unwrap();
+            assert_eq!((m.dev(), m.ino()), (first.dev(), first.ino()));
+            assert_eq!(fs::read(dest.join(name)).unwrap(), b"shared data");
+        }
+        assert!(out
+            .report
+            .unwrap()
+            .to_compact()
+            .contains("hard link preserved"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_copies_hard_links_separately_and_refuses_symbolic_links() {
+        let (root, src, dest) = scratch("links-default");
+        hard_links(&src);
+        symlink("a", src.join("symbolic")).unwrap();
+        let mut host = source(&src);
+        let out = transfer::export_tree(&request(&dest, false), &mut host, options()).unwrap();
+        assert_eq!(out.code, 1);
+        let report = out.report.unwrap();
+        assert_eq!(count(&report, "refused"), 1);
+        assert!(report
+            .to_compact()
+            .contains("hard link copied as separate file"));
+        assert!(report.to_compact().contains("--preserve=links"));
+        assert_eq!(host.reads, 3);
+        for name in ["a", "b", "sub/c"] {
+            assert_eq!(fs::metadata(dest.join(name)).unwrap().nlink(), 1);
+        }
+        assert!(fs::symlink_metadata(dest.join("symbolic")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn symbolic_targets_remain_byte_identical_and_escape_warnings_do_not_follow_them() {
+        let (root, src, dest) = scratch("links-symbolic");
+        fs::create_dir(src.join("sub")).unwrap();
+        let targets = [
+            ("relative", PathBuf::from("missing")),
+            ("absolute", root.join("outside")),
+            ("escape", PathBuf::from("../outside")),
+            ("sub/inside", PathBuf::from("../missing")),
+            (
+                "raw",
+                PathBuf::from(OsString::from_vec(b"missing-\xff".to_vec())),
+            ),
+        ];
+        for (name, target) in &targets {
+            symlink(target, src.join(name)).unwrap();
+        }
+        let mut host = source(&src);
+        let out = export(&mut host, &dest, false);
+        assert_eq!(out.code, 0, "{:?}", out.report);
+        assert_eq!(host.reads, 0);
+        for (name, target) in &targets {
+            assert_eq!(fs::read_link(dest.join(name)).unwrap(), *target);
+        }
+        let text = out.report.unwrap().to_compact();
+        assert_eq!(text.matches("target escapes DEST").count(), 2, "{text}");
+        assert!(!root.join("outside").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replace_publishes_both_link_types_over_existing_regular_files() {
+        let (root, src, dest) = scratch("links-replace");
+        hard_links(&src);
+        symlink("missing", src.join("symbolic")).unwrap();
+        fs::create_dir(&dest).unwrap();
+        for name in ["a", "b", "symbolic"] {
+            fs::write(dest.join(name), b"old").unwrap();
+        }
+        let out = export(&mut source(&src), &dest, true);
+        assert_eq!(out.code, 0, "{:?}", out.report);
+        assert_eq!(fs::metadata(dest.join("a")).unwrap().nlink(), 3);
+        assert_eq!(
+            fs::read_link(dest.join("symbolic")).unwrap(),
+            Path::new("missing")
+        );
+        assert_eq!(
+            fs::read_dir(&dest).unwrap().count(),
+            4,
+            "staging entries leaked"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn links_never_replace_unasked_or_redirect_through_destination_symlinks() {
+        let (root, src, dest) = scratch("links-refusal");
+        hard_links(&src);
+        symlink("missing", src.join("symbolic")).unwrap();
+        fs::create_dir(&dest).unwrap();
+        fs::write(dest.join("b"), b"keep").unwrap();
+        fs::create_dir(dest.join("symbolic")).unwrap();
+        let out = export(&mut source(&src), &dest, false);
+        assert_eq!(count(out.report.as_ref().unwrap(), "refused"), 2);
+        assert_eq!(fs::read(dest.join("b")).unwrap(), b"keep");
+        fs::remove_file(dest.join("b")).unwrap();
+        symlink(root.join("outside"), dest.join("b")).unwrap();
+        let out = export(&mut source(&src), &dest, true);
+        assert_eq!(count(out.report.as_ref().unwrap(), "refused"), 2);
+        assert!(!root.join("outside").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_first_copy_does_not_become_a_hard_link_anchor() {
+        let (root, src, dest) = scratch("links-failed");
+        fs::write(src.join("broken"), b"shared data").unwrap();
+        fs::hard_link(src.join("broken"), src.join("good")).unwrap();
+        fs::hard_link(src.join("broken"), src.join("last")).unwrap();
+        let mut host = source(&src);
+        let out = export(&mut host, &dest, false);
+        assert_eq!(out.code, 1);
+        assert_eq!(count(out.report.as_ref().unwrap(), "failed"), 1);
+        assert_eq!(host.reads, 2);
+        assert!(!dest.join("broken").exists());
+        assert_eq!(fs::metadata(dest.join("good")).unwrap().nlink(), 2);
+        assert_eq!(fs::read(dest.join("last")).unwrap(), b"shared data");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
