@@ -4,3 +4,5 @@ transfer_alias 7
 transfer_alias_edges 2
 # #275 adds seven advisory lock cases on every CI platform.
 transfer_exclusive 7
+# #254 adds five portable tree cases and a Unix symlink refusal case.
+transfer_tree 5
