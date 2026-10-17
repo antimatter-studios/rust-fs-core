@@ -34,7 +34,11 @@ driver and disk-image reader plugs into.
   stderr and its exit statuses, and `generate names|man|completions` for
   packaging. A crate describes its tools once, as a `cli::Family`, and calls
   `cli::main`. **Use it; do not copy it.** It began as a directory each
-  crate carried by hand, and the copies drifted within weeks.
+  crate carried by hand, and the copies drifted within weeks. Its
+  `transfer` module is the `export` verb every tool shares: a file copied
+  out of an image in bounded chunks, with its byte count and SHA-256,
+  published as a local file only when complete. A driver supplies a
+  positioned read (`cli::transfer::FileSource`).
 
 ### The `cli` feature
 
@@ -49,8 +53,8 @@ required-features = ["cli"]
 ```
 
 Turn it on only under the crate's own `cli` feature, beside the
-`required-features` on its binary. clap, clap_complete and clap_mangen are
-optional here and reached only through the feature, so the default build —
+`required-features` on its binary. clap, clap_complete, clap_mangen and sha2
+are optional here and reached only through the feature, so the default build —
 and every static library built from it — gains no dependency. The crate's
 own `clap` requirement stays, for its tools' commands; `fs_core::cli::clap`
 re-exports the one this module is built against.
@@ -86,7 +90,7 @@ src/
   stream.rs           BlockReadStreamer (std::io::Read + Seek over a BlockRead)
   ffi.rs              the C ABI — FsCoreDevice, FsCoreCallbackCfg
   cli.rs              the tools' shared plumbing (feature `cli`), and in cli/:
-                      dispatch, version, doctor, output, docs, family
+                      dispatch, version, doctor, output, docs, family, transfer
 tests/
   cache.rs            CachingDevice + interop tests
 .github/actions/
@@ -168,7 +172,7 @@ it out twice.
 The guard does two jobs. It refuses a workflow that clones a **sibling
 project** at a floating ref instead of a tag — and this crate sits at the
 bottom of the dependency graph, with no dependency at all in its default build
-and only the optional clap crates behind `cli`, so there is no sibling to pin
+and only the optional clap crates and sha2 behind `cli`, so there is no sibling to pin
 and that half never fires. It also refuses a missing or drifted
 `Cargo.lock` and runs `cargo metadata --locked` as a stale-lock check, and
 that half applies in full, because this crate does track its lockfile.

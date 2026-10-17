@@ -45,6 +45,10 @@
 //! - **`<repo> generate names|man|completions`** (hidden) prints the dotted
 //!   names to link, and writes the man pages and shell completions, from
 //!   the same clap commands the tools parse with.
+//! - **`export`** ([`transfer`]) copies a file out of an image in bounded
+//!   chunks, with its byte count and SHA-256, and publishes a local file
+//!   only when it is complete. A driver supplies a positioned read; the
+//!   copy, its flags and its report are the same for every format.
 //!
 //! ```no_run
 //! use fs_core::cli::{self, CliError, Family, Json, Outcome, Tool};
@@ -88,6 +92,7 @@ pub mod docs;
 pub mod doctor;
 pub mod family;
 pub mod output;
+pub mod transfer;
 pub mod version;
 
 // clap's `Command` is imported as `Cmd` throughout: it is not a process,
