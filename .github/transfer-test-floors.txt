@@ -13,3 +13,5 @@ transfer_tree 18
 transfer_progress 6
 # #259 adds one portable API case and four Unix child-signal oracle cases.
 transfer_cancel 1
+# #260 adds thirteen portable import cases and one Unix persistence-signal case.
+transfer_import 13

@@ -61,6 +61,10 @@ pub use progress::{export_args_with_progress, Progress, ProgressOptions};
 mod cancel;
 use cancel::Cancellation;
 
+#[path = "transfer_import.rs"]
+mod import;
+pub use import::{import, import_args, import_file, FileSink, ImportRequest, Input};
+
 #[path = "transfer_tree.rs"]
 mod tree;
 pub use tree::{
