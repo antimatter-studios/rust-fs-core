@@ -24,3 +24,5 @@ transfer_import_tree 8
 # #311 adds a Unix fork-inheritance regression above the portable cases.
 # #295 adds ten portable resume-evidence cases; CI measures execution.
 transfer_manifest 18
+# #268 adds seven portable sparse cases and two Unix host-allocation oracles.
+transfer_sparse 7
