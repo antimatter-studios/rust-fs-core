@@ -33,6 +33,11 @@
 //! Trees and imports can call [`refuse_image_alias`] for each local path.
 //! Sources supplying an image path also hold a shared [`ImageLock`] while
 //! exporting; a competing writer produces a warning before the first read.
+//!
+//! On Unix, SIGINT and SIGTERM cancel at chunk boundaries and before file
+//! publication. Staging is removed by normal code; repeated signals cannot
+//! bypass cleanup. Low-level copies return status 130/143 in `CliError`;
+//! command exports return a cancellation report (stderr for raw stdout copies).
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -51,6 +56,10 @@ pub use image_lock::ImageLock;
 #[path = "transfer_progress.rs"]
 mod progress;
 pub use progress::{export_args_with_progress, Progress, ProgressOptions};
+
+#[path = "transfer_cancel.rs"]
+mod cancel;
+use cancel::Cancellation;
 
 #[path = "transfer_tree.rs"]
 mod tree;
@@ -185,8 +194,20 @@ pub fn export_file_with_progress(
     name: &Path,
     progress: &mut Progress<'_>,
 ) -> Result<Copied, CliError> {
+    let cancellation = Cancellation::install()?;
+    export_file_cancellable(source, destination, options, name, progress, &cancellation)
+}
+
+fn export_file_cancellable(
+    source: &mut dyn FileSource,
+    destination: Destination<'_>,
+    options: ExportOptions,
+    name: &Path,
+    progress: &mut Progress<'_>,
+    cancellation: &Cancellation,
+) -> Result<Copied, CliError> {
     progress.begin_file(name, Some(source.size()));
-    let result = copy_file(source, destination, options, progress);
+    let result = copy_file(source, destination, options, progress, cancellation);
     progress.finish_file(result.is_ok());
     result
 }
@@ -196,7 +217,9 @@ fn copy_file(
     destination: Destination<'_>,
     options: ExportOptions,
     progress: &mut Progress<'_>,
+    cancellation: &Cancellation,
 ) -> Result<Copied, CliError> {
+    cancellation.check(0, source.size())?;
     if matches!(&destination, Destination::Writer(_)) && options.verify {
         return Err(CliError::usage("--verify needs a file DEST, not a writer"));
     }
@@ -205,13 +228,14 @@ fn copy_file(
         .map(|image| ImageLock::for_export(image, &mut io::stderr().lock()))
         .transpose()?;
     match destination {
-        Destination::Writer(sink) => pump(source, sink, &mut |n| progress.advance(n)),
+        Destination::Writer(sink) => pump(source, sink, &mut |n| progress.advance(n), cancellation),
         Destination::File { path, replace } => export_to_file_observed(
             source,
             path,
             replace,
             options.verify,
             &mut |n| progress.advance(n),
+            cancellation,
             |file, _| file.sync_all(),
         ),
     }
@@ -223,6 +247,7 @@ fn pump(
     source: &mut dyn FileSource,
     sink: &mut dyn Write,
     update: &mut dyn FnMut(u64),
+    cancellation: &Cancellation,
 ) -> Result<Copied, CliError> {
     let size = source.size();
     let mut buf = vec![0u8; usize::try_from(size).map_or(CHUNK, |s| s.min(CHUNK))];
@@ -234,10 +259,13 @@ fn pump(
         ))
     };
     while offset < size {
+        cancellation.check(offset, size)?;
         let want = buf
             .len()
             .min(usize::try_from(size - offset).unwrap_or(usize::MAX));
-        let got = source.read_at(offset, &mut buf[..want])?;
+        let read = source.read_at(offset, &mut buf[..want]);
+        cancellation.check(offset, size)?;
+        let got = read?;
         if got == 0 {
             return Err(CliError::failed(format!(
                 "short read: the source ended at {offset} of {size} bytes"
@@ -253,7 +281,10 @@ fn pump(
         while !remaining.is_empty() {
             let written = match sink.write(remaining) {
                 Ok(0) => return Err(delivered(offset, io::ErrorKind::WriteZero.into())),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    cancellation.check(offset, size)?;
+                    continue;
+                }
                 result => result.map_err(|e| delivered(offset, e))?,
             };
             remaining = &remaining[written..];
@@ -261,7 +292,10 @@ fn pump(
             update(offset);
         }
     }
-    sink.flush().map_err(|e| delivered(offset, e))?;
+    cancellation.check(offset, size)?;
+    let flushed = sink.flush();
+    cancellation.check(offset, size)?;
+    flushed.map_err(|e| delivered(offset, e))?;
     Ok(Copied {
         bytes: offset,
         sha256: digest.finalize().into(),
@@ -277,7 +311,15 @@ fn export_to_file(
     verify: bool,
     sync: impl FnOnce(&mut File, &Path) -> io::Result<()>,
 ) -> Result<Copied, CliError> {
-    export_to_file_observed(source, path, replace, verify, &mut |_| {}, sync)
+    export_to_file_observed(
+        source,
+        path,
+        replace,
+        verify,
+        &mut |_| {},
+        &Cancellation::install()?,
+        sync,
+    )
 }
 
 fn export_to_file_observed(
@@ -286,6 +328,7 @@ fn export_to_file_observed(
     replace: bool,
     verify: bool,
     update: &mut dyn FnMut(u64),
+    cancellation: &Cancellation,
     sync: impl FnOnce(&mut File, &Path) -> io::Result<()>,
 ) -> Result<Copied, CliError> {
     if let Some(image) = source.image_path() {
@@ -319,16 +362,18 @@ fn export_to_file_observed(
     }
 
     let (staging, mut file) = create_staging(parent, name)?;
-    let copied = pump(source, &mut file, update).and_then(|copied| {
-        sync(&mut file, &staging)
-            .map_err(|e| CliError::failed(format!("sync {}: {e}", staging.display())))?;
+    let copied = pump(source, &mut file, update, cancellation).and_then(|copied| {
+        let synced = sync(&mut file, &staging);
+        cancellation.check(copied.bytes, copied.bytes)?;
+        synced.map_err(|e| CliError::failed(format!("sync {}: {e}", staging.display())))?;
         Ok(copied)
     });
     drop(file);
     let published = copied.and_then(|copied| {
         if verify {
-            verify_staging(&staging, &copied)?;
+            verify_staging(&staging, &copied, cancellation)?;
         }
+        cancellation.check(copied.bytes, copied.bytes)?;
         publish(&staging, path, replace)?;
         Ok(copied)
     });
@@ -400,13 +445,18 @@ pub fn refuse_image_alias(image: &Path, local: &Path) -> Result<(), CliError> {
 
 /// Read until EOF, including any unexpected trailing bytes. The original
 /// copy buffer has already been dropped, so verification holds one chunk.
-fn verify_staging(staging: &Path, expected: &Copied) -> Result<(), CliError> {
+fn verify_staging(
+    staging: &Path,
+    expected: &Copied,
+    cancellation: &Cancellation,
+) -> Result<(), CliError> {
     let failed = |e| CliError::failed(format!("verify {}: {e}", staging.display()));
     let mut file = File::open(staging).map_err(failed)?;
     let mut buf = vec![0u8; CHUNK];
     let mut digest = Sha256::new();
     let mut bytes = 0u64;
     loop {
+        cancellation.check(bytes, expected.bytes)?;
         let n = match file.read(&mut buf) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             result => result.map_err(failed)?,
@@ -632,6 +682,7 @@ pub fn export_with_progress(
     options: ExportOptions,
     progress: &mut Progress<'_>,
 ) -> Result<Outcome, CliError> {
+    let cancellation = Cancellation::install()?;
     progress.set_totals(Some(source.size()), Some(1));
     let dest = match &request.output {
         Output::Stdout if options.verify => {
@@ -639,18 +690,31 @@ pub fn export_with_progress(
         }
         Output::Stdout => {
             let mut stdout = io::stdout().lock();
-            export_file_with_progress(
+            let result = export_file_cancellable(
                 source,
                 Destination::Writer(&mut stdout),
                 options,
                 Path::new(&request.path),
                 progress,
-            )?;
+                &cancellation,
+            );
+            if let Err(error) = result {
+                if !cancel::is_cancelled(&error) {
+                    return Err(error);
+                }
+                let outcome = cancel::cancelled_file(request, error);
+                // Stdout contains raw content, so its cancellation report is
+                // diagnostic output, never appended to the content stream.
+                if let Some(report) = outcome.report {
+                    let _ = writeln!(io::stderr(), "{}", report.to_compact());
+                }
+                return Ok(Outcome::done().with_code(outcome.code));
+            }
             return Ok(Outcome::done());
         }
         Output::File(dest) => dest,
     };
-    let copied = export_file_with_progress(
+    let copied = match export_file_cancellable(
         source,
         Destination::File {
             path: dest,
@@ -659,7 +723,14 @@ pub fn export_with_progress(
         options,
         Path::new(&request.path),
         progress,
-    )?;
+        &cancellation,
+    ) {
+        Ok(copied) => copied,
+        Err(error) if cancel::is_cancelled(&error) => {
+            return Ok(cancel::cancelled_file(request, error))
+        }
+        Err(error) => return Err(error),
+    };
     let path = request.path.to_string_lossy();
     let report = Json::object([
         ("path", Json::from(path.as_ref())),
