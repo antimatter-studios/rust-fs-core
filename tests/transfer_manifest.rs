@@ -2,7 +2,7 @@
 #![cfg(feature = "cli")]
 
 use fs_core::cli::transfer::manifest::{
-    Identity, LocalIdentity, Manifest, ManifestEntry, Timestamp,
+    Identity, LocalIdentity, Manifest, ManifestEntry, ManifestRead, ResumeDecision, Timestamp,
 };
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -208,4 +208,304 @@ fn nonexistent_parent_is_an_error_without_creating_directories() {
         .join("ledger");
     assert!(Manifest::open(&file).is_err());
     assert!(!file.parent().unwrap().exists());
+}
+
+fn evidence(entries: Vec<ManifestEntry>) -> ManifestRead {
+    ManifestRead {
+        entries,
+        torn_tail: false,
+    }
+}
+
+#[test]
+fn resume_redigests_unchanged_bytes_and_returns_the_earlier_time() {
+    let recorded = entry();
+    let mut source = std::io::Cursor::new(b"abc");
+    let file = scratch("resume-reopened");
+    let (mut manifest, _) = Manifest::open(&file).unwrap();
+    manifest.append(&recorded, true).unwrap();
+    drop(manifest);
+    let (_, read) = Manifest::open(&file).unwrap();
+    assert_eq!(
+        read.check_resume(&recorded.source, &recorded.destination, &mut source)
+            .unwrap(),
+        ResumeDecision::Skipped {
+            completed_at: recorded.completed_at
+        }
+    );
+    assert_eq!(source.position(), 3, "the source must actually be re-read");
+}
+
+#[test]
+fn resume_recopies_a_same_size_same_mtime_rewrite() {
+    let file = scratch("resume-rewrite").with_file_name("source");
+    fs::write(&file, b"abc").unwrap();
+    let before = fs::metadata(&file).unwrap();
+    fs::write(&file, b"xyz").unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+        .unwrap();
+    let after = fs::metadata(&file).unwrap();
+    assert_eq!(before.len(), after.len());
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    let recorded = entry();
+    // Supply identical snapshots deliberately: only the fresh digest can catch it.
+    assert_eq!(
+        evidence(vec![recorded.clone()])
+            .check_resume(
+                &recorded.source,
+                &recorded.destination,
+                &mut fs::File::open(file).unwrap()
+            )
+            .unwrap(),
+        ResumeDecision::Copy
+    );
+}
+
+struct MustNotRead;
+impl std::io::Read for MustNotRead {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        panic!("ineligible evidence must not read the source")
+    }
+}
+
+#[test]
+fn resume_without_a_record_copies_without_reading() {
+    let recorded = entry();
+    assert_eq!(
+        evidence(vec![])
+            .check_resume(&recorded.source, &recorded.destination, &mut MustNotRead)
+            .unwrap(),
+        ResumeDecision::Copy
+    );
+}
+
+#[test]
+fn resume_recopies_each_changed_local_destination_identity_field() {
+    let recorded = entry();
+    for field in 0..6 {
+        let mut destination = recorded.destination.clone();
+        let Identity::Local(local) = &mut destination else {
+            unreachable!()
+        };
+        match field {
+            0 => local.path.push("different"),
+            1 => local.device += 1,
+            2 => local.inode += 1,
+            3 => local.size += 1,
+            4 => local.modified.seconds += 1,
+            _ => local.changed.seconds += 1,
+        }
+        assert_eq!(
+            evidence(vec![recorded.clone()])
+                .check_resume(&recorded.source, &destination, &mut MustNotRead)
+                .unwrap(),
+            ResumeDecision::Copy,
+            "changed destination field {field}"
+        );
+    }
+}
+
+#[test]
+fn resume_ignores_access_time_changes_but_still_reads_the_source() {
+    let recorded = entry();
+    let mut source = recorded.source.clone();
+    let Identity::Image { image, .. } = &mut source else {
+        unreachable!()
+    };
+    image.accessed.seconds += 1;
+    let mut destination = recorded.destination.clone();
+    let Identity::Local(local) = &mut destination else {
+        unreachable!()
+    };
+    local.accessed.seconds += 1;
+    assert_eq!(
+        evidence(vec![recorded.clone()])
+            .check_resume(&source, &destination, &mut &b"abc"[..])
+            .unwrap(),
+        ResumeDecision::Skipped {
+            completed_at: recorded.completed_at
+        }
+    );
+}
+
+#[test]
+fn resume_recopies_changed_image_identity_and_source_identity() {
+    let mut recorded = entry();
+    std::mem::swap(&mut recorded.source, &mut recorded.destination);
+    for field in 0..6 {
+        let mut destination = recorded.destination.clone();
+        let Identity::Image {
+            path,
+            image,
+            offset,
+            filesystem_uuid,
+            inode,
+        } = &mut destination
+        else {
+            unreachable!()
+        };
+        match field {
+            0 => path.push("different"),
+            1 => image.inode += 1,
+            2 => *offset += 1,
+            3 => filesystem_uuid.push('x'),
+            4 => *inode += 1,
+            _ => image.changed.seconds += 1,
+        }
+        assert_eq!(
+            evidence(vec![recorded.clone()])
+                .check_resume(&recorded.source, &destination, &mut MustNotRead)
+                .unwrap(),
+            ResumeDecision::Copy
+        );
+    }
+    let mut source = recorded.source.clone();
+    let Identity::Local(local) = &mut source else {
+        unreachable!()
+    };
+    local.inode += 1;
+    assert_eq!(
+        evidence(vec![recorded.clone()])
+            .check_resume(&source, &recorded.destination, &mut MustNotRead)
+            .unwrap(),
+        ResumeDecision::Copy
+    );
+}
+
+#[test]
+fn resume_never_falls_back_to_superseded_destination_evidence() {
+    let recorded = entry();
+    let mut latest = recorded.clone();
+    latest.sha256 = "0".repeat(64);
+    assert_eq!(
+        evidence(vec![recorded.clone(), latest.clone()])
+            .check_resume(&recorded.source, &recorded.destination, &mut &b"abc"[..])
+            .unwrap(),
+        ResumeDecision::Copy
+    );
+    latest.sha256 = recorded.sha256.clone();
+    latest.completed_at.seconds += 1;
+    assert_eq!(
+        evidence(vec![recorded.clone(), latest.clone()])
+            .check_resume(&recorded.source, &recorded.destination, &mut &b"abc"[..])
+            .unwrap(),
+        ResumeDecision::Skipped {
+            completed_at: latest.completed_at
+        }
+    );
+    latest.source = recorded.destination.clone();
+    assert_eq!(
+        evidence(vec![recorded.clone(), latest])
+            .check_resume(&recorded.source, &recorded.destination, &mut MustNotRead)
+            .unwrap(),
+        ResumeDecision::Copy
+    );
+}
+
+#[test]
+fn resume_restarts_short_or_extra_sources_and_propagates_read_errors() {
+    let recorded = entry();
+    let read = evidence(vec![recorded.clone()]);
+    for bytes in [b"ab".as_slice(), b"abcd"] {
+        assert_eq!(
+            read.check_resume(&recorded.source, &recorded.destination, &mut &bytes[..])
+                .unwrap(),
+            ResumeDecision::Copy
+        );
+    }
+    struct Broken;
+    impl std::io::Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("resume read failed"))
+        }
+    }
+    let error = read
+        .check_resume(&recorded.source, &recorded.destination, &mut Broken)
+        .unwrap_err();
+    assert!(error.message.contains("resume read failed"));
+}
+
+#[test]
+fn resume_streams_bounded_chunks_against_python_hashlib() {
+    let file = scratch("resume-oracle").with_file_name("source");
+    let bytes = vec![0x71; 2 * fs_core::cli::transfer::CHUNK + 7];
+    fs::write(&file, &bytes).unwrap();
+    let output = Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args([
+            "-c",
+            "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())",
+        ])
+        .arg(file)
+        .output()
+        .expect("install Python 3 for the independent resume digest oracle");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut recorded = entry();
+    recorded.bytes = bytes.len() as u64;
+    let Identity::Local(local) = &mut recorded.destination else {
+        unreachable!()
+    };
+    local.size = recorded.bytes;
+    recorded.sha256 = String::from_utf8(output.stdout).unwrap().trim().into();
+    struct Bounded<'a>(&'a [u8]);
+    impl std::io::Read for Bounded<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            assert!(buffer.len() <= fs_core::cli::transfer::CHUNK);
+            // Force short reads as well as multiple chunks.
+            let n = buffer.len().min(17_003);
+            std::io::Read::read(&mut self.0, &mut buffer[..n])
+        }
+    }
+    assert_eq!(
+        evidence(vec![recorded.clone()])
+            .check_resume(
+                &recorded.source,
+                &recorded.destination,
+                &mut Bounded(&bytes)
+            )
+            .unwrap(),
+        ResumeDecision::Skipped {
+            completed_at: recorded.completed_at
+        }
+    );
+}
+
+#[test]
+fn resume_retries_interrupted_reads_and_handles_empty_files() {
+    let mut recorded = entry();
+    recorded.bytes = 0;
+    recorded.sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into();
+    let Identity::Local(local) = &mut recorded.destination else {
+        unreachable!()
+    };
+    local.size = 0;
+    struct InterruptedOnce(bool);
+    impl std::io::Read for InterruptedOnce {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            if std::mem::replace(&mut self.0, false) {
+                Err(std::io::ErrorKind::Interrupted.into())
+            } else {
+                Ok(0)
+            }
+        }
+    }
+    assert_eq!(
+        evidence(vec![recorded.clone()])
+            .check_resume(
+                &recorded.source,
+                &recorded.destination,
+                &mut InterruptedOnce(true)
+            )
+            .unwrap(),
+        ResumeDecision::Skipped {
+            completed_at: recorded.completed_at
+        }
+    );
 }
