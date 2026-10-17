@@ -411,3 +411,93 @@ fn a_file_export_reports_its_bytes_and_digest() {
     assert_eq!(report.get("sha256"), Some(&Json::from(digest)));
     assert_eq!(std::fs::read(&dest).unwrap(), data);
 }
+
+#[test]
+fn verified_exports_match_the_platform_digest_including_empty_and_multichunk_files() {
+    let dir = scratch("verified");
+    for size in [0, 1, CHUNK + 17] {
+        let dest = dir.join(format!("out-{size}"));
+        let request = ExportRequest {
+            path: OsString::from("/f"),
+            output: Output::File(dest.clone()),
+            replace: false,
+        };
+        let data = pattern(size);
+        let outcome = transfer::export_with_options(
+            &request,
+            &mut Source::new(data.clone()),
+            transfer::ExportOptions { verify: true },
+        )
+        .unwrap();
+        let report = outcome.report.unwrap();
+        assert_eq!(report.get("verified"), Some(&Json::from(true)));
+        assert_eq!(report.get("bytes"), Some(&Json::from(size as u64)));
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        let digest = platform_sha256(std::slice::from_ref(&dest)).remove(0);
+        assert_eq!(report.get("sha256"), Some(&Json::from(digest)));
+    }
+    assert_eq!(names(&dir).len(), 3, "no staging names remain");
+}
+
+#[test]
+fn verify_parses_and_stdout_is_a_usage_error_before_reading() {
+    let matches = Cmd::new("export")
+        .args(transfer::export_args_with_verify())
+        .try_get_matches_from(["export", "/f", "out", "--verify"])
+        .unwrap();
+    assert!(
+        transfer::ExportOptions::from_matches(&matches)
+            .unwrap()
+            .verify
+    );
+    ExportRequest::from_matches(&matches).unwrap();
+
+    let matches = Cmd::new("export")
+        .args(transfer::export_args_with_verify())
+        .try_get_matches_from(["export", "/f", "-", "--verify"])
+        .unwrap();
+    let err = ExportRequest::from_matches(&matches).unwrap_err();
+    assert_eq!(err.code, output::EXIT_USAGE);
+    assert!(err.message.contains("--verify"));
+
+    let mut source = Source::new(b"abc".to_vec());
+    let mut sink = Vec::new();
+    let err = transfer::export_file_with_options(
+        &mut source,
+        Destination::Writer(&mut sink),
+        transfer::ExportOptions { verify: true },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, output::EXIT_USAGE);
+    assert_eq!(source.reads, 0);
+    assert!(sink.is_empty());
+
+    let request = ExportRequest {
+        path: OsString::from("/f"),
+        output: Output::Stdout,
+        replace: false,
+    };
+    let err = transfer::export_with_options(
+        &request,
+        &mut source,
+        transfer::ExportOptions { verify: true },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, output::EXIT_USAGE);
+    assert_eq!(source.reads, 0);
+}
+
+#[test]
+fn an_unverified_export_never_claims_verification() {
+    let dir = scratch("unverified");
+    let request = ExportRequest {
+        path: OsString::from("/f"),
+        output: Output::File(dir.join("out")),
+        replace: false,
+    };
+    let outcome = transfer::export(&request, &mut Source::new(b"abc".to_vec())).unwrap();
+    assert_eq!(
+        outcome.report.unwrap().get("verified"),
+        Some(&Json::from(false))
+    );
+}

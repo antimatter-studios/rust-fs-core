@@ -40,6 +40,15 @@ driver and disk-image reader plugs into.
   published as a local file only when complete. A driver supplies a
   positioned read (`cli::transfer::FileSource`).
 
+For read-back verification, use `transfer::export_args_with_verify()`, parse
+`ExportRequest::from_matches` and `ExportOptions::from_matches`, then pass
+both to `transfer::export_with_options`. With `--verify`, the synced staging
+file is reopened and read in bounded chunks; publication requires its byte
+count and SHA-256 to match the source copy. A mismatch removes staging,
+preserves the destination and reports both digests. Stdout with `--verify`
+is a usage error (exit 2). File reports carry `verified: true` only after
+successful read-back. Existing export entry points keep verification off.
+
 ### The `cli` feature
 
 ```toml
