@@ -51,8 +51,9 @@ pub use image_lock::ImageLock;
 #[path = "transfer_tree.rs"]
 mod tree;
 pub use tree::{
-    export_args_with_links, export_args_with_tree, export_tree, export_tree_with_links,
-    LinkOptions, SymbolicLink, TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource,
+    export_args_with_links, export_args_with_times, export_args_with_tree, export_tree,
+    export_tree_with_links, export_tree_with_times, LinkOptions, SymbolicLink, TimeOptions,
+    TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource,
 };
 
 #[cfg(test)]

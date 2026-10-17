@@ -49,6 +49,16 @@ preserves the destination and reports both digests. Stdout with `--verify`
 is a usage error (exit 2). File reports carry `verified: true` only after
 successful read-back. Existing export entry points keep verification off.
 
+For timestamp preservation in tree exports, use `export_args_with_times()`,
+parse `TimeOptions::from_matches` and `LinkOptions::from_matches`, and pass
+them with the request and `TreeOptions` to `export_tree_with_times`.
+`--preserve=times` sets access and modification times; directories are restored
+after their descendants. Host metadata read-back detects rounding or clamping
+and fails the affected item while leaving published data intact. Pre-epoch and
+unavailable source times are reported. Combine with `--preserve=links,times`
+to preserve links too; symbolic link times remain the host's and are reported
+without following their targets. Existing entry points leave times to the host.
+
 Drivers should implement `FileSource::image_path` with the local backing
 image or device path, before any partition offset. File exports then refuse
 that image, its hard links and its symlink aliases before reading or creating
