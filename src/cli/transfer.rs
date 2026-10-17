@@ -48,6 +48,12 @@ use super::output::{CliError, Json, Outcome};
 mod image_lock;
 pub use image_lock::ImageLock;
 
+#[path = "transfer_tree.rs"]
+mod tree;
+pub use tree::{
+    export_args_with_tree, export_tree, TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource,
+};
+
 #[cfg(test)]
 #[path = "transfer_verify_tests.rs"]
 mod verify_tests;
