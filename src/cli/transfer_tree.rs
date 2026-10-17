@@ -14,7 +14,7 @@ pub enum TreeKind {
     /// A symlink or another unsupported type.
     Other,
 }
-/// Metadata supplied by a driver; times are exposed without promising preservation.
+/// Metadata supplied by a driver; time preservation is opt-in.
 #[derive(Clone, Debug)]
 pub struct TreeMetadata {
     /// Entry type.
@@ -115,7 +115,11 @@ impl LinkOptions {
     /// Parse [`export_args_with_links`]; older argument sets default to false.
     pub fn from_matches(m: &ArgMatches) -> Result<Self, CliError> {
         Ok(Self {
-            preserve_links: m.try_get_one::<String>("preserve").ok().flatten().is_some(),
+            preserve_links: m
+                .try_get_many::<String>("preserve")
+                .ok()
+                .flatten()
+                .is_some_and(|mut values| values.any(|v| v == "links")),
         })
     }
 }
@@ -125,6 +129,105 @@ pub fn export_args_with_links() -> [Arg; 7] {
     [path, dest, replace, verify, recursive, depth,
         Arg::new("preserve").long("preserve").value_parser(["links"])
             .help("Preserve hard links and symbolic links without following targets; report targets escaping DEST")]
+}
+
+/// Time behavior kept separate so existing option literals remain compatible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimeOptions {
+    /// Set access and modification times, restoring directories after children.
+    pub preserve_times: bool,
+}
+impl TimeOptions {
+    /// Parse [`export_args_with_times`]; older argument sets default to false.
+    pub fn from_matches(m: &ArgMatches) -> Result<Self, CliError> {
+        Ok(Self {
+            preserve_times: m
+                .try_get_many::<String>("preserve")
+                .ok()
+                .flatten()
+                .is_some_and(|mut values| values.any(|v| v == "times")),
+        })
+    }
+}
+/// Tree arguments accepting `--preserve=times`, `links`, or `times,links`.
+/// The option may also be repeated to combine preservation policies.
+pub fn export_args_with_times() -> [Arg; 7] {
+    let [path, dest, replace, verify, recursive, depth, preserve] = export_args_with_links();
+    [path, dest, replace, verify, recursive, depth,
+        preserve.value_parser(["links", "times"]).value_delimiter(',').action(ArgAction::Append)
+            .help("Preserve times and/or links; report unavailable times, host precision loss, and targets escaping DEST")]
+}
+
+// Compare with host metadata: success from set_times alone can hide rounding
+// or clamping by the destination filesystem. Never open a symbolic link here.
+fn preserve_times(local: &Path, metadata: &TreeMetadata) -> Result<String, CliError> {
+    let mut notes = Vec::new();
+    let mut times = fs::FileTimes::new();
+    for (label, time) in [
+        ("access", metadata.accessed),
+        ("modification", metadata.modified),
+    ] {
+        if let Some(time) = time {
+            if time < std::time::UNIX_EPOCH {
+                notes.push(format!("pre-epoch {label} time"));
+            }
+            times = if label == "access" {
+                times.set_accessed(time)
+            } else {
+                times.set_modified(time)
+            };
+        }
+    }
+    if metadata.accessed.is_none() && metadata.modified.is_none() {
+        return Ok("source times unavailable".into());
+    }
+    if metadata.accessed.is_none() || metadata.modified.is_none() {
+        notes.push("one source time unavailable".into());
+    }
+    let failed = |e| {
+        CliError::failed(format!(
+            "times not preserved exactly{}: {e}",
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", notes.join("; "))
+            }
+        ))
+    };
+    let mut open = OpenOptions::new();
+    open.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, plus directory access.
+        open.access_mode(0x180).custom_flags(0x02000000);
+    }
+    let file = open.open(local).map_err(failed)?;
+    file.set_times(times).map_err(failed)?;
+    let actual = file.metadata().map_err(failed)?;
+    for (label, wanted, actual) in [
+        ("access", metadata.accessed, actual.accessed()),
+        ("modification", metadata.modified, actual.modified()),
+    ] {
+        if let Some(wanted) = wanted {
+            let actual = actual.map_err(failed)?;
+            if actual != wanted {
+                return Err(failed(io::Error::other(format!(
+                    "{label} time rounded or clamped by destination; requested {wanted:?}, observed {actual:?}"
+                ))));
+            }
+        }
+    }
+    Ok(notes.join("; "))
+}
+
+fn append_reason(reason: &mut String, note: &str) {
+    if !note.is_empty() {
+        if !reason.is_empty() {
+            reason.push_str("; ");
+        }
+        reason.push_str(note);
+    }
 }
 
 // Use exclusive creation; replacing a name stages the link beside it and
@@ -322,6 +425,21 @@ pub fn export_tree_with_links(
     options: TreeOptions,
     links: LinkOptions,
 ) -> Result<Outcome, CliError> {
+    export_tree_with_times(request, source, options, links, TimeOptions::default())
+}
+/// Export with optional access and modification time preservation.
+/// Files are timestamped after publication and verification; directories after
+/// all descendants. Failed settings or inexact host read-back fail that item
+/// without removing its published contents or stopping siblings. Missing source
+/// times and pre-epoch values are reported. Symbolic links are never followed;
+/// their times are left to the host and this limitation is reported.
+pub fn export_tree_with_times(
+    request: &ExportRequest,
+    source: &mut dyn TreeSource,
+    options: TreeOptions,
+    links: LinkOptions,
+    times: TimeOptions,
+) -> Result<Outcome, CliError> {
     let Output::File(dest) = &request.output else {
         return Err(CliError::usage("tree export needs a local DEST"));
     };
@@ -340,6 +458,7 @@ pub fn export_tree_with_links(
     let mut items = Vec::new();
     let mut counts = [0u64; 4];
     let mut merged = 0u64;
+    let mut deferred_times = Vec::new();
     while let Some((path, local, metadata, depth)) = pending.pop() {
         let mut reason = String::new();
         let mut evidence = Json::Null;
@@ -386,6 +505,12 @@ pub fn export_tree_with_links(
                             "symbolic link preserved"
                         }
                         .into();
+                        if times.preserve_times {
+                            append_reason(
+                                &mut reason,
+                                "symbolic link times not preserved; target not followed",
+                            );
+                        }
                         return Ok(0);
                     }
                     reason = "unsupported entry type".into();
@@ -493,6 +618,12 @@ pub fn export_tree_with_links(
             }
             Ok(0)
         })();
+        let result = result.and_then(|status| {
+            if status == 0 && times.preserve_times && metadata.kind == TreeKind::File {
+                append_reason(&mut reason, &preserve_times(&local, &metadata)?);
+            }
+            Ok(status)
+        });
         let status = match result {
             Ok(s) => s,
             Err(e) => {
@@ -505,6 +636,9 @@ pub fn export_tree_with_links(
             }
         };
         counts[status] += 1;
+        if status == 0 && times.preserve_times && metadata.kind == TreeKind::Directory {
+            deferred_times.push((local.clone(), metadata, items.len()));
+        }
         items.push(Json::object([
             ("path", Json::from(path.display().to_string())),
             ("destination", Json::from(local.display().to_string())),
@@ -515,6 +649,28 @@ pub fn export_tree_with_links(
             ("reason", Json::from(reason)),
             ("copy", evidence),
         ]));
+    }
+    // Reverse visitation order restores every child directory before its parent.
+    for (local, metadata, index) in deferred_times.into_iter().rev() {
+        let (note, failed) = match preserve_times(&local, &metadata) {
+            Ok(note) => (note, false),
+            Err(e) => (e.message, true),
+        };
+        if failed {
+            counts[0] -= 1;
+            counts[3] += 1;
+        }
+        if let Json::Obj(fields) = &mut items[index] {
+            for (key, value) in fields {
+                if key == "reason" {
+                    if let Json::Str(reason) = value {
+                        append_reason(reason, &note);
+                    }
+                } else if key == "status" && failed {
+                    *value = Json::from("failed");
+                }
+            }
+        }
     }
     Ok(Outcome::report(Json::object([
         ("completed", Json::from(counts[0])),
