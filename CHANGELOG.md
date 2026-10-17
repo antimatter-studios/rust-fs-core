@@ -12,6 +12,25 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.3.14] — 2026-10-17
+
+### Added
+
+- **`fs_core::cli::transfer` copies a file out of an image, bounded and
+  digested.** A driver implements `FileSource` (a length and a positioned
+  read) and wires `export_args()` and `export()` into its `export` verb. The
+  copy moves 1 MiB at a time through one buffer, reports its byte count and
+  SHA-256, writes a local file under a hidden staging name and publishes it
+  only when complete: by hard link, refusing an existing name, or by rename
+  with `--replace`. A failed read or write leaves any existing destination as
+  it was, and a failed writer reports how many bytes of the total it took.
+  The `cli` feature now also turns on `sha2` (MIT/Apache-2.0). (#270)
+
+### Fixed
+
+- The CI gate reads literal workflow-level `CI_GATE_NON_GATING` declarations outside GitHub Actions, with process environment overrides preserved. (#271)
+- A missing PyYAML dependency names the Python interpreter and the host-tools setup that should provide it. (#271)
+
 ## [0.3.13] — 2026-10-16
 
 ### Added
@@ -966,7 +985,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.13...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.14...HEAD
+[0.3.14]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.13...v0.3.14
 [0.3.13]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.12...v0.3.13
 [0.3.12]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.11...v0.3.12
 [0.3.11]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.10...v0.3.11
