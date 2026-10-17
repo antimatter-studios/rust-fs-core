@@ -68,6 +68,10 @@ pub use import::{
     LocalSource,
 };
 
+#[path = "transfer_import_tree.rs"]
+mod import_tree;
+pub use import_tree::{import_args_with_tree, import_tree, ImportTreeOptions, TreeSink};
+
 #[path = "transfer_tree.rs"]
 mod tree;
 pub use tree::{
