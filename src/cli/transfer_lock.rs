@@ -74,7 +74,7 @@ fn open(image: &Path) -> Result<File, CliError> {
 }
 
 #[cfg(not(windows))]
-fn lock(file: &File, exclusive: bool) -> Result<(), TryLockError> {
+pub(super) fn lock(file: &File, exclusive: bool) -> Result<(), TryLockError> {
     if exclusive {
         file.try_lock()
     } else {
@@ -88,7 +88,7 @@ fn lock(file: &File, exclusive: bool) -> Result<(), TryLockError> {
 // read and write. Native whole-file locks overlap this byte too. Closing the
 // guard's handle releases it. Unix flock already has these advisory semantics.
 #[cfg(windows)]
-fn lock(file: &File, exclusive: bool) -> Result<(), TryLockError> {
+pub(super) fn lock(file: &File, exclusive: bool) -> Result<(), TryLockError> {
     use std::ffi::c_void;
     use std::io;
     use std::os::windows::io::AsRawHandle;
