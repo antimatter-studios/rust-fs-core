@@ -36,7 +36,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Arg, ArgAction, ArgMatches};
@@ -48,12 +48,16 @@ use super::output::{CliError, Json, Outcome};
 mod image_lock;
 pub use image_lock::ImageLock;
 
+#[path = "transfer_progress.rs"]
+mod progress;
+pub use progress::{export_args_with_progress, Progress, ProgressOptions};
+
 #[path = "transfer_tree.rs"]
 mod tree;
 pub use tree::{
     export_args_with_links, export_args_with_times, export_args_with_tree, export_tree,
-    export_tree_with_links, export_tree_with_times, LinkOptions, SymbolicLink, TimeOptions,
-    TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource,
+    export_tree_with_links, export_tree_with_progress, export_tree_with_times, LinkOptions,
+    SymbolicLink, TimeOptions, TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource,
 };
 
 #[cfg(test)]
@@ -161,6 +165,38 @@ pub fn export_file_with_options(
     destination: Destination<'_>,
     options: ExportOptions,
 ) -> Result<Copied, CliError> {
+    let mut stderr = io::stderr();
+    let terminal = stderr.is_terminal();
+    let mut progress = Progress::new(&mut stderr, terminal, ProgressOptions::default());
+    progress.set_totals(Some(source.size()), Some(1));
+    let name = match &destination {
+        Destination::Writer(_) => PathBuf::from("-"),
+        Destination::File { path, .. } => path.to_path_buf(),
+    };
+    export_file_with_progress(source, destination, options, &name, &mut progress)
+}
+
+/// Export with a shared stderr reporter. Set its overall totals before copying;
+/// unknown totals stay unknown. Completion is reported only after publication.
+pub fn export_file_with_progress(
+    source: &mut dyn FileSource,
+    destination: Destination<'_>,
+    options: ExportOptions,
+    name: &Path,
+    progress: &mut Progress<'_>,
+) -> Result<Copied, CliError> {
+    progress.begin_file(name, Some(source.size()));
+    let result = copy_file(source, destination, options, progress);
+    progress.finish_file(result.is_ok());
+    result
+}
+
+fn copy_file(
+    source: &mut dyn FileSource,
+    destination: Destination<'_>,
+    options: ExportOptions,
+    progress: &mut Progress<'_>,
+) -> Result<Copied, CliError> {
     if matches!(&destination, Destination::Writer(_)) && options.verify {
         return Err(CliError::usage("--verify needs a file DEST, not a writer"));
     }
@@ -169,18 +205,25 @@ pub fn export_file_with_options(
         .map(|image| ImageLock::for_export(image, &mut io::stderr().lock()))
         .transpose()?;
     match destination {
-        Destination::Writer(sink) => pump(source, sink),
-        Destination::File { path, replace } => {
-            export_to_file(source, path, replace, options.verify, |file, _| {
-                file.sync_all()
-            })
-        }
+        Destination::Writer(sink) => pump(source, sink, &mut |n| progress.advance(n)),
+        Destination::File { path, replace } => export_to_file_observed(
+            source,
+            path,
+            replace,
+            options.verify,
+            &mut |n| progress.advance(n),
+            |file, _| file.sync_all(),
+        ),
     }
 }
 
 /// The copy itself: chunk by chunk from `source` into `sink`, digesting
 /// what passes.
-fn pump(source: &mut dyn FileSource, sink: &mut dyn Write) -> Result<Copied, CliError> {
+fn pump(
+    source: &mut dyn FileSource,
+    sink: &mut dyn Write,
+    update: &mut dyn FnMut(u64),
+) -> Result<Copied, CliError> {
     let size = source.size();
     let mut buf = vec![0u8; usize::try_from(size).map_or(CHUNK, |s| s.min(CHUNK))];
     let mut digest = Sha256::new();
@@ -206,9 +249,17 @@ fn pump(source: &mut dyn FileSource, sink: &mut dyn Write) -> Result<Copied, Cli
             )));
         }
         digest.update(&buf[..got]);
-        sink.write_all(&buf[..got])
-            .map_err(|e| delivered(offset, e))?;
-        offset += got as u64;
+        let mut remaining = &buf[..got];
+        while !remaining.is_empty() {
+            let written = match sink.write(remaining) {
+                Ok(0) => return Err(delivered(offset, io::ErrorKind::WriteZero.into())),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => result.map_err(|e| delivered(offset, e))?,
+            };
+            remaining = &remaining[written..];
+            offset += written as u64;
+            update(offset);
+        }
     }
     sink.flush().map_err(|e| delivered(offset, e))?;
     Ok(Copied {
@@ -218,11 +269,23 @@ fn pump(source: &mut dyn FileSource, sink: &mut dyn Write) -> Result<Copied, Cli
     })
 }
 
+#[cfg(test)]
 fn export_to_file(
     source: &mut dyn FileSource,
     path: &Path,
     replace: bool,
     verify: bool,
+    sync: impl FnOnce(&mut File, &Path) -> io::Result<()>,
+) -> Result<Copied, CliError> {
+    export_to_file_observed(source, path, replace, verify, &mut |_| {}, sync)
+}
+
+fn export_to_file_observed(
+    source: &mut dyn FileSource,
+    path: &Path,
+    replace: bool,
+    verify: bool,
+    update: &mut dyn FnMut(u64),
     sync: impl FnOnce(&mut File, &Path) -> io::Result<()>,
 ) -> Result<Copied, CliError> {
     if let Some(image) = source.image_path() {
@@ -256,7 +319,7 @@ fn export_to_file(
     }
 
     let (staging, mut file) = create_staging(parent, name)?;
-    let copied = pump(source, &mut file).and_then(|copied| {
+    let copied = pump(source, &mut file, update).and_then(|copied| {
         sync(&mut file, &staging)
             .map_err(|e| CliError::failed(format!("sync {}: {e}", staging.display())))?;
         Ok(copied)
@@ -555,24 +618,47 @@ pub fn export_with_options(
     source: &mut dyn FileSource,
     options: ExportOptions,
 ) -> Result<Outcome, CliError> {
+    let mut stderr = io::stderr();
+    let terminal = stderr.is_terminal();
+    let mut progress = Progress::new(&mut stderr, terminal, ProgressOptions::default());
+    export_with_progress(request, source, options, &mut progress)
+}
+
+/// Export content and its final report with progress confined to the reporter.
+/// Construct it from stderr and [`ProgressOptions::from_matches`].
+pub fn export_with_progress(
+    request: &ExportRequest,
+    source: &mut dyn FileSource,
+    options: ExportOptions,
+    progress: &mut Progress<'_>,
+) -> Result<Outcome, CliError> {
+    progress.set_totals(Some(source.size()), Some(1));
     let dest = match &request.output {
         Output::Stdout if options.verify => {
             return Err(CliError::usage("--verify needs a file DEST, not stdout"));
         }
         Output::Stdout => {
             let mut stdout = io::stdout().lock();
-            export_file(source, Destination::Writer(&mut stdout))?;
+            export_file_with_progress(
+                source,
+                Destination::Writer(&mut stdout),
+                options,
+                Path::new(&request.path),
+                progress,
+            )?;
             return Ok(Outcome::done());
         }
         Output::File(dest) => dest,
     };
-    let copied = export_file_with_options(
+    let copied = export_file_with_progress(
         source,
         Destination::File {
             path: dest,
             replace: request.replace,
         },
         options,
+        Path::new(&request.path),
+        progress,
     )?;
     let path = request.path.to_string_lossy();
     let report = Json::object([
