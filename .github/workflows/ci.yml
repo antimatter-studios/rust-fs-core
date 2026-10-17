@@ -132,7 +132,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh "test (debug)" debug 1000 60000 -- cargo test --locked --all-targets --features cli
-          bash scripts/core.sh test-floor debug 402
+          bash scripts/core.sh test-floor debug 411
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
@@ -209,7 +209,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90
-          bash scripts/core.sh test-floor coverage 402
+          bash scripts/core.sh test-floor coverage 411
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt coverage
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"

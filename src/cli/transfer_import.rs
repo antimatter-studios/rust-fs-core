@@ -43,15 +43,159 @@ fn capable(sink: Option<&mut dyn FileSink>, replace: bool) -> Result<&mut dyn Fi
     Ok(sink)
 }
 
+/// An opened local file, optionally wrapped by a reader that observes chunks.
+/// Reads must come from `file`, starting at offset zero. Supplying `local_path`
+/// also detects unlinking or replacing the source name while its handle is open.
+pub trait LocalSource: Read {
+    /// The opened file whose identity and metadata describe the input bytes.
+    fn file(&self) -> &File;
+    /// The source name, when available; it must still name the opened file.
+    fn local_path(&self) -> Option<&Path> {
+        None
+    }
+}
+
+impl LocalSource for File {
+    fn file(&self) -> &File {
+        self
+    }
+}
+
+struct NamedSource<'a> {
+    file: File,
+    path: &'a Path,
+}
+impl Read for NamedSource<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.file.read(bytes)
+    }
+}
+impl LocalSource for NamedSource<'_> {
+    fn file(&self) -> &File {
+        &self.file
+    }
+    fn local_path(&self) -> Option<&Path> {
+        Some(self.path)
+    }
+}
+
+struct SourceIdentity {
+    metadata: fs::Metadata,
+    #[cfg(not(unix))]
+    identity: same_file::Handle,
+}
+impl SourceIdentity {
+    fn capture(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::other(
+                "a local import source must be a regular file",
+            ));
+        }
+        metadata.modified()?;
+        Ok(Self {
+            metadata,
+            #[cfg(not(unix))]
+            identity: same_file::Handle::from_file(file.try_clone()?)?,
+        })
+    }
+
+    fn matches(&self, metadata: &fs::Metadata) -> io::Result<bool> {
+        if !metadata.is_file()
+            || self.metadata.len() != metadata.len()
+            || self.metadata.modified()? != metadata.modified()?
+        {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(self.metadata.dev() == metadata.dev()
+                && self.metadata.ino() == metadata.ino()
+                && self.metadata.ctime() == metadata.ctime()
+                && self.metadata.ctime_nsec() == metadata.ctime_nsec())
+        }
+        #[cfg(not(unix))]
+        Ok(true)
+    }
+
+    fn check(&self, source: &dyn LocalSource, bytes: u64) -> Result<(), CliError> {
+        let unchanged = (|| -> io::Result<bool> {
+            if bytes != self.metadata.len() || !self.matches(&source.file().metadata()?)? {
+                return Ok(false);
+            }
+            #[cfg(not(unix))]
+            if self.identity != same_file::Handle::from_file(source.file().try_clone()?)? {
+                return Ok(false);
+            }
+            if let Some(path) = source.local_path() {
+                if !self.matches(&fs::metadata(path)?)? {
+                    return Ok(false);
+                }
+                #[cfg(not(unix))]
+                if self.identity != same_file::Handle::from_path(path)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        match unchanged {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(CliError::failed("source changed during copy")),
+            Err(error) => Err(CliError::failed(format!(
+                "source changed during copy: {error}"
+            ))),
+        }
+    }
+}
+
+/// Import a local file only if its identity, size and timestamps stay unchanged.
+/// The checks run after EOF and again after persistence, before publication;
+/// failure aborts staging and preserves the old destination. Unix includes
+/// device, inode and change time. Other hosts cannot detect every same-size,
+/// restored-mtime rewrite; [`import`] reports that limitation. The digest covers
+/// exactly the bytes read. Generic streams continue to use [`import_file`].
+pub fn import_local_file(
+    source: &mut dyn LocalSource,
+    sink: Option<&mut dyn FileSink>,
+    path: &Path,
+    replace: bool,
+) -> Result<Copied, CliError> {
+    let sink = capable(sink, replace)?;
+    let identity = SourceIdentity::capture(source.file())
+        .map_err(|e| CliError::failed(format!("cannot inspect import source: {e}")))?;
+    identity.check(source, identity.metadata.len())?;
+    import_stream(
+        source,
+        Some(sink),
+        path,
+        replace,
+        Some(identity.metadata.len()),
+        |source, bytes| identity.check(source, bytes),
+    )
+}
+
 /// Stream a reader (a local file or locked stdin) into a driver's staged file.
 /// Refusals consume no input. A source, write, persistence or publication error
 /// aborts staging and preserves an existing destination. Memory is one `CHUNK`.
 /// SIGINT/SIGTERM use the existing transfer cancellation status and cleanup.
+/// Use [`import_local_file`] to validate a local file's identity as well.
 pub fn import_file(
     source: &mut dyn Read,
     sink: Option<&mut dyn FileSink>,
     path: &Path,
     replace: bool,
+) -> Result<Copied, CliError> {
+    import_stream(source, sink, path, replace, None, |_, _| Ok(()))
+}
+
+fn import_stream<S: Read + ?Sized>(
+    source: &mut S,
+    sink: Option<&mut dyn FileSink>,
+    path: &Path,
+    replace: bool,
+    size: Option<u64>,
+    mut validate: impl FnMut(&S, u64) -> Result<(), CliError>,
 ) -> Result<Copied, CliError> {
     let sink = capable(sink, replace)?;
     let _lock = sink.image_path().map(ImageLock::for_import).transpose()?;
@@ -80,18 +224,25 @@ pub fn import_file(
             let next = bytes
                 .checked_add(n as u64)
                 .ok_or_else(|| CliError::failed("import byte count overflow"))?;
+            if size.is_some_and(|size| next > size) {
+                return Err(CliError::failed("source changed during copy"));
+            }
             sink.write_at(bytes, &buffer[..n])?;
             digest.update(&buffer[..n]);
             bytes = next;
         }
         cancellation.check(bytes, bytes)?;
+        let sha256 = digest.finalize().into();
+        validate(source, bytes)?;
         let persisted = sink.persist();
         cancellation.check(bytes, bytes)?;
         persisted?;
+        validate(source, bytes)?;
+        cancellation.check(bytes, bytes)?;
         let replaced = sink.publish(replace)?;
         Ok(Copied {
             bytes,
-            sha256: digest.finalize().into(),
+            sha256,
             replaced,
         })
     })();
@@ -180,11 +331,18 @@ pub fn import(
             if let Some(image) = sink.image_path() {
                 refuse_image_alias(image, local)?;
             }
-            let mut source = File::open(local)
+            let file = File::open(local)
                 .map_err(|e| CliError::failed(format!("open {}: {e}", local.display())))?;
-            import_file(&mut source, Some(sink), &request.path, request.replace)?
+            let mut source = NamedSource { file, path: local };
+            import_local_file(&mut source, Some(sink), &request.path, request.replace)?
         }
     };
+    let limitation = (!cfg!(unix) && matches!(&request.input, Input::File(_))).then_some(
+        "source change time is unavailable; same-size rewrites with restored modification time may be undetectable",
+    );
+    let limitation_text = limitation
+        .map(|text| format!("; limitation: {text}"))
+        .unwrap_or_default();
     let report = Json::object([
         (
             "destination",
@@ -194,11 +352,16 @@ pub fn import(
         ("sha256", Json::from(copied.sha256_hex())),
         ("created", Json::from(!copied.replaced)),
         ("replaced", Json::from(copied.replaced)),
+        (
+            "limitations",
+            Json::Arr(limitation.into_iter().map(Json::from).collect()),
+        ),
     ]);
     Ok(Outcome::report(report).with_text(format!(
-        "imported {} bytes to {} (sha256 {})",
+        "imported {} bytes to {} (sha256 {}){}",
         copied.bytes,
         request.path.display(),
-        copied.sha256_hex()
+        copied.sha256_hex(),
+        limitation_text
     )))
 }
