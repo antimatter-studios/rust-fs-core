@@ -1,10 +1,10 @@
 //! Local tree exports. Names and existing directory components are checked
 //! before joining paths; callers must exclude concurrent destination mutation.
 use super::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
-/// A source entry's type. Links and special files are not followed or copied.
+/// A source entry's type. Symbolic links use `Other` and are never followed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeKind {
     /// A regular file.
@@ -21,7 +21,8 @@ pub struct TreeMetadata {
     pub kind: TreeKind,
     /// File length in bytes.
     pub size: u64,
-    /// Stable inode identity within this source, used to refuse directory cycles.
+    /// Stable identity within this source: equal for hard links, unique otherwise.
+    /// Used to preserve file links and refuse repeated directory visits.
     pub inode: u64,
     /// Last access time, when available.
     pub accessed: Option<SystemTime>,
@@ -42,9 +43,16 @@ pub trait TreeSource {
     fn image_path(&self) -> Option<&Path> {
         None
     }
-    /// Metadata for a source path, including the root the user selected.
+    /// For an `Other` entry, return its symbolic target without following it.
+    /// The default leaves `Other` unsupported, preserving existing drivers.
+    fn symbolic_link(&mut self, _path: &Path) -> Result<Option<SymbolicLink>, CliError> {
+        Ok(None)
+    }
+    /// Metadata without following links, including for the selected root.
+    /// Symbolic links must be `Other`; `symbolic_link` supplies their targets.
     fn metadata(&mut self, path: &Path) -> Result<TreeMetadata, CliError>;
-    /// Children of a directory; listing failure is reported for that directory.
+    /// Children with metadata that does not follow links. Listing failure is
+    /// reported for the directory.
     fn read_dir(&mut self, path: &Path) -> Result<Vec<TreeEntry>, CliError>;
     /// Read a regular file at an offset, with the same contract as FileSource.
     fn read_file_at(&mut self, path: &Path, offset: u64, buf: &mut [u8])
@@ -87,6 +95,107 @@ pub fn export_args_with_tree() -> [Arg; 6] {
     [path, dest, replace.help("Replace existing files; existing directories are merged into, preserving unrelated entries"), verify,
         Arg::new("recursive").long("recursive").action(ArgAction::SetTrue).help("Copy a directory tree; existing destination directories are merged into"),
         Arg::new("max-depth").long("max-depth").default_value("64").value_parser(clap::value_parser!(usize)).help("Maximum entry depth below the source root (root is zero)")]
+}
+/// A symbolic link's opaque target and Windows link type; never resolve it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolicLink {
+    /// Target as stored by the source, including non-Unicode names.
+    pub target: PathBuf,
+    /// Windows requires the source link's directory bit even for dangling links.
+    /// Unix ignores this field.
+    pub target_is_directory: bool,
+}
+/// Link behavior kept separate so existing `TreeOptions` literals still compile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkOptions {
+    /// Recreate symbolic links and copy each regular inode only once.
+    pub preserve_links: bool,
+}
+impl LinkOptions {
+    /// Parse [`export_args_with_links`]; older argument sets default to false.
+    pub fn from_matches(m: &ArgMatches) -> Result<Self, CliError> {
+        Ok(Self {
+            preserve_links: m.try_get_one::<String>("preserve").ok().flatten().is_some(),
+        })
+    }
+}
+/// Tree arguments with opt-in `--preserve=links`; targets are never followed.
+pub fn export_args_with_links() -> [Arg; 7] {
+    let [path, dest, replace, verify, recursive, depth] = export_args_with_tree();
+    [path, dest, replace, verify, recursive, depth,
+        Arg::new("preserve").long("preserve").value_parser(["links"])
+            .help("Preserve hard links and symbolic links without following targets; report targets escaping DEST")]
+}
+
+// Use exclusive creation; replacing a name stages the link beside it and
+// renames it atomically, so an error cannot remove the previous destination.
+fn publish_link(
+    local: &Path,
+    replace: bool,
+    create: impl Fn(&Path) -> io::Result<()>,
+) -> Result<(), CliError> {
+    let parent = local
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let failed = |e| CliError::failed(format!("publish link {}: {e}", local.display()));
+    if !replace {
+        create(local).map_err(failed)?;
+    } else {
+        let mut staging = None;
+        for n in 0..1000u32 {
+            let candidate = parent.join(format!(".core-link-{}-{n}.partial", std::process::id()));
+            match create(&candidate) {
+                Ok(()) => {
+                    staging = Some(candidate);
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(failed(e)),
+            }
+        }
+        let staging = staging.ok_or_else(|| CliError::failed("no free link staging name"))?;
+        if let Err(e) = fs::rename(&staging, local) {
+            let _ = fs::remove_file(&staging);
+            return Err(failed(e));
+        }
+    }
+    sync_dir(parent).map_err(failed)
+}
+fn create_symbolic_link(link: &SymbolicLink, local: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&link.target, local)
+    }
+    #[cfg(windows)]
+    {
+        if link.target_is_directory {
+            std::os::windows::fs::symlink_dir(&link.target, local)
+        } else {
+            std::os::windows::fs::symlink_file(&link.target, local)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (link, local);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symbolic links unsupported",
+        ))
+    }
+}
+fn target_escapes(target: &Path, mut parent_depth: usize) -> bool {
+    use std::path::Component;
+    for part in target.components() {
+        match part {
+            Component::RootDir | Component::Prefix(_) => return true,
+            Component::ParentDir if parent_depth == 0 => return true,
+            Component::ParentDir => parent_depth -= 1,
+            Component::Normal(_) => parent_depth += 1,
+            Component::CurDir => {}
+        }
+    }
+    false
 }
 struct TreeFile<'a> {
     source: &'a mut dyn TreeSource,
@@ -199,6 +308,20 @@ pub fn export_tree(
     source: &mut dyn TreeSource,
     options: TreeOptions,
 ) -> Result<Outcome, CliError> {
+    export_tree_with_links(request, source, options, LinkOptions::default())
+}
+/// Export with explicit link preservation. File identities are source-wide;
+/// only successfully published files become hard-link anchors. Symbolic targets
+/// are copied unchanged, with escaping targets reported as completed warnings.
+/// Repeated directories are refused as `loop` under either link policy.
+/// Drivers must supply [`TreeSource::symbolic_link`] to identify symbolic links;
+/// unclassified `Other` entries retain their existing unsupported status.
+pub fn export_tree_with_links(
+    request: &ExportRequest,
+    source: &mut dyn TreeSource,
+    options: TreeOptions,
+    links: LinkOptions,
+) -> Result<Outcome, CliError> {
     let Output::File(dest) = &request.output else {
         return Err(CliError::usage("tree export needs a local DEST"));
     };
@@ -213,6 +336,7 @@ pub fn export_tree(
     }
     let mut pending = vec![(root, dest.clone(), metadata, 0usize)];
     let mut directories = HashSet::new();
+    let mut files: HashMap<u64, (PathBuf, Json)> = HashMap::new();
     let mut items = Vec::new();
     let mut counts = [0u64; 4];
     let mut merged = 0u64;
@@ -241,6 +365,29 @@ pub fn export_tree(
             }
             match metadata.kind {
                 TreeKind::Other => {
+                    if let Some(link) = source.symbolic_link(&path)? {
+                        if !links.preserve_links {
+                            return Err(CliError::refused(
+                                "symbolic link requires --preserve=links",
+                            ));
+                        }
+                        if existing
+                            .as_ref()
+                            .is_some_and(|m| m.is_dir() || !request.replace)
+                        {
+                            return Err(CliError::refused(
+                                "destination exists; --replace permits existing files only",
+                            ));
+                        }
+                        publish_link(&local, request.replace, |p| create_symbolic_link(&link, p))?;
+                        reason = if target_escapes(&link.target, depth.saturating_sub(1)) {
+                            "symbolic link preserved; target escapes DEST"
+                        } else {
+                            "symbolic link preserved"
+                        }
+                        .into();
+                        return Ok(0);
+                    }
                     reason = "unsupported entry type".into();
                     return Ok(1);
                 }
@@ -252,6 +399,15 @@ pub fn export_tree(
                         return Err(CliError::refused(
                             "destination exists; --replace permits existing files only",
                         ));
+                    }
+                    if let Some((first, copied)) = files.get(&metadata.inode) {
+                        if links.preserve_links {
+                            publish_link(&local, request.replace, |p| fs::hard_link(first, p))?;
+                            evidence = copied.clone();
+                            reason = "hard link preserved".into();
+                            return Ok(0);
+                        }
+                        reason = "hard link copied as separate file; links not preserved".into();
                     }
                     let copied = export_file_with_options(
                         &mut TreeFile {
@@ -271,10 +427,13 @@ pub fn export_tree(
                         ("bytes", Json::from(copied.bytes)),
                         ("sha256", Json::from(copied.sha256_hex())),
                     ]);
+                    files
+                        .entry(metadata.inode)
+                        .or_insert_with(|| (local.clone(), evidence.clone()));
                 }
                 TreeKind::Directory => {
                     if !directories.insert(metadata.inode) {
-                        return Err(CliError::refused("directory inode already visited"));
+                        return Err(CliError::refused("loop: directory inode already visited"));
                     }
                     if existing.as_ref().is_some_and(|m| !m.is_dir()) {
                         return Err(CliError::refused(
