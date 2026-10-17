@@ -11,3 +11,5 @@ transfer_exclusive 7
 transfer_tree 18
 # #258 adds six portable progress cases, including captured-stream and clock oracles.
 transfer_progress 6
+# #259 adds one portable API case and four Unix child-signal oracle cases.
+transfer_cancel 1
