@@ -49,6 +49,9 @@ use sha2::{Digest, Sha256};
 
 use super::output::{CliError, Json, Outcome};
 
+#[path = "transfer_manifest.rs"]
+pub mod manifest;
+
 #[path = "transfer_lock.rs"]
 mod image_lock;
 pub use image_lock::ImageLock;
