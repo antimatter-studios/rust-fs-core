@@ -49,6 +49,15 @@ preserves the destination and reports both digests. Stdout with `--verify`
 is a usage error (exit 2). File reports carry `verified: true` only after
 successful read-back. Existing export entry points keep verification off.
 
+Drivers should implement `FileSource::image_path` with the local backing
+image or device path, before any partition offset. File exports then refuse
+that image, its hard links and its symlink aliases before reading or creating
+anything, even with `--replace`. Imports and tree transfers should call
+`transfer::refuse_image_alias(image, local_path)` for every local file before
+moving bytes. Identity lookup failures are errors; a new local path is allowed.
+Existing `FileSource` implementations remain compatible through a default
+`image_path` returning `None`, which provides no alias protection.
+
 ### The `cli` feature
 
 ```toml
