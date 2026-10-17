@@ -18,6 +18,7 @@ transfer_cancel 1
 # #263 adds nine portable source-identity cases and one Unix change-time oracle.
 transfer_import 22
 # #264 adds eight portable recursive-import cases and a Unix symlink case.
+# #267 adds three Unix hard-link, symbolic-link and time capability cases.
 transfer_import_tree 8
 # #291 adds eight portable durable manifest storage cases.
 # #311 adds a Unix fork-inheritance regression above the portable cases.
