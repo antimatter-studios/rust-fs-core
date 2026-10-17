@@ -7,6 +7,12 @@ on:
   # decides whether they land. The queue reads ci-ok only from a workflow
   # that triggers here.
   merge_group:
+  # By hand, on any branch: a pull request's test-only commit is pushed to
+  # red/<branch> and CI dispatched there, so the run records the new tests
+  # failing without the fix (#306). A dispatch has no range to diff, so the
+  # changes job answers true and it is the full pipeline.
+  # tests/scripts/test-ci-dispatch.sh fails if either stops being so.
+  workflow_dispatch:
 env:
   CARGO_TERM_COLOR: always
 # Read-only unless a job asks for more. This repository's default token
@@ -21,9 +27,9 @@ jobs:
   # the change's paths and says false only when every one is documentation.
   # The change is the pull request's diff, the merge queue group's (its
   # base_sha to its head_sha: what the queue is about to land), or a push to
-  # main's (before to after); a push it cannot diff runs everything. The
-  # test matrix and coverage run only when the answer is true, and ci-ok
-  # accepts their skip when, and only when, it is false.
+  # main's (before to after); a push it cannot diff, and a dispatch, run
+  # everything. The test matrix and coverage run only when the answer is
+  # true, and ci-ok accepts their skip when, and only when, it is false.
   changes:
     name: changes (does this need the full pipeline?)
     runs-on: ubuntu-latest
