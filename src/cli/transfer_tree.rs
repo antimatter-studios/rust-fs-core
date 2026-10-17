@@ -149,13 +149,13 @@ impl TimeOptions {
         })
     }
 }
-/// Tree arguments accepting `--preserve=times`, `links`, or `times,links`.
+/// Tree arguments accepting `--preserve=times`, `links`, and/or `sparse`.
 /// The option may also be repeated to combine preservation policies.
 pub fn export_args_with_times() -> [Arg; 7] {
     let [path, dest, replace, verify, recursive, depth, preserve] = export_args_with_links();
     [path, dest, replace, verify, recursive, depth,
-        preserve.value_parser(["links", "times"]).value_delimiter(',').action(ArgAction::Append)
-            .help("Preserve times and/or links; report unavailable times, host precision loss, and targets escaping DEST")]
+        preserve.value_parser(["links", "times", "sparse"]).value_delimiter(',').action(ArgAction::Append)
+            .help("Preserve times, links and/or sparse holes; report unavailable times, host precision loss, and targets escaping DEST")]
 }
 
 // Compare with host metadata: success from set_times alone can hide rounding
@@ -635,7 +635,8 @@ pub fn export_tree_with_progress(
                         },
                         ExportOptions {
                             verify: options.verify,
-                        },
+                        }
+                        .into(),
                         progress,
                         &cancellation,
                     )?;

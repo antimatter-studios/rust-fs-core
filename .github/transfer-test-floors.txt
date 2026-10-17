@@ -22,3 +22,5 @@ transfer_import_tree 8
 # #291 adds eight portable durable manifest storage cases.
 # #295 adds ten portable resume-evidence cases; CI measures execution.
 transfer_manifest 18
+# #268 adds seven portable sparse cases and two Unix host-allocation oracles.
+transfer_sparse 7
