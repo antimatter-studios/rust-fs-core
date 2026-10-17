@@ -63,7 +63,10 @@ use cancel::Cancellation;
 
 #[path = "transfer_import.rs"]
 mod import;
-pub use import::{import, import_args, import_file, FileSink, ImportRequest, Input};
+pub use import::{
+    import, import_args, import_file, import_local_file, FileSink, ImportRequest, Input,
+    LocalSource,
+};
 
 #[path = "transfer_tree.rs"]
 mod tree;
