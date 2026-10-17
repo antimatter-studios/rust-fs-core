@@ -15,10 +15,22 @@ pub trait FileSink {
     fn supports_atomic_replace(&self) -> bool {
         false
     }
+    /// Declare that unwritten gaps in a new staged file read as zero holes.
+    /// Sparse imports refuse before consuming input unless this returns true.
+    fn supports_sparse(&self) -> bool {
+        false
+    }
+    /// Set the staged logical length, retaining unwritten gaps as holes.
+    /// Required with `supports_sparse`, including for trailing/all-zero files.
+    /// Called before persistence; failure aborts the transaction.
+    fn set_sparse_len(&mut self, _len: u64) -> Result<(), CliError> {
+        Err(CliError::refused("sparse files not supported by this sink"))
+    }
     /// Create a private staged file beside `path`. Refuse existing names when
     /// `replace` is false. On failure, abort must still be safe to call.
     fn stage(&mut self, path: &Path, replace: bool) -> Result<(), CliError>;
-    /// Write the entire slice or fail. Offsets increase from zero without gaps.
+    /// Write the entire slice or fail. Offsets increase from zero; gaps occur
+    /// only when the caller requests sparse preservation and it is supported.
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), CliError>;
     /// Persist all staged content and metadata before publication.
     fn persist(&mut self) -> Result<(), CliError>;
@@ -170,8 +182,10 @@ pub fn import_local_file(
         Some(sink),
         path,
         replace,
-        Some(identity.metadata.len()),
-        None,
+        ImportContext {
+            size: Some(identity.metadata.len()),
+            ..ImportContext::default()
+        },
         |source, bytes| identity.check(source, bytes),
     )
 }
@@ -187,7 +201,29 @@ pub fn import_file(
     path: &Path,
     replace: bool,
 ) -> Result<Copied, CliError> {
-    import_stream(source, sink, path, replace, None, None, |_, _| Ok(()))
+    import_file_with_sparse(source, sink, path, replace, SparseOptions::default())
+}
+
+/// Import a stream with optional holes. Unsupported sinks refuse before reads;
+/// capable sinks receive nonzero chunks and the final logical length.
+pub fn import_file_with_sparse(
+    source: &mut dyn Read,
+    sink: Option<&mut dyn FileSink>,
+    path: &Path,
+    replace: bool,
+    sparse: SparseOptions,
+) -> Result<Copied, CliError> {
+    import_stream(
+        source,
+        sink,
+        path,
+        replace,
+        ImportContext {
+            sparse,
+            ..ImportContext::default()
+        },
+        |_, _| Ok(()),
+    )
 }
 
 // The tree owns the image lock. Check the non-following source name as well as
@@ -221,10 +257,20 @@ pub(super) fn import_tree_file(
         Some(sink),
         path,
         replace,
-        Some(identity.metadata.len()),
-        Some(cancellation),
+        ImportContext {
+            size: Some(identity.metadata.len()),
+            cancellation: Some(cancellation),
+            ..ImportContext::default()
+        },
         validate,
     )
+}
+
+#[derive(Default)]
+struct ImportContext<'a> {
+    size: Option<u64>,
+    cancellation: Option<&'a Cancellation>,
+    sparse: SparseOptions,
 }
 
 fn import_stream<S: Read + ?Sized>(
@@ -232,11 +278,18 @@ fn import_stream<S: Read + ?Sized>(
     sink: Option<&mut dyn FileSink>,
     path: &Path,
     replace: bool,
-    size: Option<u64>,
-    cancellation: Option<&Cancellation>,
+    context: ImportContext<'_>,
     mut validate: impl FnMut(&S, u64) -> Result<(), CliError>,
 ) -> Result<Copied, CliError> {
+    let ImportContext {
+        size,
+        cancellation,
+        sparse,
+    } = context;
     let sink = capable(sink, replace)?;
+    if sparse.preserve_sparse && !sink.supports_sparse() {
+        return Err(CliError::refused("sparse files not supported by this sink"));
+    }
     let _lock = if cancellation.is_none() {
         sink.image_path().map(ImageLock::for_import).transpose()?
     } else {
@@ -277,13 +330,18 @@ fn import_stream<S: Read + ?Sized>(
             if size.is_some_and(|size| next > size) {
                 return Err(CliError::failed("source changed during copy"));
             }
-            sink.write_at(bytes, &buffer[..n])?;
+            if !sparse.preserve_sparse || buffer[..n].iter().any(|b| *b != 0) {
+                sink.write_at(bytes, &buffer[..n])?;
+            }
             digest.update(&buffer[..n]);
             bytes = next;
         }
         cancellation.check(bytes, bytes)?;
         let sha256 = digest.finalize().into();
         validate(source, bytes)?;
+        if sparse.preserve_sparse {
+            sink.set_sparse_len(bytes)?;
+        }
         let persisted = sink.persist();
         cancellation.check(bytes, bytes)?;
         persisted?;
