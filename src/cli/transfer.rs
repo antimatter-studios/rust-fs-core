@@ -26,18 +26,23 @@
 //! - **Missing data is never success.** A writer that fails (a closed pipe)
 //!   fails the copy, saying how many bytes of the total were delivered.
 //!
-//! Verification of the published bytes, aliasing checks, trees, progress
+//! Opt-in verification reopens the synced staging file and compares its
+//! length and SHA-256 before publication. Aliasing checks, trees, progress
 //! and import build on this; each is its own piece of work.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Arg, ArgAction, ArgMatches};
 use sha2::{Digest, Sha256};
 
 use super::output::{CliError, Json, Outcome};
+
+#[cfg(test)]
+#[path = "transfer_verify_tests.rs"]
+mod verify_tests;
 
 /// The bytes a transfer moves at a time. One buffer of this size (or of
 /// the file's size, when smaller) is all the file data a copy holds.
@@ -86,15 +91,62 @@ impl Copied {
     }
 }
 
+/// Optional export behavior. Existing entry points use the default, which
+/// copies without read-back verification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// Reopen the synced staging file and verify its length and SHA-256
+    /// before publishing. Writers, including stdout, cannot be verified.
+    pub verify: bool,
+}
+
+impl ExportOptions {
+    /// Parse the options from [`export_args_with_verify`]. Matches from
+    /// the original [`export_args`] also work, with verification disabled.
+    pub fn from_matches(matches: &ArgMatches) -> Result<Self, CliError> {
+        let verify = matches
+            .try_get_one::<bool>("verify")
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false);
+        if verify
+            && matches
+                .get_one::<OsString>("dest")
+                .is_some_and(|d| d == "-")
+        {
+            return Err(CliError::usage("--verify needs a file DEST, not stdout"));
+        }
+        Ok(Self { verify })
+    }
+}
+
 /// Copy `source` to `destination`. See the module documentation for what
 /// is promised about memory, publication and failures.
 pub fn export_file(
     source: &mut dyn FileSource,
     destination: Destination<'_>,
 ) -> Result<Copied, CliError> {
+    export_file_with_options(source, destination, ExportOptions::default())
+}
+
+/// Copy with optional staging-file verification. Verification of a writer
+/// is a usage error, returned before reading any source bytes.
+pub fn export_file_with_options(
+    source: &mut dyn FileSource,
+    destination: Destination<'_>,
+    options: ExportOptions,
+) -> Result<Copied, CliError> {
     match destination {
+        Destination::Writer(_) if options.verify => {
+            Err(CliError::usage("--verify needs a file DEST, not a writer"))
+        }
         Destination::Writer(sink) => pump(source, sink),
-        Destination::File { path, replace } => export_to_file(source, path, replace),
+        Destination::File { path, replace } => {
+            export_to_file(source, path, replace, options.verify, |file, _| {
+                file.sync_all()
+            })
+        }
     }
 }
 
@@ -142,6 +194,8 @@ fn export_to_file(
     source: &mut dyn FileSource,
     path: &Path,
     replace: bool,
+    verify: bool,
+    sync: impl FnOnce(&mut File, &Path) -> io::Result<()>,
 ) -> Result<Copied, CliError> {
     let name = path
         .file_name()
@@ -172,12 +226,15 @@ fn export_to_file(
 
     let (staging, mut file) = create_staging(parent, name)?;
     let copied = pump(source, &mut file).and_then(|copied| {
-        file.sync_all()
+        sync(&mut file, &staging)
             .map_err(|e| CliError::failed(format!("sync {}: {e}", staging.display())))?;
         Ok(copied)
     });
     drop(file);
     let published = copied.and_then(|copied| {
+        if verify {
+            verify_staging(&staging, &copied)?;
+        }
         publish(&staging, path, replace)?;
         Ok(copied)
     });
@@ -196,6 +253,45 @@ fn export_to_file(
     })?;
     copied.replaced = existing.is_some();
     Ok(copied)
+}
+
+/// Read until EOF, including any unexpected trailing bytes. The original
+/// copy buffer has already been dropped, so verification holds one chunk.
+fn verify_staging(staging: &Path, expected: &Copied) -> Result<(), CliError> {
+    let failed = |e| CliError::failed(format!("verify {}: {e}", staging.display()));
+    let mut file = File::open(staging).map_err(failed)?;
+    let mut buf = vec![0u8; CHUNK];
+    let mut digest = Sha256::new();
+    let mut bytes = 0u64;
+    loop {
+        let n = match file.read(&mut buf) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            result => result.map_err(failed)?,
+        };
+        if n == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(n as u64)
+            .ok_or_else(|| CliError::failed("verification byte count overflow"))?;
+        digest.update(&buf[..n]);
+    }
+    let actual = Copied {
+        bytes,
+        sha256: digest.finalize().into(),
+        replaced: false,
+    };
+    if actual.bytes != expected.bytes || actual.sha256 != expected.sha256 {
+        return Err(CliError::failed(format!(
+            "verification failed for {}: expected {} bytes, sha256 {}; read back {} bytes, sha256 {}",
+            staging.display(),
+            expected.bytes,
+            expected.sha256_hex(),
+            actual.bytes,
+            actual.sha256_hex()
+        )));
+    }
+    Ok(())
 }
 
 fn exists(path: &Path) -> CliError {
@@ -319,6 +415,22 @@ pub fn export_args() -> [Arg; 3] {
     ]
 }
 
+/// The original export arguments plus `--verify`. Drivers opting in parse
+/// [`ExportOptions::from_matches`] and call [`export_with_options`]. The
+/// original argument array and request fields remain unchanged.
+pub fn export_args_with_verify() -> [Arg; 4] {
+    let [path, dest, replace] = export_args();
+    [
+        path,
+        dest,
+        replace,
+        Arg::new("verify")
+            .long("verify")
+            .action(ArgAction::SetTrue)
+            .help("Read the synced staging file back and verify its length and SHA-256 before publishing"),
+    ]
+}
+
 impl ExportRequest {
     /// The request [`export_args`] parsed. `--replace` with stdout is a
     /// usage error: there is nothing there to replace.
@@ -332,6 +444,7 @@ impl ExportRequest {
         let path = given("path")?;
         let dest = given("dest")?;
         let replace = matches.get_flag("replace");
+        ExportOptions::from_matches(matches)?;
         let output = if dest == "-" {
             if replace {
                 return Err(CliError::usage("--replace needs a file DEST, not stdout"));
@@ -352,7 +465,20 @@ impl ExportRequest {
 /// bytes are the whole output; to a file, the result is a report of the
 /// bytes and their digest.
 pub fn export(request: &ExportRequest, source: &mut dyn FileSource) -> Result<Outcome, CliError> {
+    export_with_options(request, source, ExportOptions::default())
+}
+
+/// Export with optional read-back verification. A successful file report
+/// carries `verified: true` only after the staged bytes matched the copy.
+pub fn export_with_options(
+    request: &ExportRequest,
+    source: &mut dyn FileSource,
+    options: ExportOptions,
+) -> Result<Outcome, CliError> {
     let dest = match &request.output {
+        Output::Stdout if options.verify => {
+            return Err(CliError::usage("--verify needs a file DEST, not stdout"));
+        }
         Output::Stdout => {
             let mut stdout = io::stdout().lock();
             export_file(source, Destination::Writer(&mut stdout))?;
@@ -360,12 +486,13 @@ pub fn export(request: &ExportRequest, source: &mut dyn FileSource) -> Result<Ou
         }
         Output::File(dest) => dest,
     };
-    let copied = export_file(
+    let copied = export_file_with_options(
         source,
         Destination::File {
             path: dest,
             replace: request.replace,
         },
+        options,
     )?;
     let path = request.path.to_string_lossy();
     let report = Json::object([
@@ -374,6 +501,7 @@ pub fn export(request: &ExportRequest, source: &mut dyn FileSource) -> Result<Ou
         ("bytes", Json::from(copied.bytes)),
         ("sha256", Json::from(copied.sha256_hex())),
         ("replaced", Json::from(copied.replaced)),
+        ("verified", Json::from(options.verify)),
     ]);
     let text = format!(
         "exported {path} to {} ({} bytes, sha256 {})",
