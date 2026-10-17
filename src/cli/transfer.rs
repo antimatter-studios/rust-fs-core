@@ -39,6 +39,10 @@ use sha2::{Digest, Sha256};
 
 use super::output::{CliError, Json, Outcome};
 
+#[cfg(test)]
+#[path = "transfer_verify_tests.rs"]
+mod verify_tests;
+
 /// The bytes a transfer moves at a time. One buffer of this size (or of
 /// the file's size, when smaller) is all the file data a copy holds.
 pub const CHUNK: usize = 1 << 20;
