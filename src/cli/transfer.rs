@@ -31,6 +31,8 @@
 //! [`FileSource::image_path`] also refuse local destinations that identify
 //! the backing image, before reading bytes or creating staging files.
 //! Trees and imports can call [`refuse_image_alias`] for each local path.
+//! Sources supplying an image path also hold a shared [`ImageLock`] while
+//! exporting; a competing writer produces a warning before the first read.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -41,6 +43,10 @@ use clap::{Arg, ArgAction, ArgMatches};
 use sha2::{Digest, Sha256};
 
 use super::output::{CliError, Json, Outcome};
+
+#[path = "transfer_lock.rs"]
+mod image_lock;
+pub use image_lock::ImageLock;
 
 #[cfg(test)]
 #[path = "transfer_verify_tests.rs"]
@@ -147,10 +153,14 @@ pub fn export_file_with_options(
     destination: Destination<'_>,
     options: ExportOptions,
 ) -> Result<Copied, CliError> {
+    if matches!(&destination, Destination::Writer(_)) && options.verify {
+        return Err(CliError::usage("--verify needs a file DEST, not a writer"));
+    }
+    let _image_lock = source
+        .image_path()
+        .map(|image| ImageLock::for_export(image, &mut io::stderr().lock()))
+        .transpose()?;
     match destination {
-        Destination::Writer(_) if options.verify => {
-            Err(CliError::usage("--verify needs a file DEST, not a writer"))
-        }
         Destination::Writer(sink) => pump(source, sink),
         Destination::File { path, replace } => {
             export_to_file(source, path, replace, options.verify, |file, _| {
