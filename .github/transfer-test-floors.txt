@@ -16,3 +16,5 @@ transfer_cancel 1
 # #260 adds thirteen portable import cases and one Unix persistence-signal case.
 # #263 adds nine portable source-identity cases and one Unix change-time oracle.
 transfer_import 22
+# #264 adds eight portable recursive-import cases and a Unix symlink case.
+transfer_import_tree 8
