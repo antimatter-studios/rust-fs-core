@@ -60,6 +60,8 @@ chore_min_version: 0.6.0
 # #264 adds eight portable tree-import cases (419) and a Unix symlink case.
 # #291 adds eight portable durable manifest cases (427); CI measures execution.
 # #295 adds ten portable resume-evidence cases (437); CI measures execution.
+# #267 adds three Unix-only metadata capability cases; floors stay at the
+# Windows minimum (437).
 # Release uses the same selection and measured the same 557 lines / 31,295
 # bytes after its cold LTO build. Coverage measured 575 lines / 32,607 bytes
 # and executed the same 374 tests as the post-change debug run:
