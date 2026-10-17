@@ -118,6 +118,32 @@ crate's family scripts: every repository in the family runs this copy as
 `bash scripts/core.sh ci-gate` against its own `ci.yml` and `.github-guard`,
 and `scripts/core.sh family-check` refuses a repository that commits its own.
 
+The gate requires git and **Python 3 with PyYAML**, imported by the `python3`
+on `PATH`. Use the calling repository's host-tools setup when it provides
+one (`chore tools` in the drivers). Core has no host-tools installer. For an
+isolated environment, set it up explicitly:
+
+```sh
+python3 -m venv tmp/ci-gate-venv
+tmp/ci-gate-venv/bin/python3 -m pip install PyYAML
+PATH="$PWD/tmp/ci-gate-venv/bin:$PATH" bash scripts/core.sh ci-gate
+```
+
+The check never installs dependencies. A missing module exits 2 and names the
+interpreter that needs it.
+
+`CI_GATE_NON_GATING` may be declared as a literal, space-separated string in
+the workflow's top-level `env`. The gate reads that declaration locally too,
+so lint sees the same conditional jobs as CI. A process environment override
+takes precedence, including an empty string that clears the declaration.
+Expressions such as `${{ vars.CONDITIONAL_JOBS }}` need a resolved process
+override; the local checker cannot evaluate GitHub Actions expressions.
+
+This declaration permits a job's scheduling condition; it does not change
+the aggregate's verdict. Full-profile jobs still belong in `ci-ok`'s needs,
+and its profile verdict must reject failures, cancellations and unexpected
+skips. Undeclared conditional jobs and stale exemption names still fail.
+
 `.github/actions/install-chore` is the composite action that installs the
 binary (antimatter-studios/chore#52), for the other thing every repository
 was writing out by hand:

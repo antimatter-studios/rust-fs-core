@@ -51,7 +51,7 @@ caller() {
 # gate DIR [ENV...]: run the gate from DIR; stdout+stderr in $said, status in $status.
 gate() {
     local dir="$1"; shift
-    said="$(cd "$dir" && env FS_CORE_ROOT="$REPO" "$@" bash scripts/core.sh ci-gate 2>&1)"
+    said="$(cd "$dir" && env -u CI_GATE_NON_GATING FS_CORE_ROOT="$REPO" "$@" bash scripts/core.sh ci-gate 2>&1)"
     status=$?
 }
 
@@ -324,6 +324,78 @@ if [ "$status" -eq 1 ] && grep -qF '`ci-ok` does not need `changes`' <<<"$said";
     ok "ci-ok must need the changes job a path-gated job hangs on"
 else
     fail "an aggregate that does not need changes was accepted (status $status):"$'\n'"$said"
+fi
+
+# --- 11. Workflow declarations mean the same thing locally and in CI. ----
+# These are full-profile jobs, not advisory jobs: the aggregate still reads
+# every result and delegates the permitted skips to its profile verdict.
+profiled="${GATED/"needs.changes.outputs.code == ${Q}true${Q}"/"needs.changes.outputs.profile == ${Q}full${Q}"}"
+declaration=$'env:\n  CI_GATE_NON_GATING: heavy\n'
+dir="$(caller profile-local "$ONE" <<<"$declaration$profiled")"
+gate "$dir"
+local_status="$status"
+local_said="$said"
+gate "$dir" CI_GATE_NON_GATING=heavy
+if [ "$local_status" -eq 0 ] && [ "$status" -eq 0 ] && [ "$local_said" = "$said" ]; then
+    ok "a workflow's conditional-job declaration works locally just as it does in CI"
+else
+    fail "workflow env was not honored locally (status $local_status):"$'\n'"$local_said"
+fi
+
+gate "$dir" CI_GATE_NON_GATING=
+if [ "$status" -eq 1 ] && grep -qF '`heavy` carries a job-level' <<<"$said"; then
+    ok "an explicit empty environment override clears the workflow declaration"
+else
+    fail "an empty override did not clear the declaration (status $status):"$'\n'"$said"
+fi
+
+undeclared="${profiled/  after:/  after:$'\n'    if: github.event_name == ${Q}push${Q}}"
+dir="$(caller profile-undeclared "$ONE" <<<"$declaration$undeclared")"
+gate "$dir"
+if [ "$status" -eq 1 ] && grep -qF '`after` carries a job-level' <<<"$said" &&
+    ! grep -qF '`heavy` carries a job-level' <<<"$said"; then
+    ok "a workflow declaration still refuses an undeclared conditional job"
+else
+    fail "an undeclared conditional job was not refused (status $status):"$'\n'"$said"
+fi
+
+for value in missing lint; do
+    dir="$(caller "profile-invalid-$value" "$ONE" <<<"${declaration/heavy/$value}$profiled")"
+    gate "$dir"
+    if [ "$status" -eq 1 ] && grep -qF "\`$value\` is declared non-gating" <<<"$said"; then
+        ok "a workflow declaration still refuses the invalid exemption $value"
+    else
+        fail "an invalid exemption was not named (status $status):"$'\n'"$said"
+    fi
+done
+
+for value in '[heavy]' '${{ vars.CONDITIONAL_JOBS }}'; do
+    dir="$(caller "profile-unresolved-${#value}" "$ONE" <<<"${declaration/heavy/$value}$profiled")"
+    gate "$dir"
+    if [ "$status" -eq 2 ] && grep -qF 'CI_GATE_NON_GATING must be a literal string' <<<"$said" &&
+        ! grep -qF Traceback <<<"$said"; then
+        ok "an invalid or unevaluated workflow declaration names the required input"
+    else
+        fail "an unresolved workflow declaration was not explained (status $status):"$'\n'"$said"
+    fi
+done
+
+# Force the interpreter used by the gate to lack third-party modules,
+# regardless of what the runner happens to have installed.
+REAL_PYTHON="$(command -v python3)"
+mkdir -p "$SANDBOX/no-yaml-bin"
+cat > "$SANDBOX/no-yaml-bin/python3" <<EOF
+#!/usr/bin/env bash
+exec "$REAL_PYTHON" -S "\$@"
+EOF
+chmod +x "$SANDBOX/no-yaml-bin/python3"
+dir="$(caller missing-yaml "$ONE" <<<"$WORKFLOW")"
+gate "$dir" PATH="$SANDBOX/no-yaml-bin:$PATH"
+if [ "$status" -eq 2 ] && grep -qF 'PyYAML' <<<"$said" &&
+    grep -qF 'host-tools setup' <<<"$said" && ! grep -qF Traceback <<<"$said"; then
+    ok "a missing yaml module names PyYAML and the repository's host-tools setup"
+else
+    fail "the missing PyYAML prerequisite was not explained (status $status):"$'\n'"$said"
 fi
 
 if [ "$fails" -gt 0 ]; then
