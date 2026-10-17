@@ -2,7 +2,8 @@
 //!
 //! Measured, not inferred from reading the loop: this binary's global
 //! allocator counts every live byte and keeps the peak, and a 256 MiB
-//! generated file is exported to a local file. The peak above what was
+//! generated file is exported to a local file with read-back verification.
+//! The peak above what was
 //! live before the copy has to stay under 4 MiB — room for the one chunk
 //! buffer and the file handles, and nowhere near the file.
 //!
@@ -91,12 +92,13 @@ fn exporting_256_mib_holds_under_4_mib_of_heap() {
     };
     let before = LIVE.load(Ordering::SeqCst);
     PEAK.store(before, Ordering::SeqCst);
-    let copied = transfer::export_file(
+    let copied = transfer::export_file_with_options(
         &mut source,
         Destination::File {
             path: &dest,
             replace: false,
         },
+        transfer::ExportOptions { verify: true },
     )
     .unwrap_or_else(|e| panic!("export: {}", e.message));
     let grew = PEAK.load(Ordering::SeqCst) - before;
