@@ -21,7 +21,9 @@
 #   CI_GATE_GUARD        the declaration       (.github-guard)
 #   CI_GATE_AGGREGATE    the aggregate job     (ci-ok)
 #   CI_GATE_NON_GATING   space-separated jobs that carry `if:` or
-#                        `continue-on-error:` and are deliberately advisory
+#                        `continue-on-error:`; defaults to the literal value
+#                        in the workflow's top-level env, as CI inherits it.
+#                        A process override, including empty, takes precedence.
 #   CI_GATE_CHANGES      the job whose `code` output path-gated jobs hang on
 #                        (changes); see "PATH-GATED JOBS" below
 #
@@ -56,10 +58,6 @@ ROOT="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 WORKFLOW="${CI_GATE_WORKFLOW:-.github/workflows/ci.yml}"
 AGGREGATE="${CI_GATE_AGGREGATE:-ci-ok}"
 GUARD="${CI_GATE_GUARD:-.github-guard}"
-# Jobs exempt from gating: they carry `if:` or `continue-on-error:` and are
-# deliberately advisory. Space separated. An exemption for a job that does not
-# exist is an exemption waiting to silently cover a future job of that name.
-NON_GATING="${CI_GATE_NON_GATING:-}"
 # The job that says whether a change needs the full pipeline (#path-gated jobs
 # below); a job gated on its `code` output may be skipped.
 CHANGES="${CI_GATE_CHANGES:-changes}"
@@ -68,16 +66,18 @@ cd "$ROOT" || exit 1
 command -v python3 >/dev/null || { echo "ci-gate: python3 is required" >&2; exit 2; }
 command -v git >/dev/null || { echo "ci-gate: git is required to read $GUARD" >&2; exit 2; }
 
-python3 - "$WORKFLOW" "$AGGREGATE" "$GUARD" "$NON_GATING" "$CHANGES" <<'PY'
+python3 - "$WORKFLOW" "$AGGREGATE" "$GUARD" "$CHANGES" <<'PY'
 import sys, os, re, subprocess
-wf, agg, guard, non_gating = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].split()
-changes = sys.argv[5]
+wf, agg, guard, changes = sys.argv[1:]
 fails = []
 
 try:
     import yaml
 except ImportError:
-    print("ci-gate: python3 yaml module is required (pip install pyyaml)", file=sys.stderr)
+    print(f"ci-gate: PyYAML (the yaml module) is required by {sys.executable}. "
+          "Use the repository's host-tools setup where provided; otherwise install "
+          "PyYAML in that interpreter's virtual environment (see rust-fs-core's README).",
+          file=sys.stderr)
     sys.exit(2)
 
 if not os.path.exists(wf):
@@ -85,6 +85,23 @@ if not os.path.exists(wf):
 
 # YAML 1.1 folds `on:` to True. Re-key it back so the trigger is readable.
 doc = yaml.safe_load(open(wf)) or {}
+
+# GitHub supplies workflow env to every job, while a local lint invocation
+# inherits none of it. Read only this gate's declaration, never execute or
+# export arbitrary workflow env. The process environment remains the override,
+# including an explicit empty string that removes every exemption.
+workflow_env = doc.get("env") or {}
+if not isinstance(workflow_env, dict):
+    print(f"ci-gate: `{wf}` top-level env must be a mapping", file=sys.stderr)
+    sys.exit(2)
+non_gating = os.environ.get("CI_GATE_NON_GATING", workflow_env.get("CI_GATE_NON_GATING", ""))
+if not isinstance(non_gating, str) or "${{" in non_gating:
+    print(f"ci-gate: CI_GATE_NON_GATING must be a literal string of space-separated jobs "
+          f"in `{wf}` top-level env, or be supplied in the process environment; "
+          "GitHub Actions expressions cannot be evaluated locally.", file=sys.stderr)
+    sys.exit(2)
+non_gating = non_gating.split()
+
 triggers = doc.get("on", doc.get(True, {})) or {}
 if isinstance(triggers, str):
     triggers = {triggers: None}
