@@ -27,8 +27,10 @@
 //!   fails the copy, saying how many bytes of the total were delivered.
 //!
 //! Opt-in verification reopens the synced staging file and compares its
-//! length and SHA-256 before publication. Aliasing checks, trees, progress
-//! and import build on this; each is its own piece of work.
+//! length and SHA-256 before publication. Drivers supplying
+//! [`FileSource::image_path`] also refuse local destinations that identify
+//! the backing image, before reading bytes or creating staging files.
+//! Trees and imports can call [`refuse_image_alias`] for each local path.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -50,6 +52,14 @@ pub const CHUNK: usize = 1 << 20;
 
 /// A file a driver can read at a position: what `export` copies from.
 pub trait FileSource {
+    /// The backing image or device, before applying any partition offset.
+    /// Supply this to protect file exports against image aliases. Existing
+    /// sources default to no identity; drivers should override this when
+    /// their source has a local backing path.
+    fn image_path(&self) -> Option<&Path> {
+        None
+    }
+
     /// The file's length in bytes, read once before the copy starts.
     fn size(&self) -> u64;
 
@@ -197,6 +207,9 @@ fn export_to_file(
     verify: bool,
     sync: impl FnOnce(&mut File, &Path) -> io::Result<()>,
 ) -> Result<Copied, CliError> {
+    if let Some(image) = source.image_path() {
+        refuse_image_alias(image, path)?;
+    }
     let name = path
         .file_name()
         .ok_or_else(|| CliError::usage(format!("{}: not a file name to create", path.display())))?;
@@ -253,6 +266,55 @@ fn export_to_file(
     })?;
     copied.replaced = existing.is_some();
     Ok(copied)
+}
+
+/// Refuse a local transfer source or destination that identifies `image`.
+/// Call this for each local path in an import or directory-tree transfer,
+/// before creating anything or moving bytes. Symlinks are followed; hard
+/// links compare by file identity, and Unix device nodes by device number.
+/// Partition offsets do not change the backing path's identity.
+///
+/// A missing local path is allowed, including a dangling destination
+/// symlink. Other identity errors fail closed. Errors name both paths and
+/// have exit code 1. This is a preflight check, not protection against a
+/// concurrent process changing paths after the check.
+pub fn refuse_image_alias(image: &Path, local: &Path) -> Result<(), CliError> {
+    let failed = |e| {
+        CliError::failed(format!(
+            "cannot compare image {} with local path {}: {e}",
+            image.display(),
+            local.display()
+        ))
+    };
+    let image_meta = fs::metadata(image).map_err(failed)?;
+    let local_meta = match fs::metadata(local) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(failed(e)),
+    };
+    #[cfg(unix)]
+    let same = {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let same_node =
+            image_meta.dev() == local_meta.dev() && image_meta.ino() == local_meta.ino();
+        let same_device_kind = (image_meta.file_type().is_block_device()
+            && local_meta.file_type().is_block_device())
+            || (image_meta.file_type().is_char_device() && local_meta.file_type().is_char_device());
+        same_node || (same_device_kind && image_meta.rdev() == local_meta.rdev())
+    };
+    #[cfg(not(unix))]
+    let same = {
+        let _ = (image_meta, local_meta);
+        same_file::is_same_file(image, local).map_err(failed)?
+    };
+    if same {
+        return Err(CliError::failed(format!(
+            "image {} and local path {} identify the same file or device",
+            image.display(),
+            local.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Read until EOF, including any unexpected trailing bytes. The original
