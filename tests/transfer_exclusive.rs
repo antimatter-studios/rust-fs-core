@@ -1,0 +1,245 @@
+//! The operating system's locks, held by another process, are the oracle.
+#![cfg(feature = "cli")]
+
+use std::fs::{self, File};
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use fs_core::cli::transfer::{self, Destination, FileSource, ImageLock};
+use fs_core::cli::CliError;
+
+struct Scratch(PathBuf);
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("transfer-lock-{}-{tag}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("image"), b"image bytes").unwrap();
+        Self(dir)
+    }
+    fn image(&self) -> PathBuf {
+        self.0.join("image")
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+// Re-enter the same test in a separate process. The parent uses std's native
+// whole-file locks; only the child uses the transfer guard under test.
+fn child(test: &str, image: &Path) -> Command {
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--exact", test, "--nocapture"])
+        .env("TRANSFER_LOCK_CHILD_IMAGE", image)
+        .stdin(Stdio::null());
+    cmd
+}
+
+#[test]
+fn another_process_refuses_import_before_reading_its_input() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        let _guard = match ImageLock::for_import(Path::new(&image)) {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("{}", err.message);
+                std::process::exit(i32::from(err.code));
+            }
+        };
+        let mut input = Vec::new();
+        std::io::stdin().read_to_end(&mut input).unwrap();
+        std::process::exit(0);
+    }
+    let dir = Scratch::new("import");
+    let held = File::options()
+        .read(true)
+        .write(true)
+        .open(dir.image())
+        .unwrap();
+    held.lock().unwrap();
+    let input_path = dir.0.join("input");
+    fs::write(&input_path, b"producer bytes still unread").unwrap();
+    let mut input = File::open(input_path).unwrap();
+    let output = child(
+        "another_process_refuses_import_before_reading_its_input",
+        &dir.image(),
+    )
+    .stdin(Stdio::from(input.try_clone().unwrap()))
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lock"));
+    assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
+    drop(held);
+    assert_eq!(fs::read(dir.image()).unwrap(), b"image bytes");
+}
+
+#[test]
+fn readers_coexist_and_exclude_a_writer_until_the_guards_drop() {
+    let dir = Scratch::new("readers");
+    let mut warnings = Vec::new();
+    let first = ImageLock::for_export(&dir.image(), &mut warnings)
+        .unwrap()
+        .unwrap();
+    let second = ImageLock::for_export(&dir.image(), &mut warnings)
+        .unwrap()
+        .unwrap();
+    assert!(warnings.is_empty());
+    let err = ImageLock::for_import(&dir.image()).unwrap_err();
+    assert_eq!(err.code, 1);
+    drop(first);
+    assert!(ImageLock::for_import(&dir.image()).is_err());
+    drop(second);
+    let writer = ImageLock::for_import(&dir.image()).unwrap();
+    assert!(ImageLock::for_import(&dir.image()).is_err());
+    drop(writer);
+    drop(ImageLock::for_import(&dir.image()).unwrap());
+}
+
+struct Source {
+    image: PathBuf,
+    reads: usize,
+}
+impl FileSource for Source {
+    fn image_path(&self) -> Option<&Path> {
+        Some(&self.image)
+    }
+    fn size(&self) -> u64 {
+        3
+    }
+    fn read_at(&mut self, _: u64, buf: &mut [u8]) -> Result<usize, CliError> {
+        self.reads += 1;
+        buf[..3].copy_from_slice(b"abc");
+        Ok(3)
+    }
+}
+
+#[test]
+fn export_against_another_writer_continues_and_warns_on_stderr() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        let mut source = Source {
+            image: image.into(),
+            reads: 0,
+        };
+        let mut bytes = Vec::new();
+        let copied = transfer::export_file(&mut source, Destination::Writer(&mut bytes)).unwrap();
+        assert_eq!(bytes, b"abc");
+        assert_eq!(copied.bytes, 3);
+        assert_eq!(source.reads, 1);
+        return;
+    }
+    let dir = Scratch::new("export");
+    let held = File::options()
+        .read(true)
+        .write(true)
+        .open(dir.image())
+        .unwrap();
+    held.lock().unwrap();
+    let output = child(
+        "export_against_another_writer_continues_and_warns_on_stderr",
+        &dir.image(),
+    )
+    .output()
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("warning"), "{stderr}");
+    assert!(stderr.contains("may be changing"), "{stderr}");
+    drop(held);
+}
+
+#[test]
+fn export_holds_its_shared_lock_during_source_reads() {
+    struct CheckedSource(Source);
+    impl FileSource for CheckedSource {
+        fn image_path(&self) -> Option<&Path> {
+            self.0.image_path()
+        }
+        fn size(&self) -> u64 {
+            self.0.size()
+        }
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, CliError> {
+            let contender = File::options()
+                .read(true)
+                .write(true)
+                .open(&self.0.image)
+                .unwrap();
+            assert!(matches!(
+                contender.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            self.0.read_at(offset, buf)
+        }
+    }
+    let dir = Scratch::new("during-read");
+    let mut source = CheckedSource(Source {
+        image: dir.image(),
+        reads: 0,
+    });
+    transfer::export_file(&mut source, Destination::Writer(&mut Vec::new())).unwrap();
+    drop(ImageLock::for_import(&dir.image()).unwrap());
+}
+
+#[test]
+fn missing_images_fail_closed_before_export_reads() {
+    let dir = Scratch::new("missing");
+    let image = dir.0.join("missing");
+    assert_eq!(ImageLock::for_import(&image).unwrap_err().code, 1);
+    let mut source = Source { image, reads: 0 };
+    assert_eq!(
+        transfer::export_file(&mut source, Destination::Writer(&mut Vec::new()))
+            .unwrap_err()
+            .code,
+        1
+    );
+    assert_eq!(source.reads, 0);
+}
+
+#[test]
+fn contention_warning_failures_are_reported() {
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let dir = Scratch::new("warning");
+    let held = File::options()
+        .read(true)
+        .write(true)
+        .open(dir.image())
+        .unwrap();
+    held.lock().unwrap();
+    assert_eq!(
+        ImageLock::for_export(&dir.image(), &mut Broken)
+            .unwrap_err()
+            .code,
+        1
+    );
+    drop(held);
+}
+
+#[test]
+fn an_import_guard_allows_the_drivers_separate_handle_to_write() {
+    let dir = Scratch::new("driver-io");
+    let guard = ImageLock::for_import(&dir.image()).unwrap();
+    let mut target = File::options()
+        .read(true)
+        .write(true)
+        .open(dir.image())
+        .unwrap();
+    target.write_all(b"new").unwrap();
+    target.sync_all().unwrap();
+    assert_eq!(fs::read(dir.image()).unwrap(), b"newge bytes");
+    assert!(matches!(
+        target.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    drop(guard);
+    target.try_lock().unwrap();
+    drop(target);
+}

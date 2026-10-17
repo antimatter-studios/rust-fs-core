@@ -2,3 +2,5 @@
 # #252 adds 9 alias cases (7 Windows) and 5 edge cases (2 Windows).
 transfer_alias 7
 transfer_alias_edges 2
+# #275 adds seven advisory lock cases on every CI platform.
+transfer_exclusive 7
