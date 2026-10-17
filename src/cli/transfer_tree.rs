@@ -440,6 +440,67 @@ pub fn export_tree_with_times(
     links: LinkOptions,
     times: TimeOptions,
 ) -> Result<Outcome, CliError> {
+    let mut stderr = io::stderr();
+    let terminal = stderr.is_terminal();
+    let mut progress = Progress::new(&mut stderr, terminal, ProgressOptions::default());
+    export_tree_with_progress(request, source, options, links, times, &mut progress)
+}
+
+// Enumerate metadata only, never content. A failed listing, cycle, depth bound
+// or counter overflow makes totals unknown; normal traversal reports the error.
+fn totals(
+    source: &mut dyn TreeSource,
+    root: &Path,
+    metadata: TreeMetadata,
+    max_depth: usize,
+    listings: &mut HashMap<PathBuf, Vec<TreeEntry>>,
+) -> Option<(u64, u64)> {
+    let mut pending = vec![(root.to_path_buf(), metadata, 0usize)];
+    let mut seen = HashSet::new();
+    let (mut bytes, mut files) = (0u64, 0u64);
+    while let Some((path, metadata, depth)) = pending.pop() {
+        if depth > max_depth {
+            return None;
+        }
+        match metadata.kind {
+            TreeKind::File => {
+                bytes = bytes.checked_add(metadata.size)?;
+                files = files.checked_add(1)?;
+            }
+            TreeKind::Directory => {
+                if !seen.insert(metadata.inode) {
+                    return None;
+                }
+                let children = source.read_dir(&path).ok()?;
+                for child in &children {
+                    if safe_name(&child.name) {
+                        pending.push((
+                            path.join(&child.name),
+                            child.metadata.clone(),
+                            depth.saturating_add(1),
+                        ));
+                    }
+                }
+                listings.insert(path, children);
+            }
+            TreeKind::Other => {}
+        }
+    }
+    Some((bytes, files))
+}
+
+/// Export a tree with pre-counted logical regular-file totals and stderr-only
+/// progress. Totals are unknown when metadata cannot be enumerated completely.
+/// Listings are cached to avoid reading directories twice or changing captured
+/// access times during counting. No source snapshot is promised.
+pub fn export_tree_with_progress(
+    request: &ExportRequest,
+    source: &mut dyn TreeSource,
+    options: TreeOptions,
+    links: LinkOptions,
+    times: TimeOptions,
+    progress: &mut Progress<'_>,
+) -> Result<Outcome, CliError> {
     let Output::File(dest) = &request.output else {
         return Err(CliError::usage("tree export needs a local DEST"));
     };
@@ -452,6 +513,17 @@ pub fn export_tree_with_times(
     if metadata.kind == TreeKind::Directory && !options.recursive {
         return Err(CliError::usage("directory source requires --recursive"));
     }
+    let mut listings = HashMap::new();
+    if progress.enabled() {
+        let totals = totals(
+            source,
+            &root,
+            metadata.clone(),
+            options.max_depth,
+            &mut listings,
+        );
+        progress.set_totals(totals.map(|t| t.0), totals.map(|t| t.1));
+    }
     let mut pending = vec![(root, dest.clone(), metadata, 0usize)];
     let mut directories = HashSet::new();
     let mut files: HashMap<u64, (PathBuf, Json)> = HashMap::new();
@@ -460,6 +532,10 @@ pub fn export_tree_with_times(
     let mut merged = 0u64;
     let mut deferred_times = Vec::new();
     while let Some((path, local, metadata, depth)) = pending.pop() {
+        let regular = metadata.kind == TreeKind::File;
+        if regular {
+            progress.begin_file(&path, Some(metadata.size));
+        }
         let mut reason = String::new();
         let mut evidence = Json::Null;
         let result = (|| -> Result<usize, CliError> {
@@ -530,11 +606,12 @@ pub fn export_tree_with_times(
                             publish_link(&local, request.replace, |p| fs::hard_link(first, p))?;
                             evidence = copied.clone();
                             reason = "hard link preserved".into();
+                            progress.advance(metadata.size);
                             return Ok(0);
                         }
                         reason = "hard link copied as separate file; links not preserved".into();
                     }
-                    let copied = export_file_with_options(
+                    let copied = copy_file(
                         &mut TreeFile {
                             source,
                             path: &path,
@@ -547,6 +624,7 @@ pub fn export_tree_with_times(
                         ExportOptions {
                             verify: options.verify,
                         },
+                        progress,
                     )?;
                     evidence = Json::object([
                         ("bytes", Json::from(copied.bytes)),
@@ -571,7 +649,10 @@ pub fn export_tree_with_times(
                     } else {
                         fs::create_dir(&local).map_err(|e| CliError::failed(e.to_string()))?;
                     }
-                    let children = source.read_dir(&path)?;
+                    let children = match listings.remove(&path) {
+                        Some(children) => children,
+                        None => source.read_dir(&path)?,
+                    };
                     let probe = NameProbe::new(&local)?;
                     let mut queued = Vec::new();
                     for child in children {
@@ -636,6 +717,9 @@ pub fn export_tree_with_times(
             }
         };
         counts[status] += 1;
+        if regular {
+            progress.finish_file(status == 0);
+        }
         if status == 0 && times.preserve_times && metadata.kind == TreeKind::Directory {
             deferred_times.push((local.clone(), metadata, items.len()));
         }
