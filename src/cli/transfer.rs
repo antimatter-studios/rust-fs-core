@@ -54,6 +54,12 @@ mod sparse;
 pub use sparse::SparseOptions;
 use sparse::{CopyOptions, SparseFile};
 
+#[path = "transfer_xattr.rs"]
+mod xattrs;
+pub use xattrs::{
+    export_args_with_xattrs, export_tree_with_xattrs, ExtendedAttribute, XattrOptions,
+};
+
 #[path = "transfer_manifest.rs"]
 pub mod manifest;
 
@@ -84,8 +90,9 @@ pub use import_tree::{import_args_with_tree, import_tree, ImportTreeOptions, Tre
 mod tree;
 pub use tree::{
     export_args_with_links, export_args_with_times, export_args_with_tree, export_tree,
-    export_tree_with_links, export_tree_with_progress, export_tree_with_times, LinkOptions,
-    SymbolicLink, TimeOptions, TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource,
+    export_tree_with_links, export_tree_with_progress, export_tree_with_times,
+    export_tree_with_xattrs_and_progress, LinkOptions, SymbolicLink, TimeOptions, TreeEntry,
+    TreeKind, TreeMetadata, TreeOptions, TreeSource,
 };
 
 #[cfg(test)]
