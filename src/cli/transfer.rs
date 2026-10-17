@@ -49,6 +49,11 @@ use sha2::{Digest, Sha256};
 
 use super::output::{CliError, Json, Outcome};
 
+#[path = "transfer_sparse.rs"]
+mod sparse;
+pub use sparse::SparseOptions;
+use sparse::{CopyOptions, SparseFile};
+
 #[path = "transfer_manifest.rs"]
 pub mod manifest;
 
@@ -67,8 +72,8 @@ use cancel::Cancellation;
 #[path = "transfer_import.rs"]
 mod import;
 pub use import::{
-    import, import_args, import_file, import_local_file, FileSink, ImportRequest, Input,
-    LocalSource,
+    import, import_args, import_file, import_file_with_sparse, import_local_file, FileSink,
+    ImportRequest, Input, LocalSource,
 };
 
 #[path = "transfer_import_tree.rs"]
@@ -188,6 +193,17 @@ pub fn export_file_with_options(
     destination: Destination<'_>,
     options: ExportOptions,
 ) -> Result<Copied, CliError> {
+    export_file_with_sparse(source, destination, options, SparseOptions::default())
+}
+
+/// Copy with optional sparse staging. Zero chunks become holes in local files;
+/// writers receive dense bytes. Verification hashes the holes as logical zeros.
+pub fn export_file_with_sparse(
+    source: &mut dyn FileSource,
+    destination: Destination<'_>,
+    options: ExportOptions,
+    sparse: SparseOptions,
+) -> Result<Copied, CliError> {
     let mut stderr = io::stderr();
     let terminal = stderr.is_terminal();
     let mut progress = Progress::new(&mut stderr, terminal, ProgressOptions::default());
@@ -196,7 +212,18 @@ pub fn export_file_with_options(
         Destination::Writer(_) => PathBuf::from("-"),
         Destination::File { path, .. } => path.to_path_buf(),
     };
-    export_file_with_progress(source, destination, options, &name, &mut progress)
+    let cancellation = Cancellation::install()?;
+    export_file_cancellable(
+        source,
+        destination,
+        CopyOptions {
+            verify: options.verify,
+            sparse,
+        },
+        &name,
+        &mut progress,
+        &cancellation,
+    )
 }
 
 /// Export with a shared stderr reporter. Set its overall totals before copying;
@@ -209,13 +236,20 @@ pub fn export_file_with_progress(
     progress: &mut Progress<'_>,
 ) -> Result<Copied, CliError> {
     let cancellation = Cancellation::install()?;
-    export_file_cancellable(source, destination, options, name, progress, &cancellation)
+    export_file_cancellable(
+        source,
+        destination,
+        options.into(),
+        name,
+        progress,
+        &cancellation,
+    )
 }
 
 fn export_file_cancellable(
     source: &mut dyn FileSource,
     destination: Destination<'_>,
-    options: ExportOptions,
+    options: CopyOptions,
     name: &Path,
     progress: &mut Progress<'_>,
     cancellation: &Cancellation,
@@ -229,7 +263,7 @@ fn export_file_cancellable(
 fn copy_file(
     source: &mut dyn FileSource,
     destination: Destination<'_>,
-    options: ExportOptions,
+    options: CopyOptions,
     progress: &mut Progress<'_>,
     cancellation: &Cancellation,
 ) -> Result<Copied, CliError> {
@@ -247,7 +281,7 @@ fn copy_file(
             source,
             path,
             replace,
-            options.verify,
+            options,
             &mut |n| progress.advance(n),
             cancellation,
             |file, _| file.sync_all(),
@@ -329,7 +363,10 @@ fn export_to_file(
         source,
         path,
         replace,
-        verify,
+        CopyOptions {
+            verify,
+            ..CopyOptions::default()
+        },
         &mut |_| {},
         &Cancellation::install()?,
         sync,
@@ -340,7 +377,7 @@ fn export_to_file_observed(
     source: &mut dyn FileSource,
     path: &Path,
     replace: bool,
-    verify: bool,
+    options: CopyOptions,
     update: &mut dyn FnMut(u64),
     cancellation: &Cancellation,
     sync: impl FnOnce(&mut File, &Path) -> io::Result<()>,
@@ -376,7 +413,16 @@ fn export_to_file_observed(
     }
 
     let (staging, mut file) = create_staging(parent, name)?;
-    let copied = pump(source, &mut file, update, cancellation).and_then(|copied| {
+    let copied = if options.sparse.preserve_sparse {
+        pump(source, &mut SparseFile(&mut file), update, cancellation)
+    } else {
+        pump(source, &mut file, update, cancellation)
+    }
+    .and_then(|copied| {
+        if options.sparse.preserve_sparse {
+            file.set_len(copied.bytes)
+                .map_err(|e| CliError::failed(format!("set sparse length: {e}")))?;
+        }
         let synced = sync(&mut file, &staging);
         cancellation.check(copied.bytes, copied.bytes)?;
         synced.map_err(|e| CliError::failed(format!("sync {}: {e}", staging.display())))?;
@@ -384,7 +430,7 @@ fn export_to_file_observed(
     });
     drop(file);
     let published = copied.and_then(|copied| {
-        if verify {
+        if options.verify {
             verify_staging(&staging, &copied, cancellation)?;
         }
         cancellation.check(copied.bytes, copied.bytes)?;
@@ -696,6 +742,7 @@ pub fn export_with_progress(
     options: ExportOptions,
     progress: &mut Progress<'_>,
 ) -> Result<Outcome, CliError> {
+    let options = CopyOptions::from(options);
     let cancellation = Cancellation::install()?;
     progress.set_totals(Some(source.size()), Some(1));
     let dest = match &request.output {
