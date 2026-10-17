@@ -268,3 +268,245 @@ fn an_existing_destination_symlink_cannot_redirect_the_tree() {
     assert!(!outside.join("file").exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+// An ordered driver fixture can expose both spellings even when the host
+// holding the test checkout cannot. Destination lookup remains the OS oracle.
+struct NamedTree {
+    entries: Vec<(PathBuf, TreeKind)>,
+    reads: Vec<PathBuf>,
+    listings: Vec<PathBuf>,
+}
+impl NamedTree {
+    fn new(entries: &[(&str, TreeKind)]) -> Self {
+        Self {
+            entries: entries.iter().map(|(p, k)| (p.into(), *k)).collect(),
+            reads: Vec::new(),
+            listings: Vec::new(),
+        }
+    }
+    fn export(&mut self, dest: &Path, replace: bool) -> Outcome {
+        transfer::export_tree(&request(dest, replace), self, options()).unwrap()
+    }
+}
+impl TreeSource for NamedTree {
+    fn metadata(&mut self, path: &Path) -> Result<TreeMetadata, CliError> {
+        let (kind, inode) = if path.as_os_str().is_empty() {
+            (TreeKind::Directory, 0)
+        } else {
+            let i = self.entries.iter().position(|(p, _)| p == path).unwrap();
+            (self.entries[i].1, i as u64 + 1)
+        };
+        Ok(TreeMetadata {
+            kind,
+            size: path.to_str().unwrap().len() as u64,
+            inode,
+            accessed: None,
+            modified: None,
+        })
+    }
+    fn read_dir(&mut self, path: &Path) -> Result<Vec<TreeEntry>, CliError> {
+        self.listings.push(path.into());
+        let paths: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(p, _)| p.parent() == Some(path))
+            .map(|(p, _)| p.clone())
+            .collect();
+        paths
+            .into_iter()
+            .map(|p| {
+                Ok(TreeEntry {
+                    name: p.file_name().unwrap().into(),
+                    metadata: self.metadata(&p)?,
+                })
+            })
+            .collect()
+    }
+    fn read_file_at(
+        &mut self,
+        path: &Path,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, CliError> {
+        self.reads.push(path.into());
+        let data = path.to_str().unwrap().as_bytes();
+        let data = &data[offset as usize..];
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        Ok(n)
+    }
+}
+fn folds_case(dest: &Path) -> bool {
+    fs::create_dir_all(dest).unwrap();
+    let name = dest.join("CaseOracle");
+    fs::write(&name, b"oracle").unwrap();
+    let folds = dest.join("cASEoRACLE").try_exists().unwrap();
+    if folds {
+        assert_eq!(fs::read(dest.join("cASEoRACLE")).unwrap(), b"oracle");
+    }
+    fs::remove_file(name).unwrap();
+    folds
+}
+fn check_case_pair(dest: &Path, folding: bool, replace: bool) {
+    assert_eq!(folds_case(dest), folding, "fixture has wrong case behavior");
+    let mut tree = NamedTree::new(&[("README", TreeKind::File), ("readme", TreeKind::File)]);
+    let out = tree.export(dest, replace);
+    let report = out.report.unwrap();
+    assert_eq!(out.code, u8::from(folding), "{}", report.to_compact());
+    assert_eq!(count(&report, "refused"), u64::from(folding));
+    assert_eq!(count(&report, "failed"), 0);
+    assert_eq!(fs::read(dest.join("README")).unwrap(), b"README");
+    assert_eq!(
+        fs::read_dir(dest).unwrap().count(),
+        if folding { 1 } else { 2 }
+    );
+    if folding {
+        assert!(report.to_compact().contains("collides with README"));
+        assert_eq!(tree.reads, [PathBuf::from("README")]);
+    } else {
+        assert_eq!(fs::read(dest.join("readme")).unwrap(), b"readme");
+    }
+}
+#[test]
+fn case_variants_follow_the_destination_filesystem_with_and_without_replace() {
+    let (root, _, dest) = scratch("case-pair");
+    let folding = folds_case(&dest);
+    for replace in [false, true] {
+        check_case_pair(&dest.join(format!("replace-{replace}")), folding, replace);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn every_later_collision_names_the_first_source_entry() {
+    let (root, _, dest) = scratch("case-many");
+    let folding = folds_case(&dest);
+    let mut tree = NamedTree::new(&[
+        ("README", TreeKind::File),
+        ("readme", TreeKind::File),
+        ("ReadMe", TreeKind::File),
+        ("sibling", TreeKind::File),
+    ]);
+    let out = tree.export(&dest, true);
+    let report = out.report.unwrap();
+    assert_eq!(count(&report, "refused"), if folding { 2 } else { 0 });
+    assert_eq!(fs::read(dest.join("README")).unwrap(), b"README");
+    assert_eq!(fs::read(dest.join("sibling")).unwrap(), b"sibling");
+    if folding {
+        assert_eq!(
+            report.to_compact().matches("collides with README").count(),
+            2
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn colliding_directories_are_refused_before_their_children_are_listed() {
+    let (root, _, dest) = scratch("case-dirs");
+    let folding = folds_case(&dest);
+    let mut tree = NamedTree::new(&[
+        ("DIR", TreeKind::Directory),
+        ("dir", TreeKind::Directory),
+        ("DIR/first", TreeKind::File),
+        ("dir/second", TreeKind::File),
+    ]);
+    let out = tree.export(&dest, true);
+    assert_eq!(
+        count(out.report.as_ref().unwrap(), "refused"),
+        u64::from(folding)
+    );
+    assert_eq!(fs::read(dest.join("DIR/first")).unwrap(), b"DIR/first");
+    assert_eq!(tree.listings.contains(&PathBuf::from("dir")), !folding);
+    assert_eq!(dest.join("dir/second").exists(), !folding);
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn collisions_are_scoped_to_each_destination_directory() {
+    let (root, _, dest) = scratch("case-scope");
+    let mut tree = NamedTree::new(&[
+        ("one", TreeKind::Directory),
+        ("two", TreeKind::Directory),
+        ("one/README", TreeKind::File),
+        ("two/readme", TreeKind::File),
+    ]);
+    assert_eq!(tree.export(&dest, true).code, 0);
+    assert_eq!(fs::read(dest.join("one/README")).unwrap(), b"one/README");
+    assert_eq!(fs::read(dest.join("two/readme")).unwrap(), b"two/readme");
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn duplicate_source_names_are_refused_even_on_case_sensitive_destinations() {
+    let (root, _, dest) = scratch("case-duplicate");
+    let mut tree = NamedTree::new(&[("same", TreeKind::File), ("same", TreeKind::File)]);
+    let out = tree.export(&dest, true);
+    let report = out.report.unwrap();
+    assert_eq!(out.code, 1);
+    assert_eq!(count(&report, "refused"), 1);
+    assert!(report.to_compact().contains("collides with same"));
+    assert_eq!(tree.reads, [PathBuf::from("same")]);
+    assert_eq!(fs::read(dest.join("same")).unwrap(), b"same");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
+    struct Image {
+        root: PathBuf,
+        mount: PathBuf,
+    }
+    impl Drop for Image {
+        fn drop(&mut self) {
+            let out = Command::new("hdiutil")
+                .arg("detach")
+                .arg(&self.mount)
+                .arg("-force")
+                .output()
+                .expect("hdiutil detach is required");
+            if !std::thread::panicking() {
+                assert!(out.status.success(), "detach failed: {out:?}");
+            }
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+    for (filesystem, folding) in [("HFS+", true), ("Case-sensitive HFS+", false)] {
+        let (root, _, _) = scratch(if folding {
+            "hfs-folding"
+        } else {
+            "hfs-sensitive"
+        });
+        let image = root.join("oracle.sparseimage");
+        let mount = root.join("mount");
+        fs::create_dir(&mount).unwrap();
+        let out = Command::new("hdiutil")
+            .args([
+                "create",
+                "-size",
+                "32m",
+                "-type",
+                "SPARSE",
+                "-fs",
+                filesystem,
+                "-volname",
+                "core-case-oracle",
+            ])
+            .arg(&image)
+            .output()
+            .expect("hdiutil create is required for the case oracle");
+        assert!(out.status.success(), "create failed: {out:?}");
+        let out = Command::new("hdiutil")
+            .args(["attach", "-nobrowse", "-noautoopen", "-mountpoint"])
+            .arg(&mount)
+            .arg(&image)
+            .output()
+            .expect("hdiutil attach is required for the case oracle");
+        let volume = Image { root, mount };
+        assert!(out.status.success(), "attach failed: {out:?}");
+        for replace in [false, true] {
+            check_case_pair(
+                &volume.mount.join(format!("replace-{replace}")),
+                folding,
+                replace,
+            );
+        }
+    }
+}
