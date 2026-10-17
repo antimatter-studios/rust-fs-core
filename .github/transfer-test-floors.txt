@@ -7,4 +7,5 @@ transfer_exclusive 7
 # #254 adds five portable tree cases and a Unix symlink refusal case.
 # #255 adds five portable collision cases and one macOS mounted-volume oracle.
 # #256 adds two portable link/loop cases and six Unix host-link oracle cases.
-transfer_tree 12
+# #257 adds six portable timestamp cases against host metadata.
+transfer_tree 18
