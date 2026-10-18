@@ -35,7 +35,7 @@ crate-type = ["staticlib", "rlib"]
 # one's -- gains nothing from it. clap, clap_complete and clap_mangen are
 # MIT/Apache-2.0. It also carries the transfer the tools' `export` shares
 # (`fs_core::cli::transfer`), whose SHA-256 is sha2's (MIT/Apache-2.0).
-cli = ["dep:clap", "dep:clap_complete", "dep:clap_mangen", "dep:sha2", "dep:same-file"]
+cli = ["dep:clap", "dep:clap_complete", "dep:clap_mangen", "dep:sha2", "dep:same-file", "dep:signal-hook"]
 
 [dependencies]
 # All of them only under `cli`. For clap's three, no derive: the builder
@@ -49,6 +49,10 @@ clap_mangen = { version = "0.2", optional = true }
 # The digest every transfer reports. The same release line the drivers
 # already use, so a tool linking both builds it once.
 sha2 = { version = "0.10", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# MIT/Apache-2.0; handlers only set an atomic flag, never perform cleanup.
+signal-hook = { version = "0.3.18", optional = true, default-features = false }
 
 [target.'cfg(not(unix))'.dependencies]
 # File identity on Windows uses open handles, volume IDs and file indexes.

@@ -406,6 +406,9 @@ impl Drop for NameProbe {
 /// filesystem considers equivalent are refused, even with `--replace`.
 /// No snapshot or protection against concurrent source/destination mutation
 /// is promised.
+/// On Unix, cancellation stops further items, retains completed entries, and
+/// reports the in-flight and queued paths with status 130 (SIGINT) or 143
+/// (SIGTERM). Cancellation is the exception to continuing after item errors.
 pub fn export_tree(
     request: &ExportRequest,
     source: &mut dyn TreeSource,
@@ -454,11 +457,13 @@ fn totals(
     metadata: TreeMetadata,
     max_depth: usize,
     listings: &mut HashMap<PathBuf, Vec<TreeEntry>>,
+    cancellation: &Cancellation,
 ) -> Option<(u64, u64)> {
     let mut pending = vec![(root.to_path_buf(), metadata, 0usize)];
     let mut seen = HashSet::new();
     let (mut bytes, mut files) = (0u64, 0u64);
     while let Some((path, metadata, depth)) = pending.pop() {
+        cancellation.check(0, 0).ok()?;
         if depth > max_depth {
             return None;
         }
@@ -501,6 +506,7 @@ pub fn export_tree_with_progress(
     times: TimeOptions,
     progress: &mut Progress<'_>,
 ) -> Result<Outcome, CliError> {
+    let cancellation = Cancellation::install()?;
     let Output::File(dest) = &request.output else {
         return Err(CliError::usage("tree export needs a local DEST"));
     };
@@ -521,6 +527,7 @@ pub fn export_tree_with_progress(
             metadata.clone(),
             options.max_depth,
             &mut listings,
+            &cancellation,
         );
         progress.set_totals(totals.map(|t| t.0), totals.map(|t| t.1));
     }
@@ -528,7 +535,9 @@ pub fn export_tree_with_progress(
     let mut directories = HashSet::new();
     let mut files: HashMap<u64, (PathBuf, Json)> = HashMap::new();
     let mut items = Vec::new();
-    let mut counts = [0u64; 4];
+    let mut counts = [0u64; 5];
+    let mut cancel_code = 0;
+    let mut in_flight = Json::Null;
     let mut merged = 0u64;
     let mut deferred_times = Vec::new();
     while let Some((path, local, metadata, depth)) = pending.pop() {
@@ -539,6 +548,7 @@ pub fn export_tree_with_progress(
         let mut reason = String::new();
         let mut evidence = Json::Null;
         let result = (|| -> Result<usize, CliError> {
+            cancellation.check(0, metadata.size)?;
             if depth > options.max_depth {
                 return Err(CliError::failed("maximum depth exceeded"));
             }
@@ -574,6 +584,7 @@ pub fn export_tree_with_progress(
                                 "destination exists; --replace permits existing files only",
                             ));
                         }
+                        cancellation.check(0, 0)?;
                         publish_link(&local, request.replace, |p| create_symbolic_link(&link, p))?;
                         reason = if target_escapes(&link.target, depth.saturating_sub(1)) {
                             "symbolic link preserved; target escapes DEST"
@@ -603,6 +614,7 @@ pub fn export_tree_with_progress(
                     }
                     if let Some((first, copied)) = files.get(&metadata.inode) {
                         if links.preserve_links {
+                            cancellation.check(0, metadata.size)?;
                             publish_link(&local, request.replace, |p| fs::hard_link(first, p))?;
                             evidence = copied.clone();
                             reason = "hard link preserved".into();
@@ -625,6 +637,7 @@ pub fn export_tree_with_progress(
                             verify: options.verify,
                         },
                         progress,
+                        &cancellation,
                     )?;
                     evidence = Json::object([
                         ("bytes", Json::from(copied.bytes)),
@@ -653,6 +666,7 @@ pub fn export_tree_with_progress(
                         Some(children) => children,
                         None => source.read_dir(&path)?,
                     };
+                    cancellation.check(0, 0)?;
                     let probe = NameProbe::new(&local)?;
                     let mut queued = Vec::new();
                     for child in children {
@@ -708,8 +722,12 @@ pub fn export_tree_with_progress(
         let status = match result {
             Ok(s) => s,
             Err(e) => {
+                let cancelled = cancel::is_cancelled(&e);
                 reason = e.message;
-                if e.code == super::super::output::EXIT_UNSUPPORTED {
+                if cancelled {
+                    cancel_code = e.code;
+                    4
+                } else if e.code == super::super::output::EXIT_UNSUPPORTED {
                     2
                 } else {
                     3
@@ -728,14 +746,21 @@ pub fn export_tree_with_progress(
             ("destination", Json::from(local.display().to_string())),
             (
                 "status",
-                Json::from(["completed", "skipped", "refused", "failed"][status]),
+                Json::from(["completed", "skipped", "refused", "failed", "cancelled"][status]),
             ),
             ("reason", Json::from(reason)),
             ("copy", evidence),
         ]));
+        if cancel_code != 0 {
+            in_flight = items.last().expect("cancelled item was recorded").clone();
+            break;
+        }
     }
     // Reverse visitation order restores every child directory before its parent.
     for (local, metadata, index) in deferred_times.into_iter().rev() {
+        if cancel_code != 0 {
+            break;
+        }
         let (note, failed) = match preserve_times(&local, &metadata) {
             Ok(note) => (note, false),
             Err(e) => (e.message, true),
@@ -762,7 +787,36 @@ pub fn export_tree_with_progress(
         ("refused", Json::from(counts[2])),
         ("failed", Json::from(counts[3])),
         ("merged_directories", Json::from(merged)),
+        ("cancelled", Json::from(cancel_code != 0)),
+        (
+            "signal",
+            if cancel_code == 0 {
+                Json::Null
+            } else {
+                Json::from(u64::from(cancel_code - 128))
+            },
+        ),
+        ("in_flight", in_flight),
+        (
+            "pending",
+            Json::Arr(
+                pending
+                    .into_iter()
+                    .rev()
+                    .map(|(path, local, _, _)| {
+                        Json::object([
+                            ("path", Json::from(path.display().to_string())),
+                            ("destination", Json::from(local.display().to_string())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
         ("items", Json::Arr(items)),
     ]))
-    .with_code(u8::from(counts[1..].iter().any(|n| *n != 0))))
+    .with_code(if cancel_code != 0 {
+        cancel_code
+    } else {
+        u8::from(counts[1..].iter().any(|n| *n != 0))
+    }))
 }
