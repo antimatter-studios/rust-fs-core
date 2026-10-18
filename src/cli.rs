@@ -37,10 +37,10 @@
 //! - **Exit statuses**, outside a tool that has its own scheme (`fsck`'s
 //!   0/1/4/8): 0 done, 1 failed, 2 the command line was wrong, 3 the verb
 //!   exists but this crate cannot do it (not implemented, or the format is
-//!   read-only), 5 partial: the operation completed and its output is
-//!   usable, but some data could not be recovered, and the report says
-//!   which. A script moved between formats fails loudly on 3 instead of
-//!   meaning something else.
+//!   read-only), 4 refused because of the volume's current state, 5 partial:
+//!   the operation completed and its output is usable, but some data could
+//!   not be recovered, and the report says which. A script moved between
+//!   formats fails loudly on 3 instead of meaning something else.
 //! - **`<repo> doctor`** resolves every dotted name on PATH and says, per
 //!   name, whether the program found is ours, and if not, what wins and
 //!   how to fix it.

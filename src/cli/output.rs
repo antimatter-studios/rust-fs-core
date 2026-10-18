@@ -18,11 +18,13 @@ pub const EXIT_USAGE: u8 = 2;
 /// Exit status: the verb exists, and this driver cannot do it — not
 /// implemented yet, or the format is read-only.
 pub const EXIT_UNSUPPORTED: u8 = 3;
+/// Exit status: the volume's current state refused the operation.
+pub const EXIT_REFUSED: u8 = 4;
 /// Exit status: the operation completed and its output is usable, but
 /// some data could not be recovered; the report says which. Not 0, which
 /// a script takes as safe to discard the source, and not 1, because the
-/// output is there to use. 4 is left for a request the volume's current
-/// state refused.
+/// output is there to use. [`EXIT_REFUSED`] covers a request the volume's
+/// current state refused.
 pub const EXIT_PARTIAL: u8 = 5;
 
 /// A JSON value, with object keys kept in the order they were added so
@@ -382,6 +384,14 @@ impl CliError {
         }
     }
 
+    /// The volume's current state refused the operation (exit 4).
+    pub fn refused_by_state(message: impl Into<String>) -> CliError {
+        CliError {
+            message: message.into(),
+            code: EXIT_REFUSED,
+        }
+    }
+
     /// A failure with a tool-specific status (fsck's 8).
     pub fn with_code(mut self, code: u8) -> CliError {
         self.code = code;
@@ -450,16 +460,38 @@ mod tests {
         // 4 refused by the volume's current state, 5 partial. A script
         // reads the number, so it is pinned, and no other row may share it.
         assert_eq!(EXIT_PARTIAL, 5);
-        let refused_by_state = 4;
-        for other in [
-            0,
-            EXIT_FAILED,
-            EXIT_USAGE,
-            EXIT_UNSUPPORTED,
-            refused_by_state,
-        ] {
+        for other in [0, EXIT_FAILED, EXIT_USAGE, EXIT_UNSUPPORTED, EXIT_REFUSED] {
             assert_ne!(EXIT_PARTIAL, other);
         }
+    }
+
+    #[test]
+    fn a_state_refusal_has_its_own_exit_status() {
+        assert_eq!(EXIT_REFUSED, 4);
+        for other in [0, EXIT_FAILED, EXIT_USAGE, EXIT_UNSUPPORTED, EXIT_PARTIAL] {
+            assert_ne!(EXIT_REFUSED, other);
+        }
+    }
+
+    #[test]
+    fn a_state_refusal_error_uses_its_status_and_keeps_its_message() {
+        let error = CliError::refused_by_state(String::from("volume is mounted"));
+        assert_eq!(error.code, EXIT_REFUSED);
+        assert_eq!(error.message, "volume is mounted");
+        assert_eq!(CliError::refused("read-only format").code, EXIT_UNSUPPORTED);
+
+        let json = render("fs.demo", Format::Json, Err(error.clone()));
+        assert_eq!(json.code, EXIT_REFUSED);
+        assert!(json.stdout.is_empty());
+        assert_eq!(
+            json.stderr,
+            "{\"error\": \"volume is mounted\", \"code\": 4}\n"
+        );
+
+        let text = render("fs.demo", Format::Text, Err(error));
+        assert_eq!(text.code, EXIT_REFUSED);
+        assert!(text.stdout.is_empty());
+        assert_eq!(text.stderr, "fs.demo: volume is mounted\n");
     }
 
     #[test]
