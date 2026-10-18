@@ -261,17 +261,29 @@ pub fn import_file_with_sparse(
 
 // The tree owns the image lock. Check the non-following source name as well as
 // the open handle so a substituted symbolic link cannot become an input file.
+// A verified file with a ledger records the opened source's host identity.
 pub(super) fn import_tree_file(
     local: &Path,
     sink: &mut dyn FileSink,
     path: &Path,
     replace: bool,
     cancellation: &Cancellation,
+    verify: bool,
+    ledger: Option<&mut manifest::ImportLedger>,
 ) -> Result<Copied, CliError> {
     let file = File::open(local).map_err(|e| CliError::failed(e.to_string()))?;
     let mut source = NamedSource { file, path: local };
     let identity =
         SourceIdentity::capture(&source.file).map_err(|e| CliError::failed(e.to_string()))?;
+    let record = match ledger.filter(|_| verify) {
+        Some(ledger) => {
+            ledger.failed = true;
+            let captured = manifest::LocalIdentity::capture(local, &source.file)?;
+            ledger.failed = false;
+            Some((ledger, manifest::Identity::Local(captured)))
+        }
+        None => None,
+    };
     let validate = |source: &NamedSource<'_>, bytes| {
         let metadata = fs::symlink_metadata(local).map_err(|e| CliError::failed(e.to_string()))?;
         if !identity
@@ -293,6 +305,8 @@ pub(super) fn import_tree_file(
         ImportContext {
             size: Some(identity.metadata.len()),
             cancellation: Some(cancellation),
+            verify,
+            record,
             ..ImportContext::default()
         },
         validate,
@@ -410,6 +424,8 @@ fn import_stream<S: Read + ?Sized>(
     }
     // Record after publication, still under the image lock.
     if let (Ok(copied), Some((ledger, source))) = (&result, record) {
+        // Until the append syncs, a capture error stops any tree traversal.
+        ledger.failed = true;
         let identity = sink.manifest_identity(path)?;
         let destination = manifest::import_identity(identity, path, sink.image_path())?;
         ledger.record(source, destination, copied)?;
