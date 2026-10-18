@@ -119,12 +119,81 @@ fn safe_name(name: &OsStr) -> bool {
             Some(Component::Normal(_))
         )
 }
+
+/// Reserve source names on the destination filesystem before copying anything.
+/// Real lookups, rather than a Unicode case table, decide which names alias.
+/// A private child directory inherits the destination's case behavior; its
+/// markers disappear before any of the queued children are exported.
+struct NameProbe(Option<PathBuf>);
+impl NameProbe {
+    fn new(parent: &Path) -> Result<Self, CliError> {
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
+            builder.mode(0o700);
+            builder
+        };
+        for n in 0..1000u32 {
+            let dir = parent.join(format!(".core-name-probe-{}-{n}", std::process::id()));
+            match builder.create(&dir) {
+                Ok(()) => return Ok(Self(Some(dir))),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(CliError::failed(format!("probe destination names: {e}"))),
+            }
+        }
+        Err(CliError::failed("no free destination name-probe directory"))
+    }
+
+    fn reserve(&self, name: &OsStr) -> Result<(), CliError> {
+        let marker = self.0.as_ref().expect("probe is active").join(name);
+        let failed = |e| {
+            CliError::failed(format!(
+                "probe destination name {}: {e}",
+                name.to_string_lossy()
+            ))
+        };
+        match fs::symlink_metadata(&marker) {
+            Ok(_) => {
+                let first = fs::read_to_string(&marker).map_err(failed)?;
+                return Err(CliError::refused(format!("collides with {first}")));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(failed(e)),
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(marker)
+            .map_err(failed)?;
+        file.write_all(name.to_string_lossy().as_bytes())
+            .map_err(failed)
+    }
+
+    fn finish(mut self) -> Result<(), CliError> {
+        fs::remove_dir_all(self.0.as_ref().expect("probe is active"))
+            .map_err(|e| CliError::failed(format!("remove destination name probes: {e}")))?;
+        self.0 = None;
+        Ok(())
+    }
+}
+impl Drop for NameProbe {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.0 {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
 /// Export a file or, with `recursive`, a directory into a local destination.
 /// Every visited item appears once in the report, with counts for all four
 /// statuses. A refused/skipped directory is not enumerated. Any incomplete
 /// item makes the outcome nonzero; item errors do not stop siblings. Existing
-/// directories merge; symlinks and directory cycles are refused. No snapshot
-/// or protection against concurrent source/destination mutation is promised.
+/// directories merge; symlinks and directory cycles are refused. Within each
+/// directory, the first source name wins and later names that the destination
+/// filesystem considers equivalent are refused, even with `--replace`.
+/// No snapshot or protection against concurrent source/destination mutation
+/// is promised.
 pub fn export_tree(
     request: &ExportRequest,
     source: &mut dyn TreeSource,
@@ -218,20 +287,38 @@ pub fn export_tree(
                     } else {
                         fs::create_dir(&local).map_err(|e| CliError::failed(e.to_string()))?;
                     }
-                    for child in source.read_dir(&path)? {
-                        if !safe_name(&child.name) {
-                            counts[2] += 1;
+                    let children = source.read_dir(&path)?;
+                    let probe = NameProbe::new(&local)?;
+                    let mut queued = Vec::new();
+                    for child in children {
+                        let checked = if safe_name(&child.name) {
+                            probe.reserve(&child.name)
+                        } else {
+                            Err(CliError::refused("unsafe entry name"))
+                        };
+                        if let Err(e) = checked {
+                            let status = if e.code == super::super::output::EXIT_UNSUPPORTED {
+                                2
+                            } else {
+                                3
+                            };
+                            counts[status] += 1;
                             items.push(Json::object([
                                 ("parent", Json::from(path.display().to_string())),
                                 (
                                     "name",
                                     Json::from(child.name.to_string_lossy().into_owned()),
                                 ),
-                                ("status", Json::from("refused")),
-                                ("reason", Json::from("unsafe entry name")),
+                                (
+                                    "status",
+                                    Json::from(
+                                        ["completed", "skipped", "refused", "failed"][status],
+                                    ),
+                                ),
+                                ("reason", Json::from(e.message)),
                             ]));
                         } else {
-                            pending.push((
+                            queued.push((
                                 path.join(&child.name),
                                 local.join(&child.name),
                                 child.metadata,
@@ -239,6 +326,10 @@ pub fn export_tree(
                             ));
                         }
                     }
+                    probe.finish()?;
+                    // The stack is LIFO; reversing preserves the driver's
+                    // listing order, including which spelling wins a collision.
+                    pending.extend(queued.into_iter().rev());
                 }
             }
             Ok(0)
