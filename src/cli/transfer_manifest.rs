@@ -7,16 +7,101 @@
 //! before copying to reject image/local aliases. Each append syncs before
 //! returning; an error stops the transfer.
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::super::output::CliError;
+use clap::{Arg, ArgAction, ArgMatches};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 // Bound individual record buffers during serialization and recovery.
 const MAX_LINE: usize = 64 * 1024;
+
+/// Opt-in export ledger arguments, separate from existing request literals.
+/// Parsing performs no I/O. Execution adapters must open the ledger through
+/// [`Manifest::open_for_export`] before transfer I/O and apply resume decisions
+/// with locked, fresh endpoint identities; ordinary export APIs do not do this.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportManifestOptions {
+    /// Local JSONL ledger path, retained without lossy Unicode conversion.
+    pub manifest: Option<PathBuf>,
+    /// Skip only files supported by revalidated evidence of earlier verification.
+    pub resume: bool,
+}
+
+impl ExportManifestOptions {
+    /// Parse [`export_args_with_manifest`] or [`export_args_with_resume`].
+    /// Legacy argument sets select no ledger and no resume. A custom parser
+    /// must still supply a manifest with resume and use a local destination.
+    /// Manifest recording without `--verify` is accepted but records no entries.
+    pub fn from_matches(matches: &ArgMatches) -> Result<Self, CliError> {
+        let manifest = matches
+            .try_get_one::<PathBuf>("manifest")
+            .ok()
+            .flatten()
+            .cloned();
+        let resume = matches
+            .try_get_one::<bool>("resume")
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false);
+        if resume && manifest.is_none() {
+            return Err(CliError::usage("--resume requires --manifest FILE"));
+        }
+        if manifest.is_some()
+            && matches
+                .try_get_one::<OsString>("dest")
+                .ok()
+                .flatten()
+                .is_some_and(|dest| dest == "-")
+        {
+            return Err(CliError::usage("--manifest needs a file DEST, not stdout"));
+        }
+        Ok(Self { manifest, resume })
+    }
+}
+
+/// All tree and metadata arguments plus an opt-in local manifest path.
+/// Drivers must consume [`ExportManifestOptions`] in their ledger adapter;
+/// adding these arguments alone does not enable recording or resume execution.
+pub fn export_args_with_manifest() -> [Arg; 8] {
+    let [path, dest, replace, verify, recursive, depth, preserve] =
+        super::export_args_with_xattrs();
+    [
+        path,
+        dest,
+        replace,
+        verify,
+        recursive,
+        depth,
+        preserve,
+        Arg::new("manifest")
+            .long("manifest")
+            .value_name("FILE")
+            .value_parser(clap::value_parser!(PathBuf))
+            .help("Record verified, published files in a local JSONL ledger; requires a file DEST"),
+    ]
+}
+
+/// Manifest export arguments with evidence-based resume. `--resume` requires
+/// `--manifest FILE`; endpoint and digest validation belongs to the adapter.
+/// Earlier verification never means destination bytes were verified now.
+pub fn export_args_with_resume() -> [Arg; 9] {
+    let [path, dest, replace, verify, recursive, depth, preserve, manifest] =
+        export_args_with_manifest();
+    [
+        path, dest, replace, verify, recursive, depth, preserve, manifest,
+        Arg::new("resume")
+            .long("resume")
+            .action(ArgAction::SetTrue)
+            .requires("manifest")
+            .help("Skip files verified earlier only when manifest identities and a fresh source digest match"),
+    ]
+}
 
 /// A signed Unix timestamp, including subsecond precision and pre-epoch times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

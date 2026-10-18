@@ -62,6 +62,7 @@ pub use xattrs::{
 
 #[path = "transfer_manifest.rs"]
 pub mod manifest;
+pub use manifest::{export_args_with_manifest, export_args_with_resume, ExportManifestOptions};
 
 #[path = "transfer_lock.rs"]
 mod image_lock;
@@ -706,6 +707,7 @@ impl ExportRequest {
         let dest = given("dest")?;
         let replace = matches.get_flag("replace");
         ExportOptions::from_matches(matches)?;
+        ExportManifestOptions::from_matches(matches)?;
         let output = if dest == "-" {
             if replace {
                 return Err(CliError::usage("--replace needs a file DEST, not stdout"));
