@@ -378,6 +378,51 @@ fn failed_host_mount_probes_refuse_import_with_input_unread() {
     assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn btrfs_members_refuse_import_and_unrelated_devices_stay_usable() {
+    let dir = Scratch::new("mounted-btrfs");
+    let images = [dir.root.join("member0"), dir.root.join("member1")];
+    let mut volume = mounted_loop::Btrfs::new(&dir.root, &images);
+    let unrelated_image = dir.root.join("unrelated");
+    let unrelated = mounted_loop::Loop::new(&unrelated_image);
+    for readonly in [false, true] {
+        volume.remount(readonly);
+        for image in images.iter().chain(&volume.devices) {
+            let input_path = dir.root.join("input");
+            fs::write(&input_path, b"producer bytes still unread").unwrap();
+            let mut input = File::open(input_path).unwrap();
+            let output = child(
+                "host_mounted_images_and_devices_refuse_import_with_input_unread",
+                image,
+            )
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("mounted"));
+            assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
+
+            let output = child(
+                "host_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not",
+                image,
+            )
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(stderr.contains("mounted read-write"), !readonly, "{stderr}");
+        }
+        // A mounted Btrfs elsewhere on the host says nothing about these.
+        drop(ImageLock::for_import(&unrelated.device).unwrap());
+        drop(ImageLock::for_import(&unrelated_image).unwrap());
+    }
+    volume.unmount();
+    for image in images.iter().chain(&volume.devices) {
+        drop(ImageLock::for_import(image).unwrap());
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[path = "support/mounted_hdiutil.rs"]
 mod mounted_hdiutil;
