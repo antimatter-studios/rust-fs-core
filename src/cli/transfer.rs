@@ -66,7 +66,7 @@ pub use manifest::{
     export_args_with_manifest, export_args_with_resume, import_args_with_manifest,
     import_args_with_resume, ExportManifestOptions, ImportManifestOptions,
 };
-pub use manifest::{export_tree_with_manifest, export_with_manifest};
+pub use manifest::{export_tree_with_manifest, export_with_manifest, import_with_manifest};
 
 #[path = "transfer_lock.rs"]
 mod image_lock;
