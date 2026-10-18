@@ -84,13 +84,13 @@ impl FileSink for Sink {
         if let Some(hook) = self.during_persist.take() {
             hook();
         }
+        // kill(1) exiting only proves SIGTERM was posted to the process: the
+        // kernel may hand it to another thread, whose handler can still be
+        // pending when persist returns (#349). raise(3) returns only after the
+        // handler has run, so the signal is observed during persistence.
         #[cfg(unix)]
         if self.fail == "signal" {
-            assert!(std::process::Command::new("kill")
-                .args(["-TERM", &std::process::id().to_string()])
-                .status()
-                .unwrap()
-                .success());
+            signal_hook::low_level::raise(signal_hook::consts::SIGTERM).unwrap();
         }
         if self.fail == "persist" {
             return Err(CliError::failed("persist failed"));
