@@ -11,6 +11,10 @@ use super::super::output::CliError;
 #[path = "transfer_mount_linux.rs"]
 mod host_mount;
 
+#[cfg(target_os = "macos")]
+#[path = "transfer_mount_macos.rs"]
+mod host_mount;
+
 /// A non-blocking lock on the backing image or device, independent of its
 /// partition offset. Keep the guard alive through the entire transfer.
 ///
@@ -20,6 +24,8 @@ mod host_mount;
 /// Linux also checks the current mount namespace, including loop-backed
 /// images and mounted partitions. This is a preflight snapshot, not a lock
 /// against subsequent mounts or mounts hidden in another namespace.
+/// macOS checks attached disk images, their slices and synthesized APFS
+/// containers against the mount table, with the same snapshot limits.
 #[derive(Debug)]
 #[must_use = "dropping the guard releases the image lock"]
 pub struct ImageLock {
@@ -44,9 +50,12 @@ impl ImageLock {
     /// Contention and unsupported or failed lock operations have exit code 1.
     /// Linux mount probes also fail closed with exit code 1, including when
     /// another loop's backing identity is unreadable or a Btrfs/ZFS mount
-    /// prevents reliable device membership resolution.
+    /// prevents reliable device membership resolution. macOS mount probes
+    /// run before the lock, because DiskImages may lock an attached image.
     pub fn for_import(image: &Path) -> Result<Self, CliError> {
         let file = open(image)?;
+        #[cfg(target_os = "macos")]
+        refuse_mounted(image)?;
         lock(&file, true).map_err(|err| {
             CliError::failed(format!(
                 "cannot exclusively lock image {}: {err}",
@@ -55,12 +64,7 @@ impl ImageLock {
         })?;
         let guard = Self { _file: file };
         #[cfg(target_os = "linux")]
-        if host_mount::state(image)?.mounted {
-            return Err(CliError::failed(format!(
-                "cannot import into host-mounted image {}",
-                image.display()
-            )));
-        }
+        refuse_mounted(image)?;
         Ok(guard)
     }
 
@@ -70,7 +74,7 @@ impl ImageLock {
     /// deliver the warning, return exit code 1 before any source read.
     pub fn for_export(image: &Path, warnings: &mut dyn Write) -> Result<Option<Self>, CliError> {
         let file = open(image)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if host_mount::state(image)?.read_write {
             writeln!(
                 warnings,
@@ -98,6 +102,17 @@ impl ImageLock {
             ))),
         }
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn refuse_mounted(image: &Path) -> Result<(), CliError> {
+    if host_mount::state(image)?.mounted {
+        return Err(CliError::failed(format!(
+            "cannot import into host-mounted image {}",
+            image.display()
+        )));
+    }
+    Ok(())
 }
 
 fn open(image: &Path) -> Result<File, CliError> {
