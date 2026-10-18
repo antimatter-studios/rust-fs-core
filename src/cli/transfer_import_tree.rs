@@ -119,14 +119,41 @@ pub fn import_tree(
     sink: Option<&mut dyn TreeSink>,
     options: ImportTreeOptions,
 ) -> Result<Outcome, CliError> {
-    import_tree_recorded(request, sink, options, ImportOptions::default(), None)
+    import_tree_recorded(
+        request,
+        sink,
+        options,
+        ImportOptions::default().into(),
+        None,
+    )
+}
+
+/// Import a tree with sparse regular files alongside the existing links/times
+/// policies. A sink lacking sparse support refuses each file by destination
+/// format before staging; siblings continue and no refused file is published.
+pub fn import_tree_with_sparse(
+    request: &ImportRequest,
+    sink: Option<&mut dyn TreeSink>,
+    options: ImportTreeOptions,
+    sparse: SparseOptions,
+) -> Result<Outcome, CliError> {
+    import_tree_recorded(
+        request,
+        sink,
+        options,
+        CopyOptions {
+            sparse,
+            ..CopyOptions::default()
+        },
+        None,
+    )
 }
 
 pub(super) fn import_tree_recorded(
     request: &ImportRequest,
     sink: Option<&mut dyn TreeSink>,
     options: ImportTreeOptions,
-    verify: ImportOptions,
+    copy_options: CopyOptions,
     mut ledger: Option<&mut manifest::ImportLedger>,
 ) -> Result<Outcome, CliError> {
     let sink = sink.ok_or_else(|| CliError::refused("this driver has no tree import sink"))?;
@@ -180,6 +207,9 @@ pub(super) fn import_tree_recorded(
                 sink.create_symbolic_link(&dest, &target)?;
                 return set_times(sink, &dest, &m, options);
             }
+            if m.is_file() && copy_options.sparse.preserve_sparse && !sink.supports_sparse() {
+                return Err(unsupported(sink.format_name(), "sparse files"));
+            }
             let inode = file_identity(&m).filter(|_| options.preserve_links && m.is_file());
             if let Some(existing) = inode.and_then(|id| linked.get(&id)) {
                 return sink.create_hard_link(&dest, existing);
@@ -213,7 +243,7 @@ pub(super) fn import_tree_recorded(
                     &dest,
                     request.replace,
                     &cancellation,
-                    verify.verify,
+                    copy_options,
                     ledger.as_deref_mut(),
                 )?;
                 copy = Json::object([
