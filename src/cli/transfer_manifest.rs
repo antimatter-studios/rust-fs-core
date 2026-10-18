@@ -3,8 +3,9 @@
 //! This storage layer does not infer verification or capture identities. Callers
 //! must supply identities of the actual transferred objects, append only after
 //! read-back verification and publication, and report [`ManifestRead::torn_tail`].
-//! Export adapters use [`Manifest::open_for_export`] before copying to reject
-//! image/tree aliases. Each append syncs before returning; an error stops the transfer.
+//! Adapters use [`Manifest::open_for_export`] or [`Manifest::open_for_import`]
+//! before copying to reject image/local aliases. Each append syncs before
+//! returning; an error stops the transfer.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -249,6 +250,31 @@ impl Drop for Manifest {
 }
 
 impl Manifest {
+    /// Preflight an import ledger before creating it or recovering any contents.
+    /// Reject image aliases, the source itself, paths inside a source tree, and
+    /// hard/symbolic links to existing source files. Set `source_is_tree` for
+    /// recursive imports. The source must exist; identity errors fail closed.
+    /// Uses the same safe opener as [`Self::open_for_export`], including its
+    /// ancestor resolution and refusal to traverse directory symlinks.
+    ///
+    /// Call before reading source contents or staging image writes, and keep the
+    /// ledger open throughout the import. Callers must exclude concurrent path
+    /// mutation and report the returned recovery information as for [`Self::open`].
+    pub fn open_for_import(
+        path: &Path,
+        image: &Path,
+        source: &Path,
+        source_is_tree: bool,
+    ) -> Result<(Self, ManifestRead), CliError> {
+        std::fs::metadata(source).map_err(|e| {
+            CliError::failed(format!(
+                "manifest preflight source {}: {e}",
+                source.display()
+            ))
+        })?;
+        Self::open_for_export(path, image, source, source_is_tree)
+    }
+
     /// Preflight an export ledger before creating it or recovering any contents.
     /// Reject image aliases, the destination itself, paths inside a destination
     /// tree, and hard/symbolic links to existing destination files. Set
@@ -272,7 +298,7 @@ impl Manifest {
         let dest = resolve_export_path(destination).map_err(failed)?;
         if resolved == dest || (destination_is_tree && resolved.starts_with(&dest)) {
             return Err(failed(io::Error::other(
-                "manifest aliases or is inside DEST",
+                "manifest aliases or is inside the local transfer path",
             )));
         }
         match std::fs::metadata(path) {
