@@ -152,14 +152,50 @@ pub(in crate::cli::transfer) struct ExportLedger {
     resume: bool,
 }
 
+enum ResumeSource<'a> {
+    File(&'a mut dyn transfer::FileSource),
+    Tree(&'a mut dyn transfer::TreeSource, &'a Path, u64),
+}
+impl ResumeSource<'_> {
+    fn capture(&mut self, path: &Path) -> Result<Identity, CliError> {
+        match self {
+            Self::File(source) => {
+                export_identity(source.manifest_identity()?, path, source.image_path())
+            }
+            Self::Tree(source, _, _) => {
+                let identity = source.manifest_identity(path)?;
+                export_identity(identity, path, source.image_path())
+            }
+        }
+    }
+    fn size(&self) -> u64 {
+        match self {
+            Self::File(source) => source.size(),
+            Self::Tree(_, _, size) => *size,
+        }
+    }
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, CliError> {
+        match self {
+            Self::File(source) => source.read_at(offset, buf),
+            Self::Tree(source, path, _) => source.read_file_at(path, offset, buf),
+        }
+    }
+}
+
 /// Sequential reads of a driver source, for the resume digest.
-struct SourceReader<'a> {
-    source: &'a mut dyn transfer::FileSource,
+struct SourceReader<'a, 'b> {
+    source: ResumeSource<'a>,
     offset: u64,
     size: u64,
+    cancellation: Option<&'b transfer::Cancellation>,
 }
-impl Read for SourceReader<'_> {
+impl Read for SourceReader<'_, '_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(cancellation) = self.cancellation {
+            cancellation
+                .check(self.offset, self.size)
+                .map_err(|e| io::Error::other(e.message))?;
+        }
         // An early end is a length mismatch, so the file is copied again.
         let want = buf
             .len()
@@ -233,11 +269,6 @@ impl ExportLedger {
         options: &ExportManifestOptions,
         tree: bool,
     ) -> Result<Option<Self>, CliError> {
-        if options.resume && tree {
-            return Err(CliError::usage(
-                "export tree resume execution is not supported by this recording adapter",
-            ));
-        }
         let Some(path) = &options.manifest else {
             return Ok(None);
         };
@@ -262,7 +293,7 @@ impl ExportLedger {
             fields.push(("manifest_torn_tail".into(), Json::from(self.read.torn_tail)));
         }
     }
-    /// With `--resume`, the evidence that lets a single-file export skip its copy.
+    /// With `--resume`, the evidence that lets a file export skip its copy.
     /// The caller holds the image lock. Fresh identities of the opened endpoints
     /// and a complete source digest must match the latest record, and both
     /// endpoints must be unchanged after the digest. Anything else returns
@@ -273,21 +304,46 @@ impl ExportLedger {
         path: &Path,
         dest: &Path,
     ) -> Result<Option<&ManifestEntry>, CliError> {
+        self.resume_source(ResumeSource::File(source), path, dest, None)
+    }
+    pub fn resume_tree(
+        &self,
+        source: &mut dyn transfer::TreeSource,
+        path: &Path,
+        size: u64,
+        dest: &Path,
+        cancellation: &transfer::Cancellation,
+    ) -> Result<Option<&ManifestEntry>, CliError> {
+        let result = self.resume_source(
+            ResumeSource::Tree(source, path, size),
+            path,
+            dest,
+            Some(cancellation),
+        );
+        // Preserve signal exit codes even if a digest read noticed the signal.
+        cancellation.check(0, size)?;
+        result
+    }
+    fn resume_source(
+        &self,
+        mut source: ResumeSource<'_>,
+        path: &Path,
+        dest: &Path,
+        cancellation: Option<&transfer::Cancellation>,
+    ) -> Result<Option<&ManifestEntry>, CliError> {
         if !self.resume {
             return Ok(None);
         }
-        let capture = |source: &dyn transfer::FileSource| {
-            export_identity(source.manifest_identity()?, path, source.image_path())
-        };
-        let source_before = capture(source)?;
+        let source_before = source.capture(path)?;
         let Some(dest_before) = destination_identity(dest)? else {
             return Ok(None);
         };
         let size = source.size();
         let mut reader = SourceReader {
-            source: &mut *source,
+            source,
             offset: 0,
             size,
+            cancellation,
         };
         let decision = self
             .read
@@ -296,7 +352,7 @@ impl ExportLedger {
             return Ok(None);
         }
         // Revalidate both snapshots: a change during the digest restarts the copy.
-        let source_after = capture(source)?;
+        let source_after = reader.source.capture(path)?;
         let unchanged = destination_identity(dest)?
             .is_some_and(|dest_after| same_identity(&dest_before, &dest_after));
         if !unchanged || !same_identity(&source_before, &source_after) {
@@ -366,6 +422,8 @@ pub fn export_with_manifest(
 /// Export a tree with immediate durable evidence for each verified publication.
 /// Unverified copies record nothing; item failures retain earlier records.
 /// Manifest capture or append errors stop traversal immediately.
+/// Resume revalidates each regular file under the image and manifest locks;
+/// successful skips retain their earlier completion time and append nothing.
 pub fn export_tree_with_manifest(
     request: &ExportRequest,
     source: &mut dyn transfer::TreeSource,
