@@ -34,7 +34,8 @@ pub trait FileSink {
     }
     /// Free space beside the staged file, and the space a staged file of `len`
     /// data bytes needs there: data plus the driver's metadata estimate. Called
-    /// after `stage` and before any write when the input size is known. A
+    /// after `stage` and before any write when the input size is known, and
+    /// before each written chunk, at the staged copy's new length, when not. A
     /// replaced name stays allocated until publication, so `free` must not
     /// count it. `None` skips the check; writes still fail on ENOSPC.
     fn space(&mut self, _len: u64) -> Result<Option<Space>, CliError> {
@@ -71,7 +72,8 @@ pub struct Space {
     pub needed: u64,
 }
 
-// Refuse before the first write when the staged copy cannot fit; a replacement
+// Refuse before the first write when the staged copy cannot fit, or before the
+// chunk that would outgrow the space when the size is unknown; a replacement
 // must fit beside the old file, which is kept until publication.
 fn check_space(sink: &mut dyn FileSink, len: u64, replace: bool) -> Result<(), CliError> {
     match sink.space(len)? {
@@ -429,6 +431,9 @@ fn import_stream<S: Read + ?Sized>(
                 return Err(CliError::failed("source changed during copy"));
             }
             if !sparse.preserve_sparse || buffer[..n].iter().any(|b| *b != 0) {
+                if size.is_none() {
+                    check_space(sink, next, replace)?;
+                }
                 sink.write_at(bytes, &buffer[..n])?;
             }
             digest.update(&buffer[..n]);
