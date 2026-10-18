@@ -646,6 +646,44 @@ fn per_target_floors_catch_a_suite_that_emptied_inside_a_healthy_total() {
     );
 }
 
+/// A Windows runner checks text files out with CRLF endings, so the floors
+/// file there reads `7\r` where Linux reads `7`. A floor that is numeric on
+/// one platform has to be numeric on all of them. Cargo also prints Windows
+/// test paths with backslashes (run 39089329423), even under Git Bash.
+#[test]
+fn per_target_floors_read_a_crlf_checkout_of_the_floors_file() {
+    let caller = Caller::new("targets-crlf");
+    fs::create_dir_all(caller.root.join(".github")).unwrap();
+    fs::write(
+        caller.root.join(".github/test-floors.txt"),
+        "# target floor\r\n\r\nlib 2\r\nreads 3\r\n",
+    )
+    .unwrap();
+    let unix_log = "\u{1b}[1m\u{1b}[92m     Running\u{1b}[0m unittests src/lib.rs (x)\ntest result: ok. 2 passed\n\
+         \u{1b}[1m\u{1b}[92m     Running\u{1b}[0m tests/reads.rs (target/debug/deps/reads.exe)\ntest result: ok. 9 passed\n";
+    for log in [
+        unix_log.to_string(),
+        unix_log.replace('/', "\\").replace('\n', "\r\n"),
+    ] {
+        caller.log("suite", &log);
+        let out = caller.core(
+            &[
+                "test-floor",
+                "--targets",
+                ".github/test-floors.txt",
+                "suite",
+            ],
+            &[],
+        );
+        assert!(out.status.success(), "{log}\n{}", printed(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("2 target(s) met their floors"),
+            "{}",
+            printed(&out)
+        );
+    }
+}
+
 /// The agent-core check reads the AGENTS.md of the repository it is run
 /// from. Run in place, a check that read this crate's own AGENTS.md would
 /// pass every caller, whatever its guide said.
