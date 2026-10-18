@@ -28,7 +28,7 @@ pub(in crate::cli::transfer) struct ImportLedger {
     /// Set while a capture or append is in flight; a tree stops on it.
     pub failed: bool,
     read: ManifestRead,
-    /// With `--resume`, revalidated evidence may skip a single-file copy.
+    /// With `--resume`, revalidated evidence may skip a file's copy.
     pub resume: bool,
 }
 
@@ -200,7 +200,9 @@ pub fn import_with_manifest(
 /// driver-supplied destination identity and the verified SHA-256, synced
 /// before traversal continues. Unverified copies record nothing; item failures
 /// retain earlier records. Manifest capture or append errors stop traversal.
-/// Resume is not applied yet: every file is copied.
+/// With resume, each file takes the single-file decision under the one image
+/// lock: unchanged verified files are skipped with their earlier completion
+/// time and every other file is staged and copied from byte zero.
 pub fn import_tree_with_manifest(
     request: &ImportRequest,
     sink: Option<&mut dyn TreeSink>,
