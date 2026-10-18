@@ -435,7 +435,7 @@ fn local_tasks_and_automation_use_budgeted_tiers_and_keep_the_logs() {
     for expected in [
         "scripts/tier.sh \"test (debug)\" debug 1000 60000 -- cargo test --locked --all-targets",
         "scripts/tier.sh \"test (release)\" release 1000 60000 -- cargo test --locked --release --all-targets",
-        "scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov",
+        "scripts/tier.sh coverage coverage 1200 70000 -- cargo llvm-cov",
     ] {
         assert!(
             chores.contains(expected) || ci.contains(expected) || release.contains(expected),

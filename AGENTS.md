@@ -445,7 +445,7 @@ or bump it and every consumer's `core.sh` in the same pass.
 |---|---|---|---|
 | debug | 557 lines / 31,250 bytes | 750 / 50,000 | 348 |
 | release | 557 lines / 31,295 bytes | 750 / 50,000 | 348 |
-| coverage | 575 lines / 32,607 bytes | 800 / 60,000 | 348 |
+| coverage | 575 lines / 32,607 bytes | 1200 / 70,000 | 348 |
 
 Exit **65** is a passing run that printed more than its budget.
 `AM_FS_CORE_VERBOSE=1`, or `chore test -- --verbose`, streams a run as well as

@@ -45,20 +45,29 @@ chore_min_version: 0.6.0
 # #252 adds nine alias/edge cases on every OS (fourteen on Linux), raising
 # the floor to 357; .github/transfer-test-floors.txt also guards each target.
 # #275 adds seven advisory-lock cases on every OS, raising the floor to 364.
+# #254 adds five portable tree cases, raising the floor to 369 (six on Unix).
 # Release uses the same selection and measured the same 557 lines / 31,295
 # bytes after its cold LTO build. Coverage measured 575 lines / 32,607 bytes
 # and executed the same 374 tests as the post-change debug run:
 #
 #   tier       measured locally       budget           floor
-#   debug      557 / 31,250 bytes     1000 / 60,000     364
-#   release    751 lines (CI, cold)   1000 / 60,000     364
-#   coverage   575 / 32,607 bytes      800 / 60,000     364
+#   debug      557 / 31,250 bytes     1000 / 60,000     369
+#   release    751 lines (CI, cold)   1000 / 60,000     369
+#   coverage   575 / 32,607 bytes     1200 / 70,000     369
 #   semver     (see below)              40 / 4,000       -
 #
 # THE DEBUG AND RELEASE ROWS MOVED ON 2026-10-06, from 750 / 50,000: the v0.3.5
 # release's test (release) tier printed 751 lines on CI (run 37490111355), the
 # suite having grown with the family scripts' tests since the measurement
 # above. That plus about a third; debug runs the same selection.
+#
+# THE COVERAGE ROW MOVED ON 2026-10-18, from 800 / 60,000: #254's coverage
+# tier printed 801 lines on CI (run 39079117997). Measured at the top of the
+# open chain (#307, 34cd41e, run 39079102448), coverage stopped at its first
+# failing target after 872 lines / 50,274 bytes; adding the 89 tests and seven
+# test targets the chain adds above #254 to its passing 801 lines puts a
+# passing run there near 930 lines / 54,000 bytes. 1,200 / 70,000 is that plus
+# about 30%.
 #
 # The semver row is rust-fs-ext4's measurement of the same script: 11 lines /
 # 489 bytes passing with the baseline's rustdoc cached, one line more when it
@@ -185,14 +194,14 @@ tasks:
     desc: Debug-profile suite, including every target
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 1000 60000 -- cargo test --locked --all-targets --features cli'
-      - 'bash scripts/core.sh test-floor debug 364'
+      - 'bash scripts/core.sh test-floor debug 369'
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug'
 
   test:release:
     desc: Release-profile suite, including every target
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli'
-      - 'bash scripts/core.sh test-floor release 364'
+      - 'bash scripts/core.sh test-floor release 369'
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt release'
 
   test:
@@ -204,8 +213,8 @@ tasks:
   coverage:
     desc: Instrumented suite with the same 90% line-coverage gate as CI
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh coverage coverage 800 60000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90'
-      - 'bash scripts/core.sh test-floor coverage 364'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh coverage coverage 1200 70000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90'
+      - 'bash scripts/core.sh test-floor coverage 369'
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt coverage'
 
   clean:
