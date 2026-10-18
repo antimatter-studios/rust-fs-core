@@ -182,7 +182,15 @@ pub fn import_local_file(
     path: &Path,
     replace: bool,
 ) -> Result<Copied, CliError> {
-    import_checked_local_file(source, sink, path, replace, ImportOptions::default(), None)
+    import_checked_local_file(
+        source,
+        sink,
+        path,
+        replace,
+        ImportOptions::default(),
+        None,
+        None,
+    )
 }
 
 fn import_checked_local_file(
@@ -192,6 +200,7 @@ fn import_checked_local_file(
     replace: bool,
     options: ImportOptions,
     ledger: Option<&mut manifest::ImportLedger>,
+    cancellation: Option<&Cancellation>,
 ) -> Result<Copied, CliError> {
     let sink = capable(sink, replace)?;
     let identity = SourceIdentity::capture(source.file())
@@ -215,6 +224,7 @@ fn import_checked_local_file(
         replace,
         ImportContext {
             size: Some(identity.metadata.len()),
+            cancellation,
             verify: options.verify,
             record,
             ..ImportContext::default()
@@ -617,6 +627,18 @@ pub(super) fn import_recorded(
             }
             let file = File::open(local)
                 .map_err(|e| CliError::failed(format!("open {}: {e}", local.display())))?;
+            // A resume decision holds the image lock that its copy then keeps.
+            let resume = ledger.as_ref().is_some_and(|ledger| ledger.resume);
+            let _lock = match sink.image_path().filter(|_| resume) {
+                Some(image) => Some(ImageLock::for_import(image)?),
+                None => None,
+            };
+            let cancellation = resume.then(Cancellation::install).transpose()?;
+            if let Some(ledger) = ledger.as_deref() {
+                if let Some(entry) = ledger.resume(&file, local, &mut *sink, &request.path)? {
+                    return Ok(manifest::import_skipped(request, entry));
+                }
+            }
             let mut source = NamedSource { file, path: local };
             import_checked_local_file(
                 &mut source,
@@ -625,6 +647,7 @@ pub(super) fn import_recorded(
                 request.replace,
                 options,
                 ledger,
+                cancellation.as_ref(),
             )?
         }
     };
