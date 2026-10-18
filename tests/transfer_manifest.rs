@@ -2372,10 +2372,10 @@ impl fs_core::cli::transfer::FileSink for TreeImportSink {
         &mut self,
         path: &std::path::Path,
     ) -> Result<Identity, fs_core::cli::CliError> {
-        assert!(
-            self.published.contains_key(path),
-            "identity follows publication"
-        );
+        // Identity follows publication; an unpublished name has none.
+        if !self.published.contains_key(path) {
+            return Err(fs_core::cli::CliError::failed("no such destination"));
+        }
         self.file.manifest_identity(path)
     }
     fn stage(
@@ -2525,4 +2525,161 @@ fn unverified_tree_imports_publish_without_recording() {
     assert_eq!(sink.published.len(), 2);
     let (_, read) = Manifest::open(&ledger).unwrap();
     assert!(read.entries.is_empty());
+}
+
+// A resumed tree import over a fresh sink that already holds `published`.
+fn import_tree_resume(
+    ledger: &std::path::Path,
+    image: &std::path::Path,
+    source: &std::path::Path,
+    published: std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    tweak: fn(&mut Identity),
+) -> (
+    TreeImportSink,
+    Result<fs_core::cli::Outcome, fs_core::cli::CliError>,
+) {
+    use fs_core::cli::transfer::{
+        self, ImportManifestOptions, ImportOptions, ImportRequest, ImportTreeOptions, Input,
+    };
+    let mut sink = TreeImportSink {
+        file: ImportSink {
+            image: image.into(),
+            staged: b"partial".to_vec(),
+            stages: 0,
+            verified: true,
+            tweak,
+            writes: Vec::new(),
+        },
+        current: PathBuf::new(),
+        published,
+    };
+    let request = ImportRequest {
+        input: Input::File(source.into()),
+        path: "/image/tree".into(),
+        replace: false,
+    };
+    let manifest = ImportManifestOptions {
+        manifest: Some(ledger.into()),
+        resume: true,
+    };
+    let options = ImportTreeOptions {
+        recursive: true,
+        ..ImportTreeOptions::default()
+    };
+    let outcome = transfer::import_tree_with_manifest(
+        &request,
+        Some(&mut sink),
+        options,
+        ImportOptions { verify: true },
+        &manifest,
+    );
+    (sink, outcome)
+}
+
+#[test]
+fn tree_import_resume_skips_only_unchanged_verified_files() {
+    use fs_core::cli::Json;
+    let (ledger, image, source) = import_paths("import-tree-resume", true);
+    fs::write(source.join("changed"), b"destination identity moves").unwrap();
+    let (first, outcome) = import_tree_run(&ledger, &image, &source, true);
+    assert_eq!(outcome.unwrap().code, 0);
+    assert_eq!(records(&ledger), 3);
+    // A same-size rewrite that restores the modification time.
+    let other = source.join("sub").join("other");
+    let modified = fs::metadata(&other).unwrap().modified().unwrap();
+    fs::write(&other, b"A SECOND published file").unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&other)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    // A file the manifest has never seen.
+    fs::write(source.join("sub").join("new"), b"never recorded").unwrap();
+    let (sink, outcome) = import_tree_resume(&ledger, &image, &source, first.published, |id| {
+        if let Identity::Image { path, inode, .. } = id {
+            if path.ends_with("changed") {
+                *inode += 1;
+            }
+        }
+    });
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.code, 0, "a verified skip is a success");
+    let report = outcome.report.as_ref().unwrap();
+    assert_eq!(report.get("skipped"), Some(&Json::UInt(1)));
+    assert_eq!(report.get("completed"), Some(&Json::UInt(5)));
+    assert_eq!(report.get("failed"), Some(&Json::UInt(0)));
+    assert_eq!(sink.file.stages, 3, "only the skipped file is not staged");
+    let Some(Json::Arr(items)) = report.get("items") else {
+        panic!("items")
+    };
+    let status = |name: &str| {
+        let item = items
+            .iter()
+            .find(|item| item.get("destination") == Some(&Json::from(name)))
+            .unwrap_or_else(|| panic!("{name}"));
+        item.get("status").cloned().unwrap()
+    };
+    assert_eq!(status("/image/tree/file"), Json::from("skipped"));
+    for name in [
+        "/image/tree/changed",
+        "/image/tree/sub/other",
+        "/image/tree/sub/new",
+    ] {
+        assert_eq!(status(name), Json::from("completed"), "{name}");
+    }
+    let skipped = items
+        .iter()
+        .find(|item| item.get("destination") == Some(&Json::from("/image/tree/file")))
+        .unwrap();
+    let (_, read) = Manifest::open(&ledger).unwrap();
+    let earlier = read
+        .entries
+        .iter()
+        .find(|entry| {
+            matches!(&entry.destination, Identity::Image { path, .. } if path.ends_with("file"))
+        })
+        .unwrap()
+        .completed_at;
+    let Some(Json::Str(reason)) = skipped.get("reason") else {
+        panic!("reason")
+    };
+    assert!(
+        reason.contains(&format!(
+            "skipped: verified earlier at {}.{:09}",
+            earlier.seconds, earlier.nanoseconds
+        )),
+        "{reason}"
+    );
+    let copy = skipped.get("copy").unwrap();
+    assert_eq!(copy.get("skipped"), Some(&Json::from("verified earlier")));
+    assert_eq!(copy.get("verified"), Some(&Json::Bool(false)));
+    // Every copied file was staged from byte zero and now holds the source bytes.
+    for (name, local) in [
+        ("/image/tree/changed", source.join("changed")),
+        ("/image/tree/sub/other", other.clone()),
+        ("/image/tree/sub/new", source.join("sub").join("new")),
+    ] {
+        assert_eq!(
+            sink.published[&PathBuf::from(name)],
+            fs::read(&local).unwrap()
+        );
+    }
+    assert_eq!(
+        sink.file
+            .writes
+            .iter()
+            .filter(|offset| **offset == 0)
+            .count(),
+        3,
+        "each restart begins at byte zero"
+    );
+    assert_eq!(read.entries.len(), 6, "a skip appends nothing");
+    for (entry, local) in read.entries[3..].iter().zip([
+        source.join("changed"),
+        source.join("sub").join("new"),
+        other.clone(),
+    ]) {
+        assert_eq!(entry.sha256, host_sha256(&local));
+    }
 }

@@ -148,6 +148,7 @@ pub(super) fn import_tree_recorded(
     let mut pending = vec![(root.clone(), request.path.clone(), 0usize, Ok(()))];
     let mut items = Vec::new();
     let mut counts = [0u64; 5];
+    let mut verified_skips = 0u64;
     let mut merged = 0u64;
     let mut cancel_code = 0;
     let mut in_flight = Json::Null;
@@ -155,6 +156,7 @@ pub(super) fn import_tree_recorded(
     let mut directory_times = Vec::new();
     while let Some((local, dest, depth, checked)) = pending.pop() {
         let mut copy = Json::Null;
+        let mut skipped = None;
         let result = (|| -> Result<(), CliError> {
             cancellation.check(0, 0)?;
             checked?;
@@ -183,6 +185,28 @@ pub(super) fn import_tree_recorded(
                 return sink.create_hard_link(&dest, existing);
             }
             if m.is_file() {
+                // Revalidated evidence of an earlier verified copy skips this file.
+                if let Some(ledger) = ledger.as_deref() {
+                    let file =
+                        fs::File::open(&local).map_err(|e| CliError::failed(e.to_string()))?;
+                    if let Some(entry) = ledger.resume(&file, &local, sink, &dest)? {
+                        let outcome = manifest::import_skipped(
+                            &ImportRequest {
+                                input: Input::File(local.clone()),
+                                path: dest.clone(),
+                                replace: request.replace,
+                            },
+                            entry,
+                        );
+                        copy = outcome.report.expect("earlier verification has evidence");
+                        skipped = outcome.text;
+                        verified_skips += 1;
+                        if let Some(id) = inode {
+                            linked.insert(id, dest.clone());
+                        }
+                        return Ok(());
+                    }
+                }
                 let copied = import::import_tree_file(
                     &local,
                     sink,
@@ -247,7 +271,10 @@ pub(super) fn import_tree_recorded(
             return Err(result.expect_err("a failed capture or append stops the transfer"));
         }
         let (status, reason) = match result {
-            Ok(()) => (0, String::new()),
+            Ok(()) => match skipped {
+                Some(text) => (1, text),
+                None => (0, String::new()),
+            },
             Err(e) => {
                 let status = if cancel::is_cancelled(&e) {
                     cancel_code = e.code;
@@ -348,7 +375,7 @@ pub(super) fn import_tree_recorded(
     .with_code(if cancel_code != 0 {
         cancel_code
     } else {
-        u8::from(counts[1..].iter().any(|n| *n != 0))
+        u8::from(counts[1] > verified_skips || counts[2..].iter().any(|n| *n != 0))
     }))
 }
 
