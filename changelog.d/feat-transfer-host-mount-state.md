@@ -1,0 +1,2 @@
+### Added
+- Linux transfers inspect host mount state for image files and block devices, including mounted partitions and device-mapper holders. Imports refuse mounted targets before consuming input; exports warn on read-write mounts. Unreadable mount or loop backing state fails closed. Block targets and associated images also fail closed when Btrfs or ZFS multi-device mounts prevent reliable membership resolution.
