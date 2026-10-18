@@ -87,21 +87,23 @@ use cancel::Cancellation;
 mod import;
 pub use import::{
     import, import_args, import_args_with_verify, import_file, import_file_with_sparse,
-    import_local_file, import_with_options, FileSink, ImportOptions, ImportRequest, Input,
-    LocalSource,
+    import_local_file, import_with_options, import_with_sparse, FileSink, ImportOptions,
+    ImportRequest, Input, LocalSource,
 };
 
 #[path = "transfer_import_tree.rs"]
 mod import_tree;
-pub use import_tree::{import_args_with_tree, import_tree, ImportTreeOptions, TreeSink};
+pub use import_tree::{
+    import_args_with_tree, import_tree, import_tree_with_sparse, ImportTreeOptions, TreeSink,
+};
 
 #[path = "transfer_tree.rs"]
 mod tree;
 pub use tree::{
     export_args_with_links, export_args_with_times, export_args_with_tree, export_tree,
-    export_tree_with_links, export_tree_with_progress, export_tree_with_times,
-    export_tree_with_xattrs_and_progress, LinkOptions, SymbolicLink, TimeOptions, TreeEntry,
-    TreeKind, TreeMetadata, TreeOptions, TreeSource,
+    export_tree_with_links, export_tree_with_progress, export_tree_with_sparse,
+    export_tree_with_times, export_tree_with_xattrs_and_progress, LinkOptions, SymbolicLink,
+    TimeOptions, TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource,
 };
 
 #[cfg(test)]
@@ -751,10 +753,30 @@ pub fn export_with_options(
     source: &mut dyn FileSource,
     options: ExportOptions,
 ) -> Result<Outcome, CliError> {
+    export_with_sparse(request, source, options, SparseOptions::default())
+}
+
+/// Export a command with sparse local staging and optional verification.
+/// Parse the sparse policy with [`SparseOptions::from_matches`]. Stdout stays dense.
+pub fn export_with_sparse(
+    request: &ExportRequest,
+    source: &mut dyn FileSource,
+    options: ExportOptions,
+    sparse: SparseOptions,
+) -> Result<Outcome, CliError> {
     let mut stderr = io::stderr();
     let terminal = stderr.is_terminal();
     let mut progress = Progress::new(&mut stderr, terminal, ProgressOptions::default());
-    export_with_progress(request, source, options, &mut progress)
+    export_recorded(
+        request,
+        source,
+        CopyOptions {
+            verify: options.verify,
+            sparse,
+        },
+        &mut progress,
+        None,
+    )
 }
 
 /// Export content and its final report with progress confined to the reporter.
@@ -765,13 +787,13 @@ pub fn export_with_progress(
     options: ExportOptions,
     progress: &mut Progress<'_>,
 ) -> Result<Outcome, CliError> {
-    export_recorded(request, source, options, progress, None)
+    export_recorded(request, source, options.into(), progress, None)
 }
 
 fn export_recorded(
     request: &ExportRequest,
     source: &mut dyn FileSource,
-    options: ExportOptions,
+    options: CopyOptions,
     progress: &mut Progress<'_>,
     mut ledger: Option<&mut manifest::ExportLedger>,
 ) -> Result<Outcome, CliError> {
@@ -789,7 +811,6 @@ fn export_recorded(
             return Ok(manifest::skipped(request, dest, entry));
         }
     }
-    let options = CopyOptions::from(options);
     let cancellation = Cancellation::install()?;
     progress.set_totals(Some(source.size()), Some(1));
     let dest = match &request.output {

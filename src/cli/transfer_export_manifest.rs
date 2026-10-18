@@ -411,8 +411,13 @@ pub fn export_with_manifest(
     let terminal = std::io::IsTerminal::is_terminal(&stderr);
     let mut progress =
         transfer::Progress::new(&mut stderr, terminal, transfer::ProgressOptions::default());
-    let mut outcome =
-        transfer::export_recorded(request, source, options, &mut progress, ledger.as_mut())?;
+    let mut outcome = transfer::export_recorded(
+        request,
+        source,
+        options.into(),
+        &mut progress,
+        ledger.as_mut(),
+    )?;
     if let Some(ledger) = ledger {
         ledger.report(&mut outcome);
     }

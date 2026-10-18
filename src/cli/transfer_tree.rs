@@ -547,7 +547,29 @@ pub fn export_tree_with_xattrs_and_progress(
         request,
         source,
         options,
-        (links, times, xattrs),
+        (links, times, xattrs, SparseOptions::default()),
+        progress,
+        None,
+    )
+}
+
+/// Export a tree with sparse staging, link/time policies and logical progress.
+/// Existing tree entry points retain dense copies. Parse the sparse policy
+/// separately from the existing option structs with [`SparseOptions::from_matches`].
+pub fn export_tree_with_sparse(
+    request: &ExportRequest,
+    source: &mut dyn TreeSource,
+    options: TreeOptions,
+    links: LinkOptions,
+    times: TimeOptions,
+    sparse: SparseOptions,
+    progress: &mut Progress<'_>,
+) -> Result<Outcome, CliError> {
+    export_tree_recorded(
+        request,
+        source,
+        options,
+        (links, times, XattrOptions::default(), sparse),
         progress,
         None,
     )
@@ -557,11 +579,11 @@ pub(super) fn export_tree_recorded(
     request: &ExportRequest,
     source: &mut dyn TreeSource,
     options: TreeOptions,
-    policies: (LinkOptions, TimeOptions, XattrOptions),
+    policies: (LinkOptions, TimeOptions, XattrOptions, SparseOptions),
     progress: &mut Progress<'_>,
     mut ledger: Option<&mut manifest::ExportLedger>,
 ) -> Result<Outcome, CliError> {
-    let (links, times, xattrs) = policies;
+    let (links, times, xattrs, sparse) = policies;
     let cancellation = Cancellation::install()?;
     let Output::File(dest) = &request.output else {
         return Err(CliError::usage("tree export needs a local DEST"));
@@ -727,10 +749,10 @@ pub(super) fn export_tree_recorded(
                             path: &local,
                             replace: request.replace,
                         },
-                        ExportOptions {
+                        CopyOptions {
                             verify: options.verify,
-                        }
-                        .into(),
+                            sparse,
+                        },
                         progress,
                         &cancellation,
                     )?;

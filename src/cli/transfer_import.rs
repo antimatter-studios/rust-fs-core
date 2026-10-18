@@ -187,7 +187,7 @@ pub fn import_local_file(
         sink,
         path,
         replace,
-        ImportOptions::default(),
+        ImportOptions::default().into(),
         None,
         None,
     )
@@ -198,7 +198,7 @@ fn import_checked_local_file(
     sink: Option<&mut dyn FileSink>,
     path: &Path,
     replace: bool,
-    options: ImportOptions,
+    options: CopyOptions,
     ledger: Option<&mut manifest::ImportLedger>,
     cancellation: Option<&Cancellation>,
 ) -> Result<Copied, CliError> {
@@ -226,8 +226,8 @@ fn import_checked_local_file(
             size: Some(identity.metadata.len()),
             cancellation,
             verify: options.verify,
+            sparse: options.sparse,
             record,
-            ..ImportContext::default()
         },
         |source, bytes| identity.check(source, bytes),
     )
@@ -278,14 +278,14 @@ pub(super) fn import_tree_file(
     path: &Path,
     replace: bool,
     cancellation: &Cancellation,
-    verify: bool,
+    options: CopyOptions,
     ledger: Option<&mut manifest::ImportLedger>,
 ) -> Result<Copied, CliError> {
     let file = File::open(local).map_err(|e| CliError::failed(e.to_string()))?;
     let mut source = NamedSource { file, path: local };
     let identity =
         SourceIdentity::capture(&source.file).map_err(|e| CliError::failed(e.to_string()))?;
-    let record = match ledger.filter(|_| verify) {
+    let record = match ledger.filter(|_| options.verify) {
         Some(ledger) => {
             ledger.failed = true;
             let captured = manifest::LocalIdentity::capture(local, &source.file)?;
@@ -315,9 +315,9 @@ pub(super) fn import_tree_file(
         ImportContext {
             size: Some(identity.metadata.len()),
             cancellation: Some(cancellation),
-            verify,
+            verify: options.verify,
+            sparse: options.sparse,
             record,
-            ..ImportContext::default()
         },
         validate,
     )
@@ -599,12 +599,31 @@ pub fn import_with_options(
     options: ImportOptions,
     sink: Option<&mut dyn FileSink>,
 ) -> Result<Outcome, CliError> {
-    import_recorded(request, options, sink, None)
+    import_recorded(request, options.into(), sink, None)
+}
+
+/// Import a command with sparse staging, source-identity checks and optional
+/// read-back verification. Unsupported sinks refuse before consuming input.
+pub fn import_with_sparse(
+    request: &ImportRequest,
+    options: ImportOptions,
+    sparse: SparseOptions,
+    sink: Option<&mut dyn FileSink>,
+) -> Result<Outcome, CliError> {
+    import_recorded(
+        request,
+        CopyOptions {
+            verify: options.verify,
+            sparse,
+        },
+        sink,
+        None,
+    )
 }
 
 pub(super) fn import_recorded(
     request: &ImportRequest,
-    options: ImportOptions,
+    options: CopyOptions,
     sink: Option<&mut dyn FileSink>,
     ledger: Option<&mut manifest::ImportLedger>,
 ) -> Result<Outcome, CliError> {
@@ -617,6 +636,7 @@ pub(super) fn import_recorded(
             request.replace,
             ImportContext {
                 verify: options.verify,
+                sparse: options.sparse,
                 ..ImportContext::default()
             },
             |_, _| Ok(()),

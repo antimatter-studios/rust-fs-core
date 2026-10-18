@@ -187,7 +187,8 @@ pub fn import_with_manifest(
         .and_then(|sink| sink.image_path())
         .map(Path::to_path_buf);
     let mut ledger = ImportLedger::open(request, image.as_deref(), manifest, false)?;
-    let mut outcome = transfer::import::import_recorded(request, options, sink, ledger.as_mut())?;
+    let mut outcome =
+        transfer::import::import_recorded(request, options.into(), sink, ledger.as_mut())?;
     if let Some(ledger) = ledger {
         ledger.report(&mut outcome);
     }
@@ -219,7 +220,7 @@ pub fn import_tree_with_manifest(
         request,
         sink,
         options,
-        verify,
+        verify.into(),
         ledger.as_mut(),
     )?;
     if let Some(ledger) = ledger {
