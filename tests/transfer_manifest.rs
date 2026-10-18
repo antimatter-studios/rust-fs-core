@@ -32,6 +32,158 @@ fn scratch(tag: &str) -> PathBuf {
     fs::create_dir_all(&root).unwrap();
     root.join("manifest.jsonl")
 }
+
+fn export_paths(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let manifest = scratch(tag);
+    let root = manifest.parent().unwrap().to_path_buf();
+    let image = root.join("image");
+    fs::write(&image, b"image must remain intact").unwrap();
+    (manifest, image, root.join("destination"))
+}
+
+#[test]
+fn export_manifest_opens_outside_existing_and_missing_destination_trees() {
+    for existing in [false, true] {
+        let (manifest, image, dest) = export_paths(if existing {
+            "safe-existing"
+        } else {
+            "safe-new"
+        });
+        if existing {
+            fs::create_dir(&dest).unwrap();
+            fs::write(dest.join("unrelated"), b"keep").unwrap();
+        }
+        let (ledger, read) = Manifest::open_for_export(&manifest, &image, &dest, true).unwrap();
+        assert!(read.entries.is_empty());
+        assert!(!read.torn_tail);
+        drop(ledger);
+        assert_eq!(dest.exists(), existing);
+        assert!(fs::read(&manifest).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn export_manifest_refuses_image_names_and_hard_links_without_recovery() {
+    let (manifest, image, dest) = export_paths("image-alias");
+    fs::hard_link(&image, &manifest).unwrap();
+    for alias in [&image, &manifest] {
+        assert!(Manifest::open_for_export(alias, &image, &dest, true).is_err());
+        assert_eq!(fs::read(alias).unwrap(), b"image must remain intact");
+    }
+    assert!(!dest.exists());
+}
+
+#[test]
+fn export_manifest_refuses_single_destination_names_and_hard_links() {
+    let (manifest, image, dest) = export_paths("single-alias");
+    assert!(Manifest::open_for_export(&dest, &image, &dest, false).is_err());
+    assert!(!dest.exists());
+    fs::write(&dest, b"published contents").unwrap();
+    fs::hard_link(&dest, &manifest).unwrap();
+    assert!(Manifest::open_for_export(&manifest, &image, &dest, false).is_err());
+    assert_eq!(fs::read(&dest).unwrap(), b"published contents");
+}
+
+#[test]
+fn export_manifest_refuses_containment_even_before_destination_creation() {
+    let (_, image, dest) = export_paths("containment");
+    for manifest in [
+        dest.clone(),
+        dest.join("ledger"),
+        dest.join("new/../ledger"),
+    ] {
+        assert!(Manifest::open_for_export(&manifest, &image, &dest, true).is_err());
+        assert!(!dest.exists());
+    }
+    fs::create_dir(&dest).unwrap();
+    assert!(Manifest::open_for_export(&dest.join("ledger"), &image, &dest, true).is_err());
+    assert!(!dest.join("ledger").exists());
+}
+
+#[test]
+fn export_manifest_refuses_hard_links_to_nested_destination_files() {
+    let (manifest, image, dest) = export_paths("tree-hard-link");
+    fs::create_dir_all(dest.join("nested")).unwrap();
+    let published = dest.join("nested/file");
+    fs::write(&published, b"earlier export").unwrap();
+    fs::hard_link(&published, &manifest).unwrap();
+    assert!(Manifest::open_for_export(&manifest, &image, &dest, true).is_err());
+    assert_eq!(fs::read(&published).unwrap(), b"earlier export");
+}
+
+#[test]
+fn export_manifest_identity_errors_and_nonregular_paths_fail_before_creation() {
+    let (manifest, image, dest) = export_paths("identity-error");
+    assert!(
+        Manifest::open_for_export(&manifest, &image.with_extension("missing"), &dest, true)
+            .is_err()
+    );
+    assert!(!manifest.exists());
+    fs::create_dir(&manifest).unwrap();
+    assert!(Manifest::open_for_export(&manifest, &image, &dest, true).is_err());
+    assert!(!dest.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn export_manifest_refuses_symlink_image_and_tree_file_aliases() {
+    use std::os::unix::fs::symlink;
+    for tree in [false, true] {
+        let (manifest, image, dest) = export_paths(if tree {
+            "tree-symlink"
+        } else {
+            "image-symlink"
+        });
+        let target = if tree {
+            fs::create_dir(&dest).unwrap();
+            let target = dest.join("file");
+            fs::write(&target, b"earlier export").unwrap();
+            target
+        } else {
+            image.clone()
+        };
+        symlink(&target, &manifest).unwrap();
+        let before = fs::read(&target).unwrap();
+        assert!(Manifest::open_for_export(&manifest, &image, &dest, true).is_err());
+        assert_eq!(fs::read(&target).unwrap(), before);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn export_manifest_resolves_symlinked_parents_before_containment_checks() {
+    use std::os::unix::fs::symlink;
+    let (manifest, image, dest) = export_paths("parent-symlink");
+    let root = manifest.parent().unwrap();
+    fs::create_dir(&dest).unwrap();
+    let alias = root.join("alias");
+    symlink(&dest, &alias).unwrap();
+    assert!(Manifest::open_for_export(&alias.join("ledger"), &image, &dest, true).is_err());
+    assert!(Manifest::open_for_export(&dest.join("ledger"), &image, &alias, true).is_err());
+    assert!(!dest.join("ledger").exists());
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    let dangling_dest = alias.join("new-tree");
+    assert!(
+        Manifest::open_for_export(&dest.join("new-tree/ledger"), &image, &dangling_dest, true)
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn export_manifest_refuses_destination_symlinks_to_an_external_ledger() {
+    use std::os::unix::fs::symlink;
+    let (manifest, image, dest) = export_paths("external-ledger");
+    fs::create_dir(&dest).unwrap();
+    fs::write(&manifest, b"not a record; must not recover").unwrap();
+    symlink(&manifest, dest.join("file")).unwrap();
+    assert!(Manifest::open_for_export(&manifest, &image, &dest, true).is_err());
+    assert_eq!(
+        fs::read(&manifest).unwrap(),
+        b"not a record; must not recover"
+    );
+}
 fn entry() -> ManifestEntry {
     let time = Timestamp {
         seconds: 123,

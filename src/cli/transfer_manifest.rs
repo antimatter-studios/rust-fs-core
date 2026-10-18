@@ -3,8 +3,8 @@
 //! This storage layer does not infer verification or capture identities. Callers
 //! must supply identities of the actual transferred objects, append only after
 //! read-back verification and publication, and report [`ManifestRead::torn_tail`].
-//! Command adapters must preflight the manifest against image/tree aliases before
-//! opening it. Each append syncs before returning; an error stops the transfer.
+//! Export adapters use [`Manifest::open_for_export`] before copying to reject
+//! image/tree aliases. Each append syncs before returning; an error stops the transfer.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -249,6 +249,52 @@ impl Drop for Manifest {
 }
 
 impl Manifest {
+    /// Preflight an export ledger before creating it or recovering any contents.
+    /// Reject image aliases, the destination itself, paths inside a destination
+    /// tree, and hard/symbolic links to existing destination files. Set
+    /// `destination_is_tree` for recursive exports, including a missing root.
+    /// Existing directory symlinks are not traversed, as tree exports refuse
+    /// them. Host identity and enumeration errors fail closed.
+    ///
+    /// Call before any transfer reads or destination writes, and keep the
+    /// returned ledger open throughout the export. Callers must exclude
+    /// concurrent path mutation; this preflight is not a filesystem snapshot.
+    /// The returned recovery information must be reported just as for [`Self::open`].
+    pub fn open_for_export(
+        path: &Path,
+        image: &Path,
+        destination: &Path,
+        destination_is_tree: bool,
+    ) -> Result<(Self, ManifestRead), CliError> {
+        super::refuse_image_alias(image, path)?;
+        let failed = |e| CliError::failed(format!("manifest preflight {}: {e}", path.display()));
+        let resolved = resolve_export_path(path).map_err(failed)?;
+        let dest = resolve_export_path(destination).map_err(failed)?;
+        if resolved == dest || (destination_is_tree && resolved.starts_with(&dest)) {
+            return Err(failed(io::Error::other(
+                "manifest aliases or is inside DEST",
+            )));
+        }
+        match std::fs::metadata(path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(failed(io::Error::other("not a regular manifest file")));
+            }
+            Ok(_) => {
+                // A missing manifest cannot already share an inode. For an
+                // existing one, compare host identities before recovery can
+                // truncate a torn tail in an aliased exported file.
+                if destination_is_tree {
+                    refuse_tree_alias(path, destination)?;
+                } else {
+                    super::refuse_image_alias(path, destination)?;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(failed(e)),
+        }
+        Self::open(path)
+    }
+
     /// Open or exclusively create a ledger without truncating completed records.
     /// Validate every completed line before repairing a torn final line; invalid
     /// completed JSON/schema/digests fail without modifying existing contents.
@@ -358,6 +404,59 @@ impl Manifest {
         self.healthy = true;
         Ok(true)
     }
+}
+
+// Resolve each existing component before processing `..`, so a symlink's
+// parent is its target's parent. Missing suffixes still participate in lexical
+// containment checks; dangling symlinks and other resolution errors fail closed.
+fn resolve_export_path(path: &Path) -> io::Result<PathBuf> {
+    use std::path::Component;
+    let absolute = std::path::absolute(path)?;
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(name) => {
+                resolved.push(name);
+                match std::fs::canonicalize(&resolved) {
+                    Ok(canonical) => resolved = canonical,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        match std::fs::symlink_metadata(&resolved) {
+                            Err(missing) if missing.kind() == io::ErrorKind::NotFound => {}
+                            _ => return Err(e),
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    Ok(resolved)
+}
+
+fn refuse_tree_alias(manifest: &Path, destination: &Path) -> Result<(), CliError> {
+    let failed = |e| {
+        CliError::failed(format!(
+            "manifest preflight tree {}: {e}",
+            destination.display()
+        ))
+    };
+    let metadata = match std::fs::symlink_metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(failed(e)),
+    };
+    super::refuse_image_alias(manifest, destination)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        for entry in std::fs::read_dir(destination).map_err(failed)? {
+            refuse_tree_alias(manifest, &entry.map_err(failed)?.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn validate(entry: &ManifestEntry) -> io::Result<()> {
