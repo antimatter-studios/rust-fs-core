@@ -26,6 +26,12 @@ pub trait FileSink {
     fn set_sparse_len(&mut self, _len: u64) -> Result<(), CliError> {
         Err(CliError::refused("sparse files not supported by this sink"))
     }
+    /// Identity of the published file `path`, captured by the driver from the
+    /// opened image and filesystem while the image lock is held. Required only
+    /// by verified imports with a manifest; legacy sinks refuse.
+    fn manifest_identity(&mut self, _path: &Path) -> Result<manifest::Identity, CliError> {
+        Err(CliError::refused("import manifest identity unavailable"))
+    }
     /// Create a private staged file beside `path`. Refuse existing names when
     /// `replace` is false. On failure, abort must still be safe to call.
     fn stage(&mut self, path: &Path, replace: bool) -> Result<(), CliError>;
@@ -176,7 +182,7 @@ pub fn import_local_file(
     path: &Path,
     replace: bool,
 ) -> Result<Copied, CliError> {
-    import_checked_local_file(source, sink, path, replace, ImportOptions::default())
+    import_checked_local_file(source, sink, path, replace, ImportOptions::default(), None)
 }
 
 fn import_checked_local_file(
@@ -185,11 +191,23 @@ fn import_checked_local_file(
     path: &Path,
     replace: bool,
     options: ImportOptions,
+    ledger: Option<&mut manifest::ImportLedger>,
 ) -> Result<Copied, CliError> {
     let sink = capable(sink, replace)?;
     let identity = SourceIdentity::capture(source.file())
         .map_err(|e| CliError::failed(format!("cannot inspect import source: {e}")))?;
     identity.check(source, identity.metadata.len())?;
+    // The host identity of the opened source, before any content is read.
+    let record = match ledger.filter(|_| options.verify) {
+        Some(ledger) => {
+            let local = source
+                .local_path()
+                .ok_or_else(|| CliError::refused("import manifest needs a named local source"))?;
+            let captured = manifest::LocalIdentity::capture(local, source.file())?;
+            Some((ledger, manifest::Identity::Local(captured)))
+        }
+        None => None,
+    };
     import_stream(
         source,
         Some(sink),
@@ -198,6 +216,7 @@ fn import_checked_local_file(
         ImportContext {
             size: Some(identity.metadata.len()),
             verify: options.verify,
+            record,
             ..ImportContext::default()
         },
         |source, bytes| identity.check(source, bytes),
@@ -286,6 +305,8 @@ struct ImportContext<'a> {
     cancellation: Option<&'a Cancellation>,
     sparse: SparseOptions,
     verify: bool,
+    /// The ledger and opened source identity of a verified, recorded import.
+    record: Option<(&'a mut manifest::ImportLedger, manifest::Identity)>,
 }
 
 fn import_stream<S: Read + ?Sized>(
@@ -301,6 +322,7 @@ fn import_stream<S: Read + ?Sized>(
         cancellation,
         sparse,
         verify,
+        record,
     } = context;
     let sink = capable(sink, replace)?;
     if sparse.preserve_sparse && !sink.supports_sparse() {
@@ -385,6 +407,12 @@ fn import_stream<S: Read + ?Sized>(
                 .push_str(&format!("; abort failed: {}", cleanup.message));
         }
         return Err(error);
+    }
+    // Record after publication, still under the image lock.
+    if let (Ok(copied), Some((ledger, source))) = (&result, record) {
+        let identity = sink.manifest_identity(path)?;
+        let destination = manifest::import_identity(identity, path, sink.image_path())?;
+        ledger.record(source, destination, copied)?;
     }
     result
 }
@@ -545,6 +573,15 @@ pub fn import_with_options(
     options: ImportOptions,
     sink: Option<&mut dyn FileSink>,
 ) -> Result<Outcome, CliError> {
+    import_recorded(request, options, sink, None)
+}
+
+pub(super) fn import_recorded(
+    request: &ImportRequest,
+    options: ImportOptions,
+    sink: Option<&mut dyn FileSink>,
+    ledger: Option<&mut manifest::ImportLedger>,
+) -> Result<Outcome, CliError> {
     let sink = capable(sink, request.replace)?;
     let copied = match &request.input {
         Input::Stdin => import_stream(
@@ -571,6 +608,7 @@ pub fn import_with_options(
                 &request.path,
                 request.replace,
                 options,
+                ledger,
             )?
         }
     };

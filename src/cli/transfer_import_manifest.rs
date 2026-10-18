@@ -1,0 +1,91 @@
+//! Import adapters capture identities around verified publication.
+use super::super::super::output::{Json, Outcome};
+use super::super::{self as transfer, FileSink, ImportOptions, ImportRequest, Input};
+use super::*;
+use std::time::SystemTime;
+
+/// Accept only a driver identity naming the published image file.
+pub(in crate::cli::transfer) fn import_identity(
+    identity: Identity,
+    path: &Path,
+    image_path: Option<&Path>,
+) -> Result<Identity, CliError> {
+    if !matches!(&identity, Identity::Image { path: p, image, .. } if p == path && Some(image.path.as_path()) == image_path)
+    {
+        return Err(CliError::refused(
+            "manifest identity must describe the imported image file",
+        ));
+    }
+    Ok(identity)
+}
+
+pub(in crate::cli::transfer) struct ImportLedger {
+    manifest: Manifest,
+    read: ManifestRead,
+}
+
+impl ImportLedger {
+    fn open(
+        request: &ImportRequest,
+        image: Option<&Path>,
+        options: &ImportManifestOptions,
+    ) -> Result<Option<Self>, CliError> {
+        let Some(path) = &options.manifest else {
+            return Ok(None);
+        };
+        let Input::File(source) = &request.input else {
+            return Err(CliError::usage("--manifest needs a file SOURCE, not stdin"));
+        };
+        let image =
+            image.ok_or_else(|| CliError::refused("import manifest needs a backing image path"))?;
+        let (manifest, read) = Manifest::open_for_import(path, image, source, false)?;
+        if read.torn_tail {
+            eprintln!("manifest {}: recovered torn tail", path.display());
+        }
+        Ok(Some(Self { manifest, read }))
+    }
+    fn report(&self, outcome: &mut Outcome) {
+        if let Some(Json::Obj(fields)) = &mut outcome.report {
+            fields.push(("manifest_torn_tail".into(), Json::from(self.read.torn_tail)));
+        }
+    }
+    /// Durably append one verified, published import before returning.
+    pub fn record(
+        &mut self,
+        source: Identity,
+        destination: Identity,
+        copied: &transfer::Copied,
+    ) -> Result<(), CliError> {
+        let entry = ManifestEntry {
+            source,
+            destination,
+            bytes: copied.bytes,
+            sha256: copied.sha256_hex(),
+            completed_at: Timestamp::from_system_time(SystemTime::now())?,
+        };
+        self.manifest.append(&entry, true).map(|_| ())
+    }
+}
+
+/// Import a local file with an optional ledger, opened safely before any
+/// source read or staged write. A verified, published import appends the
+/// opened source's host identity, the driver-supplied destination identity
+/// captured under the image lock, and the verified SHA-256; unverified imports
+/// record nothing. Resume is not applied yet: every file is copied.
+pub fn import_with_manifest(
+    request: &ImportRequest,
+    options: ImportOptions,
+    sink: Option<&mut dyn FileSink>,
+    manifest: &ImportManifestOptions,
+) -> Result<Outcome, CliError> {
+    let image = sink
+        .as_deref()
+        .and_then(|sink| sink.image_path())
+        .map(Path::to_path_buf);
+    let mut ledger = ImportLedger::open(request, image.as_deref(), manifest)?;
+    let mut outcome = transfer::import::import_recorded(request, options, sink, ledger.as_mut())?;
+    if let Some(ledger) = ledger {
+        ledger.report(&mut outcome);
+    }
+    Ok(outcome)
+}

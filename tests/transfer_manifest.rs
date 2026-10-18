@@ -2011,3 +2011,165 @@ fn import_manifest_arguments_keep_non_unicode_paths() {
         Some(PathBuf::from(ledger))
     );
 }
+
+// The destination identity comes from the driver, independently of the local
+// source identity the adapter captures from the opened file.
+struct ImportSink {
+    image: PathBuf,
+    staged: Vec<u8>,
+    stages: usize,
+    verified: bool,
+}
+impl fs_core::cli::transfer::FileSink for ImportSink {
+    fn image_path(&self) -> Option<&std::path::Path> {
+        Some(&self.image)
+    }
+    fn manifest_identity(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<Identity, fs_core::cli::CliError> {
+        assert!(
+            self.verified,
+            "unverified copies need no identity capability"
+        );
+        let mut identity = entry().source;
+        if let Identity::Image {
+            path: recorded,
+            image,
+            ..
+        } = &mut identity
+        {
+            *recorded = path.into();
+            image.path = self.image.clone();
+        }
+        Ok(identity)
+    }
+    fn stage(&mut self, _: &std::path::Path, _: bool) -> Result<(), fs_core::cli::CliError> {
+        self.stages += 1;
+        self.staged.clear();
+        Ok(())
+    }
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), fs_core::cli::CliError> {
+        let end = offset as usize + bytes.len();
+        self.staged.resize(self.staged.len().max(end), 0);
+        self.staged[offset as usize..end].copy_from_slice(bytes);
+        Ok(())
+    }
+    fn persist(&mut self) -> Result<(), fs_core::cli::CliError> {
+        Ok(())
+    }
+    fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<usize, fs_core::cli::CliError> {
+        let rest = self.staged.get(offset as usize..).unwrap_or_default();
+        let n = rest.len().min(bytes.len());
+        bytes[..n].copy_from_slice(&rest[..n]);
+        Ok(n)
+    }
+    fn publish(&mut self, _: bool) -> Result<bool, fs_core::cli::CliError> {
+        Ok(false)
+    }
+    fn abort(&mut self) -> Result<(), fs_core::cli::CliError> {
+        Ok(())
+    }
+}
+fn import_run(
+    ledger: &std::path::Path,
+    image: &std::path::Path,
+    source: &std::path::Path,
+    verify: bool,
+) -> (
+    ImportSink,
+    Result<fs_core::cli::Outcome, fs_core::cli::CliError>,
+) {
+    use fs_core::cli::transfer::{
+        self, ImportManifestOptions, ImportOptions, ImportRequest, Input,
+    };
+    let mut sink = ImportSink {
+        image: image.into(),
+        staged: Vec::new(),
+        stages: 0,
+        verified: verify,
+    };
+    let request = ImportRequest {
+        input: Input::File(source.into()),
+        path: "/image/file".into(),
+        replace: false,
+    };
+    let manifest = ImportManifestOptions {
+        manifest: Some(ledger.into()),
+        resume: false,
+    };
+    let outcome = transfer::import_with_manifest(
+        &request,
+        ImportOptions { verify },
+        Some(&mut sink),
+        &manifest,
+    );
+    (sink, outcome)
+}
+
+#[test]
+fn verified_file_imports_record_the_opened_source_and_driver_destination() {
+    let (ledger, image, source) = import_paths("import-record", false);
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ledger)
+        .unwrap()
+        .write_all(b"torn tail")
+        .unwrap();
+    let (sink, outcome) = import_run(&ledger, &image, &source, true);
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.code, 0);
+    assert_eq!(sink.staged, b"source must remain intact");
+    assert_eq!(
+        outcome.report.as_ref().unwrap().get("manifest_torn_tail"),
+        Some(&fs_core::cli::Json::Bool(true))
+    );
+    let (_, read) = Manifest::open(&ledger).unwrap();
+    assert_eq!(read.entries.len(), 1);
+    let recorded = &read.entries[0];
+    let mut expected = entry().source;
+    if let Identity::Image { image: backing, .. } = &mut expected {
+        backing.path = image.clone();
+    }
+    assert_eq!(recorded.destination, expected);
+    assert_eq!(recorded.bytes, 25);
+    let Identity::Local(local) = &recorded.source else {
+        panic!("local source")
+    };
+    assert_eq!(local.path, source);
+    // Python's hashlib and os.stat check the digest and the source identity.
+    let script = r#"import hashlib,json,os,sys
+e=json.loads(open(sys.argv[1]).read()); s=os.stat(sys.argv[2]); l=e['source']
+assert e['sha256']==hashlib.sha256(open(sys.argv[2],'rb').read()).hexdigest()
+assert (l['size'],l['modified']['seconds']*10**9+l['modified']['nanoseconds'])==(s.st_size,s.st_mtime_ns)
+if os.name!='nt':
+    assert (l['device'],l['inode'])==(s.st_dev,s.st_ino)
+"#;
+    let status = Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args(["-c", script])
+        .arg(&ledger)
+        .arg(&source)
+        .status()
+        .expect("python3 is required as the independent JSON and digest oracle");
+    assert!(status.success());
+}
+
+#[test]
+fn unverified_file_imports_publish_without_recording() {
+    let (ledger, image, source) = import_paths("import-unverified", false);
+    let (sink, outcome) = import_run(&ledger, &image, &source, false);
+    assert_eq!(outcome.unwrap().code, 0);
+    assert_eq!(sink.staged, b"source must remain intact");
+    let (_, read) = Manifest::open(&ledger).unwrap();
+    assert!(read.entries.is_empty());
+}
+
+#[test]
+fn file_import_manifest_aliasing_the_source_is_refused_before_staging() {
+    let (_, image, source) = import_paths("import-alias", false);
+    let (sink, outcome) = import_run(&source, &image, &source, true);
+    assert!(outcome.is_err());
+    assert_eq!(sink.stages, 0, "preflight runs before any staged write");
+    assert_eq!(fs::read(&source).unwrap(), b"source must remain intact");
+}
