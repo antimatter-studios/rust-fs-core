@@ -53,6 +53,14 @@ pub trait TreeSource {
             "extended attributes not supported by this source",
         ))
     }
+    /// Enumerate opaque named streams separately from extended attributes.
+    /// Override with an empty vector when the source has no named streams.
+    /// The default refuses preservation instead of claiming none exist.
+    fn named_streams(&mut self, _path: &Path) -> Result<Vec<NamedStream>, CliError> {
+        Err(CliError::refused(
+            "named streams not supported by this source",
+        ))
+    }
     /// Backing image identity; supplying it enables alias refusal and image locks.
     fn image_path(&self) -> Option<&Path> {
         None
@@ -834,6 +842,7 @@ pub(super) fn export_tree_recorded(
         let result = result.and_then(|status| {
             if status == 0 && xattrs.preserve_xattrs {
                 xattrs::preserve(&local, source.extended_attributes(&path)?)?;
+                preserve_named_streams(source, &path, &mut xattrs::HostStreams, &local, xattrs)?;
             }
             if status == 0 && times.preserve_times && metadata.kind == TreeKind::File {
                 append_reason(&mut reason, &preserve_times(&local, &metadata)?);

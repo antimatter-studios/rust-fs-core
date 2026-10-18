@@ -35,6 +35,9 @@ impl TreeSource for Source {
             .clone()
             .ok_or_else(|| CliError::refused("source xattrs unavailable"))
     }
+    fn named_streams(&mut self, _: &Path) -> Result<Vec<transfer::NamedStream>, CliError> {
+        Ok(vec![])
+    }
 }
 fn destination(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("core-xattr-{}-{tag}", std::process::id()))
@@ -166,6 +169,9 @@ fn an_existing_source_defaults_to_explicit_refusal() {
 
 struct Directory(Source);
 impl TreeSource for Directory {
+    fn named_streams(&mut self, _: &Path) -> Result<Vec<transfer::NamedStream>, CliError> {
+        Ok(vec![])
+    }
     fn metadata(&mut self, p: &Path) -> Result<TreeMetadata, CliError> {
         let mut m = self.0.metadata(p)?;
         if p.as_os_str().is_empty() {
@@ -294,4 +300,145 @@ fn a_privileged_namespace_is_refused_by_the_host() {
     assert_eq!(count(&result, "refused"), 1);
     assert!(format!("{:?}", result.report).contains("security.capability"));
     std::fs::remove_file(dest).unwrap();
+}
+
+struct Streams(Option<Vec<transfer::NamedStream>>);
+impl TreeSource for Streams {
+    fn metadata(&mut self, p: &Path) -> Result<TreeMetadata, CliError> {
+        Source { attributes: None }.metadata(p)
+    }
+    fn read_dir(&mut self, _: &Path) -> Result<Vec<TreeEntry>, CliError> {
+        unreachable!()
+    }
+    fn read_file_at(&mut self, p: &Path, offset: u64, buf: &mut [u8]) -> Result<usize, CliError> {
+        Source { attributes: None }.read_file_at(p, offset, buf)
+    }
+    fn extended_attributes(&mut self, _: &Path) -> Result<Vec<ExtendedAttribute>, CliError> {
+        Ok(vec![])
+    }
+    fn named_streams(&mut self, _: &Path) -> Result<Vec<transfer::NamedStream>, CliError> {
+        self.0
+            .clone()
+            .ok_or_else(|| CliError::refused("stream enumeration unavailable"))
+    }
+}
+#[derive(Default)]
+struct StreamSink(Vec<(PathBuf, transfer::NamedStream)>);
+impl transfer::NamedStreamSink for StreamSink {
+    fn set_named_stream(
+        &mut self,
+        path: &Path,
+        stream: &transfer::NamedStream,
+    ) -> Result<(), CliError> {
+        self.0.push((path.into(), stream.clone()));
+        Ok(())
+    }
+}
+struct NoStreams;
+impl transfer::NamedStreamSink for NoStreams {}
+fn streams() -> Vec<transfer::NamedStream> {
+    vec![
+        transfer::NamedStream {
+            name: "secret".into(),
+            value: vec![0, 255, 10],
+        },
+        transfer::NamedStream {
+            name: "empty".into(),
+            value: vec![],
+        },
+    ]
+}
+fn preserve_streams(
+    source: &mut dyn TreeSource,
+    sink: &mut dyn transfer::NamedStreamSink,
+    enabled: bool,
+) -> Result<(), CliError> {
+    transfer::preserve_named_streams(
+        source,
+        Path::new("file"),
+        sink,
+        Path::new("destination"),
+        XattrOptions {
+            preserve_xattrs: enabled,
+        },
+    )
+}
+#[test]
+fn a_capable_sink_accepts_binary_and_empty_named_streams() {
+    let expected = streams();
+    let mut sink = StreamSink::default();
+    preserve_streams(&mut Streams(Some(expected.clone())), &mut sink, true).unwrap();
+    assert_eq!(
+        sink.0,
+        expected
+            .into_iter()
+            .map(|s| (PathBuf::from("destination"), s))
+            .collect::<Vec<_>>()
+    );
+}
+#[test]
+fn an_incapable_sink_refuses_and_names_the_stream() {
+    let error = preserve_streams(&mut Streams(Some(streams())), &mut NoStreams, true).unwrap_err();
+    assert_eq!(error.code, CliError::refused("").code);
+    assert!(error.message.contains("secret"), "{error:?}");
+    assert!(error.message.contains("not supported"), "{error:?}");
+}
+#[test]
+fn disabled_stream_preservation_queries_neither_capability() {
+    preserve_streams(&mut Streams(None), &mut NoStreams, false).unwrap();
+}
+#[test]
+fn an_empty_stream_list_needs_no_sink_capability() {
+    preserve_streams(&mut Streams(Some(vec![])), &mut NoStreams, true).unwrap();
+}
+#[test]
+fn a_stream_enumeration_refusal_reaches_the_caller() {
+    let error = preserve_streams(&mut Streams(None), &mut StreamSink::default(), true).unwrap_err();
+    assert!(error.message.contains("stream enumeration unavailable"));
+}
+#[test]
+fn a_legacy_source_explicitly_refuses_stream_enumeration() {
+    let error = preserve_streams(
+        &mut Legacy(Source { attributes: None }),
+        &mut StreamSink::default(),
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, CliError::refused("").code);
+    assert!(error.message.contains("named streams"));
+}
+#[test]
+fn host_export_names_the_refused_stream_without_creating_side_files() {
+    let root = destination("streams-no-side-files");
+    std::fs::create_dir(&root).unwrap();
+    let dest = root.join("file");
+    let result = transfer::export_tree_with_xattrs(
+        &ExportRequest {
+            path: "file".into(),
+            output: Output::File(dest.clone()),
+            replace: false,
+        },
+        &mut Streams(Some(streams())),
+        TreeOptions::default(),
+        LinkOptions::default(),
+        TimeOptions::default(),
+        XattrOptions {
+            preserve_xattrs: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(count(&result, "refused"), 1);
+    assert_ne!(result.code, 0);
+    let report = format!("{:?}", result.report);
+    assert!(
+        report.contains("secret") && report.contains("named stream"),
+        "{report}"
+    );
+    assert_eq!(std::fs::read(&dest).unwrap(), b"data");
+    let names: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [std::ffi::OsString::from("file")]);
+    std::fs::remove_dir_all(root).unwrap();
 }
