@@ -171,6 +171,7 @@ pub fn import_local_file(
         path,
         replace,
         Some(identity.metadata.len()),
+        None,
         |source, bytes| identity.check(source, bytes),
     )
 }
@@ -186,7 +187,44 @@ pub fn import_file(
     path: &Path,
     replace: bool,
 ) -> Result<Copied, CliError> {
-    import_stream(source, sink, path, replace, None, |_, _| Ok(()))
+    import_stream(source, sink, path, replace, None, None, |_, _| Ok(()))
+}
+
+// The tree owns the image lock. Check the non-following source name as well as
+// the open handle so a substituted symbolic link cannot become an input file.
+pub(super) fn import_tree_file(
+    local: &Path,
+    sink: &mut dyn FileSink,
+    path: &Path,
+    replace: bool,
+    cancellation: &Cancellation,
+) -> Result<Copied, CliError> {
+    let file = File::open(local).map_err(|e| CliError::failed(e.to_string()))?;
+    let mut source = NamedSource { file, path: local };
+    let identity =
+        SourceIdentity::capture(&source.file).map_err(|e| CliError::failed(e.to_string()))?;
+    let validate = |source: &NamedSource<'_>, bytes| {
+        let metadata = fs::symlink_metadata(local).map_err(|e| CliError::failed(e.to_string()))?;
+        if !identity
+            .matches(&metadata)
+            .map_err(|e| CliError::failed(e.to_string()))?
+        {
+            return Err(CliError::refused(
+                "source changed or became a symbolic link",
+            ));
+        }
+        identity.check(source, bytes)
+    };
+    validate(&source, identity.metadata.len())?;
+    import_stream(
+        &mut source,
+        Some(sink),
+        path,
+        replace,
+        Some(identity.metadata.len()),
+        Some(cancellation),
+        validate,
+    )
 }
 
 fn import_stream<S: Read + ?Sized>(
@@ -195,11 +233,23 @@ fn import_stream<S: Read + ?Sized>(
     path: &Path,
     replace: bool,
     size: Option<u64>,
+    cancellation: Option<&Cancellation>,
     mut validate: impl FnMut(&S, u64) -> Result<(), CliError>,
 ) -> Result<Copied, CliError> {
     let sink = capable(sink, replace)?;
-    let _lock = sink.image_path().map(ImageLock::for_import).transpose()?;
-    let cancellation = Cancellation::install()?;
+    let _lock = if cancellation.is_none() {
+        sink.image_path().map(ImageLock::for_import).transpose()?
+    } else {
+        None
+    };
+    let installed = if cancellation.is_none() {
+        Some(Cancellation::install()?)
+    } else {
+        None
+    };
+    let cancellation = cancellation
+        .or(installed.as_ref())
+        .expect("cancellation is installed");
     let mut bytes = 0u64;
     let result = (|| {
         cancellation.check(0, 0)?;
