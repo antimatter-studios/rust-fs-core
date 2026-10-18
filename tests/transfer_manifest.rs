@@ -1268,3 +1268,251 @@ fn resume_retries_interrupted_reads_and_handles_empty_files() {
         }
     );
 }
+
+// Resume endpoints: host metadata of the real image and destination files,
+// with a driver inode the test can change while the source is digested.
+struct ResumeSource {
+    image: PathBuf,
+    dest: PathBuf,
+    content: Vec<u8>,
+    inode: u64,
+    offsets: Vec<u64>,
+    during_digest: Option<fn(&mut ResumeSource)>,
+}
+impl fs_core::cli::transfer::FileSource for ResumeSource {
+    fn image_path(&self) -> Option<&std::path::Path> {
+        Some(&self.image)
+    }
+    fn manifest_identity(&self) -> Result<Identity, fs_core::cli::CliError> {
+        let file = fs::File::open(&self.image).unwrap();
+        Ok(Identity::Image {
+            path: PathBuf::from("/image/file"),
+            image: LocalIdentity::capture(&self.image, &file)?,
+            offset: 0,
+            filesystem_uuid: "resume-uuid".into(),
+            inode: self.inode,
+        })
+    }
+    fn size(&self) -> u64 {
+        self.content.len() as u64
+    }
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, fs_core::cli::CliError> {
+        self.offsets.push(offset);
+        if let Some(mutate) = self.during_digest.take() {
+            mutate(self);
+        }
+        let start = offset as usize;
+        let n = buf.len().min(self.content.len() - start);
+        buf[..n].copy_from_slice(&self.content[start..start + n]);
+        Ok(n)
+    }
+}
+
+fn resume_export(
+    source: &mut ResumeSource,
+    ledger: &std::path::Path,
+    resume: bool,
+) -> fs_core::cli::Outcome {
+    use fs_core::cli::transfer::{
+        self, ExportManifestOptions, ExportOptions, ExportRequest, Output,
+    };
+    let request = ExportRequest {
+        path: "/image/file".into(),
+        output: Output::File(source.dest.clone()),
+        replace: true,
+    };
+    let manifest = ExportManifestOptions {
+        manifest: Some(ledger.into()),
+        resume,
+    };
+    transfer::export_with_manifest(&request, source, ExportOptions { verify: true }, &manifest)
+        .unwrap()
+}
+
+// A verified, recorded first export, so the second run has evidence to weigh.
+fn resumable(tag: &str, record: bool) -> (PathBuf, ResumeSource) {
+    let (ledger, image, dest) = export_paths(tag);
+    fs::File::create(&ledger).unwrap();
+    let mut source = ResumeSource {
+        image,
+        dest,
+        content: b"resume bytes".to_vec(),
+        inode: 5,
+        offsets: Vec::new(),
+        during_digest: None,
+    };
+    if record {
+        resume_export(&mut source, &ledger, false);
+        assert_eq!(records(&ledger), 1);
+    }
+    source.offsets.clear();
+    (ledger, source)
+}
+
+fn records(ledger: &std::path::Path) -> usize {
+    Manifest::open(ledger).unwrap().1.entries.len()
+}
+
+// Python's hashlib digests the published file independently of sha2.
+fn host_sha256(path: &std::path::Path) -> String {
+    let result = Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args([
+            "-c",
+            "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())",
+        ])
+        .arg(path)
+        .output()
+        .expect("install Python 3 for the SHA-256 oracle");
+    assert!(result.status.success());
+    String::from_utf8(result.stdout).unwrap().trim().into()
+}
+
+// A restart copies from byte zero, verifies, publishes and records again.
+fn assert_recopied(
+    outcome: &fs_core::cli::Outcome,
+    ledger: &std::path::Path,
+    source: &ResumeSource,
+    entries: usize,
+) {
+    use fs_core::cli::Json;
+    let report = outcome.report.as_ref().unwrap();
+    assert_eq!(report.get("skipped"), None);
+    assert_eq!(report.get("verified"), Some(&Json::Bool(true)));
+    assert_eq!(fs::read(&source.dest).unwrap(), source.content);
+    assert_eq!(records(ledger), entries);
+    let (_, read) = Manifest::open(ledger).unwrap();
+    assert_eq!(
+        read.entries.last().unwrap().sha256,
+        host_sha256(&source.dest)
+    );
+}
+
+#[test]
+fn resume_skips_an_unchanged_single_file_with_the_exact_earlier_time() {
+    use fs_core::cli::Json;
+    let (ledger, mut source) = resumable("resume-skip", true);
+    let before = fs::read(&ledger).unwrap();
+    let modified = fs::metadata(&source.dest).unwrap().modified().unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(&ledger)
+        .unwrap()
+        .write_all(b"torn tail")
+        .unwrap();
+    let outcome = resume_export(&mut source, &ledger, true);
+    assert_eq!(outcome.code, 0);
+    assert!(!source.offsets.is_empty(), "the source is digested again");
+    let report = outcome.report.as_ref().unwrap();
+    assert_eq!(report.get("skipped"), Some(&Json::from("verified earlier")));
+    assert_eq!(report.get("verified"), Some(&Json::Bool(false)));
+    assert_eq!(report.get("manifest_torn_tail"), Some(&Json::Bool(true)));
+    assert_eq!(fs::read(&ledger).unwrap(), before, "a skip appends nothing");
+    assert_eq!(
+        fs::metadata(&source.dest).unwrap().modified().unwrap(),
+        modified
+    );
+    // The earlier completion time comes from the ledger through Python's JSON reader.
+    let script = "import json,sys;t=json.loads(open(sys.argv[1]).read().splitlines()[-1])['completed_at'];print(t['seconds'],t['nanoseconds'])";
+    let result = Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args(["-c", script])
+        .arg(&ledger)
+        .output()
+        .expect("install Python 3 for the JSON oracle");
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let (seconds, nanoseconds) = stdout.trim().split_once(' ').unwrap();
+    let (seconds, nanoseconds): (i64, i64) =
+        (seconds.parse().unwrap(), nanoseconds.parse().unwrap());
+    let at = report.get("verified_earlier_at").unwrap();
+    assert_eq!(at.get("seconds"), Some(&Json::Int(seconds)));
+    assert_eq!(at.get("nanoseconds"), Some(&Json::Int(nanoseconds)));
+    let text = outcome.text.as_deref().unwrap();
+    assert!(
+        text.contains(&format!(
+            "skipped: verified earlier at {seconds}.{nanoseconds:09}"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("not verified now"), "{text}");
+}
+
+#[test]
+fn resume_recopies_a_same_size_same_mtime_source_rewrite() {
+    let (ledger, mut source) = resumable("resume-rewrite", true);
+    source.content = b"rewritten!!!".to_vec();
+    let outcome = resume_export(&mut source, &ledger, true);
+    assert_recopied(&outcome, &ledger, &source, 2);
+}
+
+#[test]
+fn resume_copies_without_a_record_or_with_superseded_evidence() {
+    let (ledger, mut source) = resumable("resume-missing", false);
+    fs::write(&source.dest, b"stale").unwrap();
+    let outcome = resume_export(&mut source, &ledger, true);
+    assert_recopied(&outcome, &ledger, &source, 1);
+
+    // A later record for the same destination from another source wins.
+    let (ledger, mut source) = resumable("resume-superseded", true);
+    let (mut manifest, read) = Manifest::open(&ledger).unwrap();
+    let mut later = read.entries[0].clone();
+    if let Identity::Image { inode, .. } = &mut later.source {
+        *inode += 1;
+    }
+    manifest.append(&later, true).unwrap();
+    drop(manifest);
+    let outcome = resume_export(&mut source, &ledger, true);
+    assert_recopied(&outcome, &ledger, &source, 3);
+}
+
+#[test]
+fn resume_recopies_changed_and_missing_destinations() {
+    let (ledger, mut source) = resumable("resume-dest-changed", true);
+    OpenOptions::new()
+        .append(true)
+        .open(&source.dest)
+        .unwrap()
+        .write_all(b"!")
+        .unwrap();
+    let outcome = resume_export(&mut source, &ledger, true);
+    assert_recopied(&outcome, &ledger, &source, 2);
+
+    let (ledger, mut source) = resumable("resume-dest-missing", true);
+    fs::remove_file(&source.dest).unwrap();
+    let outcome = resume_export(&mut source, &ledger, true);
+    assert_recopied(&outcome, &ledger, &source, 2);
+}
+
+#[test]
+fn resume_restarts_partial_destinations_at_byte_zero() {
+    let (ledger, mut source) = resumable("resume-partial", true);
+    OpenOptions::new()
+        .write(true)
+        .open(&source.dest)
+        .unwrap()
+        .set_len(4)
+        .unwrap();
+    let outcome = resume_export(&mut source, &ledger, true);
+    assert_eq!(source.offsets.first(), Some(&0));
+    assert_recopied(&outcome, &ledger, &source, 2);
+}
+
+#[test]
+fn resume_restarts_when_an_endpoint_changes_during_the_digest() {
+    let mutations: [fn(&mut ResumeSource); 2] = [
+        |source| source.inode += 1,
+        |source| {
+            OpenOptions::new()
+                .append(true)
+                .open(&source.dest)
+                .unwrap()
+                .write_all(b"!")
+                .unwrap()
+        },
+    ];
+    for (n, mutate) in mutations.into_iter().enumerate() {
+        let (ledger, mut source) = resumable(&format!("resume-mutated-{n}"), true);
+        source.during_digest = Some(mutate);
+        let outcome = resume_export(&mut source, &ledger, true);
+        assert!(source.during_digest.is_none(), "the digest read the source");
+        assert_recopied(&outcome, &ledger, &source, 2);
+    }
+}
