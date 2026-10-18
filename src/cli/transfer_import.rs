@@ -506,7 +506,8 @@ pub fn import_args_with_verify() -> [Arg; 4] {
 }
 
 impl ImportRequest {
-    /// Parse [`import_args`] without performing I/O.
+    /// Parse [`import_args`] without performing I/O. Manifest and resume
+    /// arguments are validated as by [`super::ImportManifestOptions`].
     pub fn from_matches(matches: &ArgMatches) -> Result<Self, CliError> {
         let given = |id: &str| {
             matches
@@ -515,6 +516,7 @@ impl ImportRequest {
                 .ok_or_else(|| CliError::usage(format!("missing {}", id.to_uppercase())))
         };
         let source = given("source")?;
+        super::ImportManifestOptions::from_matches(matches)?;
         Ok(Self {
             input: if source == "-" {
                 Input::Stdin

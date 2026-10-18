@@ -108,6 +108,93 @@ pub fn export_args_with_resume() -> [Arg; 9] {
     ]
 }
 
+/// Opt-in import ledger arguments, the import counterpart of
+/// [`ExportManifestOptions`]. Parsing performs no I/O. Execution adapters must
+/// open the ledger through [`Manifest::open_for_import`] before transfer I/O
+/// and apply resume decisions with locked, fresh endpoint identities; ordinary
+/// import APIs do not do this.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportManifestOptions {
+    /// Local JSONL ledger path, retained without lossy Unicode conversion.
+    pub manifest: Option<PathBuf>,
+    /// Skip only files supported by revalidated evidence of earlier verification.
+    pub resume: bool,
+}
+
+impl ImportManifestOptions {
+    /// Parse [`import_args_with_manifest`] or [`import_args_with_resume`].
+    /// Legacy argument sets select no ledger and no resume. A custom parser
+    /// must still supply a manifest with resume and use a local source; stdin
+    /// has no identity to record or revalidate. Manifest recording without
+    /// `--verify` is accepted but records no entries.
+    pub fn from_matches(matches: &ArgMatches) -> Result<Self, CliError> {
+        let manifest = matches
+            .try_get_one::<PathBuf>("manifest")
+            .ok()
+            .flatten()
+            .cloned();
+        let resume = matches
+            .try_get_one::<bool>("resume")
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false);
+        if resume && manifest.is_none() {
+            return Err(CliError::usage("--resume requires --manifest FILE"));
+        }
+        if manifest.is_some()
+            && matches
+                .try_get_one::<OsString>("source")
+                .ok()
+                .flatten()
+                .is_some_and(|source| source == "-")
+        {
+            return Err(CliError::usage("--manifest needs a file SOURCE, not stdin"));
+        }
+        Ok(Self { manifest, resume })
+    }
+}
+
+/// Tree import arguments plus `--verify` and an opt-in local manifest path.
+/// Drivers must consume [`ImportManifestOptions`] in their ledger adapter;
+/// adding these arguments alone does not enable recording or resume execution.
+pub fn import_args_with_manifest() -> [Arg; 8] {
+    let [source, path, replace, recursive, depth, preserve] = super::import_args_with_tree();
+    let [_, _, _, verify] = super::import_args_with_verify();
+    [
+        source,
+        path,
+        replace,
+        verify,
+        recursive,
+        depth,
+        preserve,
+        Arg::new("manifest")
+            .long("manifest")
+            .value_name("FILE")
+            .value_parser(clap::value_parser!(PathBuf))
+            .help(
+                "Record verified, published files in a local JSONL ledger; requires a file SOURCE",
+            ),
+    ]
+}
+
+/// Manifest import arguments with evidence-based resume. `--resume` requires
+/// `--manifest FILE`; endpoint and digest validation belongs to the adapter.
+/// Earlier verification never means image bytes were verified now.
+pub fn import_args_with_resume() -> [Arg; 9] {
+    let [source, path, replace, verify, recursive, depth, preserve, manifest] =
+        import_args_with_manifest();
+    [
+        source, path, replace, verify, recursive, depth, preserve, manifest,
+        Arg::new("resume")
+            .long("resume")
+            .action(ArgAction::SetTrue)
+            .requires("manifest")
+            .help("Skip files verified earlier only when manifest identities and a fresh source digest match"),
+    ]
+}
+
 /// A signed Unix timestamp, including subsecond precision and pre-epoch times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timestamp {
