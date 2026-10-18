@@ -2019,6 +2019,9 @@ struct ImportSink {
     staged: Vec<u8>,
     stages: usize,
     verified: bool,
+    /// Alters the driver identity, as a changed image or destination would.
+    tweak: fn(&mut Identity),
+    writes: Vec<u64>,
 }
 impl fs_core::cli::transfer::FileSink for ImportSink {
     fn image_path(&self) -> Option<&std::path::Path> {
@@ -2042,6 +2045,7 @@ impl fs_core::cli::transfer::FileSink for ImportSink {
             *recorded = path.into();
             image.path = self.image.clone();
         }
+        (self.tweak)(&mut identity);
         Ok(identity)
     }
     fn stage(&mut self, _: &std::path::Path, _: bool) -> Result<(), fs_core::cli::CliError> {
@@ -2050,6 +2054,7 @@ impl fs_core::cli::transfer::FileSink for ImportSink {
         Ok(())
     }
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), fs_core::cli::CliError> {
+        self.writes.push(offset);
         let end = offset as usize + bytes.len();
         self.staged.resize(self.staged.len().max(end), 0);
         self.staged[offset as usize..end].copy_from_slice(bytes);
@@ -2088,6 +2093,8 @@ fn import_run(
         staged: Vec::new(),
         stages: 0,
         verified: verify,
+        tweak: |_| {},
+        writes: Vec::new(),
     };
     let request = ImportRequest {
         input: Input::File(source.into()),
@@ -2174,6 +2181,182 @@ fn file_import_manifest_aliasing_the_source_is_refused_before_staging() {
     assert_eq!(fs::read(&source).unwrap(), b"source must remain intact");
 }
 
+// Resume reruns a verified import with a driver identity changed by `tweak`.
+fn import_resume(
+    ledger: &std::path::Path,
+    image: &std::path::Path,
+    source: &std::path::Path,
+    tweak: fn(&mut Identity),
+) -> (
+    ImportSink,
+    Result<fs_core::cli::Outcome, fs_core::cli::CliError>,
+) {
+    use fs_core::cli::transfer::{
+        self, ImportManifestOptions, ImportOptions, ImportRequest, Input,
+    };
+    let mut sink = ImportSink {
+        image: image.into(),
+        staged: b"partial".to_vec(),
+        stages: 0,
+        verified: true,
+        tweak,
+        writes: Vec::new(),
+    };
+    let request = ImportRequest {
+        input: Input::File(source.into()),
+        path: "/image/file".into(),
+        replace: false,
+    };
+    let manifest = ImportManifestOptions {
+        manifest: Some(ledger.into()),
+        resume: true,
+    };
+    let outcome = transfer::import_with_manifest(
+        &request,
+        ImportOptions { verify: true },
+        Some(&mut sink),
+        &manifest,
+    );
+    (sink, outcome)
+}
+
+fn imported_once(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let (ledger, image, source) = import_paths(tag, false);
+    assert_eq!(
+        import_run(&ledger, &image, &source, true).1.unwrap().code,
+        0
+    );
+    (ledger, image, source)
+}
+
+// A restart stages afresh, writes from byte zero and records the new copy.
+fn assert_import_recopied(
+    sink: &ImportSink,
+    outcome: Result<fs_core::cli::Outcome, fs_core::cli::CliError>,
+    ledger: &std::path::Path,
+    source: &std::path::Path,
+    entries: usize,
+) {
+    let report = outcome.unwrap().report.unwrap();
+    assert_eq!(report.get("skipped"), None);
+    assert_eq!(sink.stages, 1);
+    assert_eq!(
+        sink.writes.first(),
+        Some(&0),
+        "a restart begins at byte zero"
+    );
+    assert_eq!(sink.staged, fs::read(source).unwrap());
+    assert_eq!(records(ledger), entries);
+    let (_, read) = Manifest::open(ledger).unwrap();
+    assert_eq!(read.entries.last().unwrap().sha256, host_sha256(source));
+}
+
+#[test]
+fn import_resume_skips_an_unchanged_verified_file_with_the_earlier_time() {
+    use fs_core::cli::Json;
+    let (ledger, image, source) = imported_once("import-resume-skip");
+    let before = fs::read(&ledger).unwrap();
+    let (sink, outcome) = import_resume(&ledger, &image, &source, |_| {});
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.code, 0);
+    assert_eq!(sink.stages, 0, "a skip stages nothing");
+    assert!(sink.writes.is_empty());
+    let report = outcome.report.as_ref().unwrap();
+    assert_eq!(report.get("skipped"), Some(&Json::from("verified earlier")));
+    assert_eq!(report.get("verified"), Some(&Json::Bool(false)));
+    assert_eq!(
+        report.get("sha256"),
+        Some(&Json::from(host_sha256(&source).as_str()))
+    );
+    assert_eq!(fs::read(&ledger).unwrap(), before, "a skip appends nothing");
+    // The earlier completion time comes from the ledger through Python's JSON reader.
+    let script = "import json,sys;t=json.loads(open(sys.argv[1]).read().splitlines()[-1])['completed_at'];print(t['seconds'],t['nanoseconds'])";
+    let result = Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args(["-c", script])
+        .arg(&ledger)
+        .output()
+        .expect("install Python 3 for the JSON oracle");
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let (seconds, nanoseconds) = stdout.trim().split_once(' ').unwrap();
+    let (seconds, nanoseconds): (i64, i64) =
+        (seconds.parse().unwrap(), nanoseconds.parse().unwrap());
+    let at = report.get("verified_earlier_at").unwrap();
+    assert_eq!(at.get("seconds"), Some(&Json::Int(seconds)));
+    assert_eq!(at.get("nanoseconds"), Some(&Json::Int(nanoseconds)));
+    let text = outcome.text.as_deref().unwrap();
+    assert!(
+        text.contains(&format!(
+            "skipped: verified earlier at {seconds}.{nanoseconds:09}"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("not verified now"), "{text}");
+}
+
+#[test]
+fn import_resume_recopies_a_same_size_same_mtime_source_rewrite() {
+    let (ledger, image, source) = imported_once("import-resume-rewrite");
+    let modified = fs::metadata(&source).unwrap().modified().unwrap();
+    fs::write(&source, b"source must remain INTACT").unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let (sink, outcome) = import_resume(&ledger, &image, &source, |_| {});
+    assert_import_recopied(&sink, outcome, &ledger, &source, 2);
+}
+
+#[test]
+fn import_resume_copies_without_a_record() {
+    let (ledger, image, source) = import_paths("import-resume-missing", false);
+    let (sink, outcome) = import_resume(&ledger, &image, &source, |_| {});
+    assert_import_recopied(&sink, outcome, &ledger, &source, 1);
+}
+
+#[test]
+fn import_resume_recopies_changed_image_or_destination_identity() {
+    let tweaks: [fn(&mut Identity); 3] = [
+        |identity| {
+            if let Identity::Image { inode, .. } = identity {
+                *inode += 1;
+            }
+        },
+        |identity| {
+            if let Identity::Image { image, .. } = identity {
+                image.inode += 1;
+            }
+        },
+        |identity| {
+            if let Identity::Image {
+                filesystem_uuid, ..
+            } = identity
+            {
+                filesystem_uuid.push('x');
+            }
+        },
+    ];
+    for (n, tweak) in tweaks.into_iter().enumerate() {
+        let (ledger, image, source) = imported_once(&format!("import-resume-changed-{n}"));
+        let (sink, outcome) = import_resume(&ledger, &image, &source, tweak);
+        assert_import_recopied(&sink, outcome, &ledger, &source, 2);
+    }
+}
+
+#[test]
+fn import_resume_restarts_a_partial_staged_file_at_byte_zero() {
+    // An earlier attempt left a partial staged file and no newer record for it.
+    let (ledger, image, source) = imported_once("import-resume-partial");
+    let (sink, outcome) = import_resume(&ledger, &image, &source, |identity| {
+        if let Identity::Image { inode, .. } = identity {
+            *inode = 7;
+        }
+    });
+    assert!(!sink.staged.starts_with(b"partial"));
+    assert_import_recopied(&sink, outcome, &ledger, &source, 2);
+}
+
 // A tree sink keeps every published file, so each record can be checked
 // against the bytes the driver actually holds under that name.
 struct TreeImportSink {
@@ -2253,6 +2436,8 @@ fn import_tree_run(
             staged: Vec::new(),
             stages: 0,
             verified: verify,
+            tweak: |_| {},
+            writes: Vec::new(),
         },
         current: PathBuf::new(),
         published: Default::default(),
