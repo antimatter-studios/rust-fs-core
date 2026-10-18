@@ -509,6 +509,10 @@ fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
                 replace,
             );
         }
+        assert!(
+            times::check_precision(&volume.mount, &volume.mount.join("times"),),
+            "HFS+ must exercise timestamp precision loss"
+        );
     }
 }
 
@@ -536,6 +540,230 @@ fn link_arguments_are_opt_in_and_accept_only_links() {
         LinkOptions::from_matches(&m).unwrap(),
         LinkOptions::default()
     );
+}
+
+mod times {
+    use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use transfer::{LinkOptions, TimeOptions};
+
+    fn matches(args: &[&str]) -> fs_core::cli::clap::ArgMatches {
+        Cmd::new("export")
+            .args(transfer::export_args_with_times())
+            .try_get_matches_from(args)
+            .unwrap()
+    }
+    fn export(host: &mut dyn TreeSource, dest: &Path, preserve: bool) -> Outcome {
+        transfer::export_tree_with_times(
+            &request(dest, false),
+            host,
+            options(),
+            LinkOptions::default(),
+            TimeOptions {
+                preserve_times: preserve,
+            },
+        )
+        .unwrap()
+    }
+    fn set_times(p: &Path, accessed: SystemTime, modified: SystemTime) {
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).write(true);
+        #[cfg(unix)]
+        if p.is_dir() {
+            opts.write(false);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            opts.access_mode(0x180).custom_flags(0x02000000);
+        }
+        opts.open(p)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(accessed)
+                    .set_modified(modified),
+            )
+            .unwrap();
+    }
+    fn host(root: &Path) -> Host {
+        Host {
+            root: root.into(),
+            malicious: false,
+        }
+    }
+    struct ClockTree {
+        inner: NamedTree,
+        time: Option<SystemTime>,
+    }
+    impl TreeSource for ClockTree {
+        fn metadata(&mut self, p: &Path) -> Result<TreeMetadata, CliError> {
+            let mut m = self.inner.metadata(p)?;
+            m.accessed = self.time;
+            m.modified = self.time;
+            Ok(m)
+        }
+        fn read_dir(&mut self, p: &Path) -> Result<Vec<TreeEntry>, CliError> {
+            let mut entries = self.inner.read_dir(p)?;
+            for e in &mut entries {
+                e.metadata = self.metadata(&p.join(&e.name))?;
+            }
+            Ok(entries)
+        }
+        fn read_file_at(
+            &mut self,
+            p: &Path,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> Result<usize, CliError> {
+            self.inner.read_file_at(p, offset, buf)
+        }
+    }
+    fn clock(time: Option<SystemTime>) -> ClockTree {
+        ClockTree {
+            inner: NamedTree::new(&[("payload", TreeKind::File)]),
+            time,
+        }
+    }
+
+    #[test]
+    fn time_arguments_are_opt_in_and_combine_with_links() {
+        for args in [
+            vec!["export", "/", "out", "--preserve=times,links"],
+            vec!["export", "/", "out", "--preserve=times", "--preserve=links"],
+        ] {
+            let m = matches(&args);
+            assert!(TimeOptions::from_matches(&m).unwrap().preserve_times);
+            assert!(LinkOptions::from_matches(&m).unwrap().preserve_links);
+        }
+        let m = matches(&["export", "/", "out", "--preserve=times"]);
+        assert!(!LinkOptions::from_matches(&m).unwrap().preserve_links);
+        let m = matches(&["export", "/", "out", "--preserve=links"]);
+        assert!(!TimeOptions::from_matches(&m).unwrap().preserve_times);
+        let m = matches(&["export", "/", "out"]);
+        assert_eq!(
+            TimeOptions::from_matches(&m).unwrap(),
+            TimeOptions::default()
+        );
+        let m = Cmd::new("export")
+            .args(transfer::export_args_with_tree())
+            .try_get_matches_from(["export", "/", "out"])
+            .unwrap();
+        assert_eq!(
+            TimeOptions::from_matches(&m).unwrap(),
+            TimeOptions::default()
+        );
+    }
+
+    #[test]
+    fn file_and_directory_times_match_the_host_after_all_children_are_published() {
+        let (root, src, dest) = scratch("times-tree");
+        fs::create_dir(src.join("sub")).unwrap();
+        fs::write(src.join("sub/payload"), b"content").unwrap();
+        let accessed = UNIX_EPOCH + Duration::from_secs(946684800);
+        let modified = accessed + Duration::from_secs(3600);
+        for name in ["sub/payload", "sub", ""] {
+            set_times(&src.join(name), accessed, modified);
+        }
+        let expected: Vec<_> = ["", "sub", "sub/payload"]
+            .into_iter()
+            .map(|name| {
+                let m = fs::metadata(src.join(name)).unwrap();
+                (name, m.accessed().unwrap(), m.modified().unwrap())
+            })
+            .collect();
+        let out = export(&mut host(&src), &dest, true);
+        assert_eq!(out.code, 0, "{:?}", out.report);
+        assert_eq!(count(out.report.as_ref().unwrap(), "completed"), 3);
+        for (name, a, m) in expected {
+            let actual = fs::metadata(dest.join(name)).unwrap();
+            assert_eq!(actual.accessed().unwrap(), a, "access time of {name}");
+            assert_eq!(actual.modified().unwrap(), m, "modification time of {name}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_exports_leave_times_to_the_host() {
+        let (root, _, dest) = scratch("times-default");
+        let old = UNIX_EPOCH + Duration::from_secs(946684800);
+        let out = export(&mut clock(Some(old)), &dest, false);
+        assert_eq!(out.code, 0);
+        for name in ["", "payload"] {
+            let m = fs::metadata(dest.join(name)).unwrap();
+            assert_ne!(m.modified().unwrap(), old);
+            assert_ne!(m.accessed().unwrap(), old);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pre_epoch_times_are_reported_for_each_item() {
+        let (root, _, dest) = scratch("times-negative");
+        let time = UNIX_EPOCH - Duration::from_secs(1);
+        let out = export(&mut clock(Some(time)), &dest, true);
+        let report = out.report.unwrap();
+        assert!(report.to_compact().contains("pre-epoch"), "{report:?}");
+        assert_eq!(count(&report, "completed") + count(&report, "failed"), 2);
+        if out.code == 0 {
+            for name in ["", "payload"] {
+                let m = fs::metadata(dest.join(name)).unwrap();
+                assert_eq!(m.modified().unwrap(), time);
+                assert_eq!(m.accessed().unwrap(), time);
+            }
+        }
+        assert!(dest.join("payload").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    pub(super) fn check_precision(root: &Path, dest: &Path) -> bool {
+        let time = UNIX_EPOCH + Duration::new(946684800, 1);
+        let probe = root.join("oracle");
+        fs::write(&probe, b"oracle").unwrap();
+        set_times(&probe, time, time);
+        let oracle = fs::metadata(&probe).unwrap();
+        let out = export(&mut clock(Some(time)), dest, true);
+        let report = out.report.unwrap();
+        let loses_precision =
+            oracle.modified().unwrap() != time || oracle.accessed().unwrap() != time;
+        assert_eq!(out.code, u8::from(loses_precision), "{report:?}");
+        assert_eq!(count(&report, "failed"), u64::from(loses_precision) * 2);
+        assert_eq!(
+            report.to_compact().contains("not preserved exactly"),
+            loses_precision,
+            "{report:?}"
+        );
+        for name in ["", "payload"] {
+            let actual = fs::metadata(dest.join(name)).unwrap();
+            assert_eq!(actual.modified().unwrap(), oracle.modified().unwrap());
+            assert_eq!(actual.accessed().unwrap(), oracle.accessed().unwrap());
+        }
+        loses_precision
+    }
+
+    #[test]
+    fn destination_precision_loss_is_reported_instead_of_silent_rounding() {
+        let (root, _, dest) = scratch("times-resolution");
+        check_precision(&root, &dest);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unavailable_source_times_are_reported_without_inventing_values() {
+        let (root, _, dest) = scratch("times-unavailable");
+        let out = export(&mut clock(None), &dest, true);
+        assert_eq!(out.code, 0);
+        let report = out.report.unwrap();
+        assert_eq!(
+            report
+                .to_compact()
+                .matches("source times unavailable")
+                .count(),
+            2
+        );
+        assert!(dest.join("payload").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
