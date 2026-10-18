@@ -525,6 +525,166 @@ fn evidence(entries: Vec<ManifestEntry>) -> ManifestRead {
 }
 
 #[test]
+fn export_resume_arguments_preserve_tree_and_metadata_options() {
+    use fs_core::cli::transfer::{self, ExportManifestOptions, ExportRequest, TreeOptions};
+    let matches = fs_core::cli::clap::Command::new("export")
+        .args(transfer::export_args_with_resume())
+        .try_get_matches_from([
+            "export",
+            "/tree",
+            "destination",
+            "--resume",
+            "--manifest",
+            "ledger.jsonl",
+            "--recursive",
+            "--max-depth",
+            "12",
+            "--verify",
+            "--replace",
+            "--preserve=times,links,sparse,xattrs",
+        ])
+        .unwrap();
+    let options = ExportManifestOptions::from_matches(&matches).unwrap();
+    assert_eq!(options.manifest, Some(PathBuf::from("ledger.jsonl")));
+    assert!(options.resume);
+    assert!(ExportRequest::from_matches(&matches).unwrap().replace);
+    let tree = TreeOptions::from_matches(&matches).unwrap();
+    assert!(tree.recursive && tree.verify);
+    assert_eq!(tree.max_depth, 12);
+    assert!(
+        transfer::LinkOptions::from_matches(&matches)
+            .unwrap()
+            .preserve_links
+    );
+    assert!(
+        transfer::TimeOptions::from_matches(&matches)
+            .unwrap()
+            .preserve_times
+    );
+    assert!(
+        transfer::SparseOptions::from_matches(&matches)
+            .unwrap()
+            .preserve_sparse
+    );
+    assert!(
+        transfer::XattrOptions::from_matches(&matches)
+            .unwrap()
+            .preserve_xattrs
+    );
+}
+
+#[test]
+fn export_resume_arguments_require_a_manifest_even_with_custom_parsers() {
+    use fs_core::cli::clap::{Arg, ArgAction};
+    use fs_core::cli::transfer::{self, ExportManifestOptions};
+    let error = fs_core::cli::clap::Command::new("export")
+        .args(transfer::export_args_with_resume())
+        .try_get_matches_from(["export", "/file", "destination", "--resume"])
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        fs_core::cli::clap::error::ErrorKind::MissingRequiredArgument
+    );
+    let matches = fs_core::cli::clap::Command::new("export")
+        .args(transfer::export_args())
+        .arg(Arg::new("resume").long("resume").action(ArgAction::SetTrue))
+        .try_get_matches_from(["export", "/file", "destination", "--resume"])
+        .unwrap();
+    let error = ExportManifestOptions::from_matches(&matches).unwrap_err();
+    assert_eq!(error.code, 2);
+    assert!(error.message.contains("--manifest"));
+}
+
+#[test]
+fn export_manifest_and_resume_arguments_refuse_stdout() {
+    use fs_core::cli::transfer::{self, ExportManifestOptions, ExportRequest};
+    for resume in [false, true] {
+        let mut args = vec!["export", "/file", "-", "--manifest", "ledger.jsonl"];
+        if resume {
+            args.push("--resume");
+        }
+        let matches = fs_core::cli::clap::Command::new("export")
+            .args(transfer::export_args_with_resume())
+            .try_get_matches_from(args)
+            .unwrap();
+        let error = ExportManifestOptions::from_matches(&matches).unwrap_err();
+        assert_eq!(error.code, 2);
+        assert!(error.message.contains("stdout"));
+        assert!(ExportRequest::from_matches(&matches).is_err());
+    }
+}
+
+#[test]
+fn export_manifest_arguments_accept_single_files_without_resume_or_verify() {
+    use fs_core::cli::transfer::{self, ExportManifestOptions, ExportOptions};
+    let matches = fs_core::cli::clap::Command::new("export")
+        .args(transfer::export_args_with_manifest())
+        .try_get_matches_from([
+            "export",
+            "/file",
+            "destination",
+            "--manifest",
+            "ledger.jsonl",
+        ])
+        .unwrap();
+    let options = ExportManifestOptions::from_matches(&matches).unwrap();
+    assert_eq!(options.manifest, Some(PathBuf::from("ledger.jsonl")));
+    assert!(!options.resume);
+    assert!(!ExportOptions::from_matches(&matches).unwrap().verify);
+    assert!(fs_core::cli::clap::Command::new("export")
+        .args(transfer::export_args_with_resume())
+        .try_get_matches_from(["export", "/file", "destination", "--manifest"])
+        .is_err());
+}
+
+#[test]
+fn export_manifest_options_default_for_all_legacy_argument_sets() {
+    use fs_core::cli::transfer::{self, ExportManifestOptions};
+    let commands = [
+        fs_core::cli::clap::Command::new("export").args(transfer::export_args()),
+        fs_core::cli::clap::Command::new("export").args(transfer::export_args_with_verify()),
+        fs_core::cli::clap::Command::new("export").args(transfer::export_args_with_tree()),
+        fs_core::cli::clap::Command::new("export").args(transfer::export_args_with_xattrs()),
+        fs_core::cli::clap::Command::new("export").args(transfer::export_args_with_resume()),
+    ];
+    for command in commands {
+        let matches = command
+            .try_get_matches_from(["export", "/file", "-"])
+            .unwrap();
+        assert_eq!(
+            ExportManifestOptions::from_matches(&matches).unwrap(),
+            ExportManifestOptions::default()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn export_manifest_arguments_keep_non_unicode_paths() {
+    use fs_core::cli::transfer::{self, ExportManifestOptions};
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let ledger = OsString::from_vec(b"ledger-\xff.jsonl".to_vec());
+    let matches = fs_core::cli::clap::Command::new("export")
+        .args(transfer::export_args_with_resume())
+        .try_get_matches_from([
+            OsString::from("export"),
+            OsString::from("/file"),
+            OsString::from("destination"),
+            OsString::from("--resume"),
+            OsString::from("--manifest"),
+            ledger.clone(),
+        ])
+        .unwrap();
+    assert_eq!(
+        ExportManifestOptions::from_matches(&matches)
+            .unwrap()
+            .manifest,
+        Some(PathBuf::from(ledger))
+    );
+}
+
+#[test]
 fn resume_redigests_unchanged_bytes_and_returns_the_earlier_time() {
     let recorded = entry();
     let mut source = std::io::Cursor::new(b"abc");
