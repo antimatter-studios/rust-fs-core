@@ -5,3 +5,5 @@ transfer_alias_edges 2
 # #275 adds seven advisory lock cases on every CI platform.
 # #311 adds a Unix fork-inheritance regression (8 Unix cases, 7 Windows).
 transfer_exclusive 7
+# #254 adds five portable tree cases and a Unix symlink refusal case.
+transfer_tree 5
