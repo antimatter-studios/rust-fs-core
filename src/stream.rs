@@ -9,14 +9,20 @@
 //! Generic over `T: BlockRead` so the parent can be owned, `Arc`-held, or
 //! borrowed:
 //!
-//! ```ignore
+//! ```
 //! use fs_core::{BlockReadStreamer, FileDevice};
-//! use std::io::Read;
 //!
-//! let dev = FileDevice::open("disk.img")?;
+//! # let image = std::env::temp_dir()
+//! #     .join(format!("fs-core-stream-doc-{}.img", std::process::id()));
+//! # std::fs::write(&image, b"disk image bytes")?;
+//! let dev = FileDevice::open(&image)?;
 //! let mut stream = BlockReadStreamer::new(dev);
-//! let mut hasher = sha2::Sha256::new();
-//! std::io::copy(&mut stream, &mut hasher)?;
+//! // Any `std::io::Write` works here: a hasher, a file, a socket.
+//! let mut copy = Vec::new();
+//! std::io::copy(&mut stream, &mut copy)?;
+//! assert_eq!(copy, b"disk image bytes");
+//! # std::fs::remove_file(&image)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! Short-read semantics match `std::io::Read`: a read past `size_bytes()`
