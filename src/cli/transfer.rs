@@ -778,6 +778,11 @@ fn export_recorded(
     } else {
         None
     };
+    if let (Some(ledger), Output::File(dest)) = (ledger.as_deref(), &request.output) {
+        if let Some(entry) = ledger.resume(source, Path::new(&request.path), dest)? {
+            return Ok(manifest::skipped(request, dest, entry));
+        }
+    }
     let options = CopyOptions::from(options);
     let cancellation = Cancellation::install()?;
     progress.set_totals(Some(source.size()), Some(1));

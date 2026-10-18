@@ -148,7 +148,83 @@ pub(in crate::cli::transfer) fn export_identity(
 pub(in crate::cli::transfer) struct ExportLedger {
     manifest: Manifest,
     pub failed: bool,
-    torn_tail: bool,
+    read: ManifestRead,
+    resume: bool,
+}
+
+/// Sequential reads of a driver source, for the resume digest.
+struct SourceReader<'a> {
+    source: &'a mut dyn transfer::FileSource,
+    offset: u64,
+    size: u64,
+}
+impl Read for SourceReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // An early end is a length mismatch, so the file is copied again.
+        let want = buf
+            .len()
+            .min(usize::try_from(self.size - self.offset).unwrap_or(usize::MAX));
+        if want == 0 {
+            return Ok(0);
+        }
+        let n = self
+            .source
+            .read_at(self.offset, &mut buf[..want])
+            .map_err(|e| io::Error::other(e.message))?;
+        if n > want {
+            return Err(io::Error::other(
+                "the source answered more bytes than asked",
+            ));
+        }
+        self.offset += n as u64;
+        Ok(n)
+    }
+}
+
+// Any unusable destination is copied again; the copy reports why it fails.
+fn destination_identity(dest: &Path) -> Result<Option<Identity>, CliError> {
+    match File::open(dest) {
+        Ok(file) if file.metadata().is_ok_and(|m| m.is_file()) => {
+            Ok(Some(Identity::Local(LocalIdentity::capture(dest, &file)?)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The report for a file skipped on earlier evidence. It is not a verification
+/// performed now, so `verified` stays false beside the original completion time.
+pub(in crate::cli::transfer) fn skipped(
+    request: &ExportRequest,
+    dest: &Path,
+    entry: &ManifestEntry,
+) -> Outcome {
+    let path = request.path.to_string_lossy();
+    let at = entry.completed_at;
+    let report = Json::object([
+        ("path", Json::from(path.as_ref())),
+        ("destination", Json::from(dest.display().to_string())),
+        ("bytes", Json::from(entry.bytes)),
+        ("sha256", Json::from(entry.sha256.as_str())),
+        ("replaced", Json::from(false)),
+        ("verified", Json::from(false)),
+        ("skipped", Json::from("verified earlier")),
+        (
+            "verified_earlier_at",
+            Json::object([
+                ("seconds", Json::from(at.seconds)),
+                ("nanoseconds", Json::from(i64::from(at.nanoseconds))),
+            ]),
+        ),
+    ]);
+    let text = format!(
+        "{path} to {}: skipped: verified earlier at {}.{:09} (not verified now; {} bytes, sha256 {})",
+        dest.display(),
+        at.seconds,
+        at.nanoseconds,
+        entry.bytes,
+        entry.sha256
+    );
+    Outcome::report(report).with_text(text)
 }
 impl ExportLedger {
     fn open(
@@ -157,9 +233,9 @@ impl ExportLedger {
         options: &ExportManifestOptions,
         tree: bool,
     ) -> Result<Option<Self>, CliError> {
-        if options.resume {
+        if options.resume && tree {
             return Err(CliError::usage(
-                "export resume execution is not supported by this recording adapter",
+                "export tree resume execution is not supported by this recording adapter",
             ));
         }
         let Some(path) = &options.manifest else {
@@ -177,13 +253,61 @@ impl ExportLedger {
         Ok(Some(Self {
             manifest,
             failed: false,
-            torn_tail: read.torn_tail,
+            read,
+            resume: options.resume,
         }))
     }
     fn report(&self, outcome: &mut Outcome) {
         if let Some(Json::Obj(fields)) = &mut outcome.report {
-            fields.push(("manifest_torn_tail".into(), Json::from(self.torn_tail)));
+            fields.push(("manifest_torn_tail".into(), Json::from(self.read.torn_tail)));
         }
+    }
+    /// With `--resume`, the evidence that lets a single-file export skip its copy.
+    /// The caller holds the image lock. Fresh identities of the opened endpoints
+    /// and a complete source digest must match the latest record, and both
+    /// endpoints must be unchanged after the digest. Anything else returns
+    /// `None`, and the export copies from byte zero under its usual policy.
+    pub fn resume(
+        &self,
+        source: &mut dyn transfer::FileSource,
+        path: &Path,
+        dest: &Path,
+    ) -> Result<Option<&ManifestEntry>, CliError> {
+        if !self.resume {
+            return Ok(None);
+        }
+        let capture = |source: &dyn transfer::FileSource| {
+            export_identity(source.manifest_identity()?, path, source.image_path())
+        };
+        let source_before = capture(source)?;
+        let Some(dest_before) = destination_identity(dest)? else {
+            return Ok(None);
+        };
+        let size = source.size();
+        let mut reader = SourceReader {
+            source: &mut *source,
+            offset: 0,
+            size,
+        };
+        let decision = self
+            .read
+            .check_resume(&source_before, &dest_before, &mut reader)?;
+        if decision == ResumeDecision::Copy {
+            return Ok(None);
+        }
+        // Revalidate both snapshots: a change during the digest restarts the copy.
+        let source_after = capture(source)?;
+        let unchanged = destination_identity(dest)?
+            .is_some_and(|dest_after| same_identity(&dest_before, &dest_after));
+        if !unchanged || !same_identity(&source_before, &source_after) {
+            return Ok(None);
+        }
+        Ok(self
+            .read
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| same_location(&entry.destination, &dest_before)))
     }
     pub fn record(
         &mut self,
@@ -208,8 +332,10 @@ impl ExportLedger {
 }
 
 /// Export with an optional ledger, opened safely before content reads or writes.
-/// Driver identity is required only for verified recording. Legacy request and
-/// option literals remain valid. Resume execution uses a separate adapter.
+/// Driver identity is required for verified recording and for resume. With
+/// resume, a file is skipped only on revalidated evidence of earlier
+/// verification; otherwise it is copied from byte zero. Legacy request and
+/// option literals remain valid.
 pub fn export_with_manifest(
     request: &ExportRequest,
     source: &mut dyn transfer::FileSource,
