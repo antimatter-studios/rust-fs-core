@@ -79,8 +79,9 @@ if [ -n "$targets" ]; then
     # cargo prints `Running tests/<name>.rs (...)` or `Running unittests
     # src/lib.rs (...)` before each binary, and libtest prints `test result:
     # ok. N passed` after it; pairing the two gives a count per target.
+    # Windows cargo uses backslashes even when invoked from Git Bash.
     counts="$(awk '
-        { gsub(/\033\[[0-9;]*[a-zA-Z]/, "") }
+        { gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); gsub(/\\/, "/") }
         /^[[:space:]]*Running unittests/ { target = "lib"; next }
         /^[[:space:]]*Running tests\// {
             target = $2; sub(/^tests\//, "", target); sub(/\.rs$/, "", target); next
@@ -91,6 +92,9 @@ if [ -n "$targets" ]; then
     bad=0
     checked=0
     while read -r target floor; do
+        # A Windows checkout ends each line in CRLF; `read` keeps the CR.
+        target="${target%$'\r'}"
+        floor="${floor%$'\r'}"
         case "$target" in ''|\#*) continue ;; esac
         case "$floor" in ''|*[!0-9]*)
             echo "test-floor.sh: $targets: '$target' has a non-numeric floor '${floor:-(none)}'" >&2
