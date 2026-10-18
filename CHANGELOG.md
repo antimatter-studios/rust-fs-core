@@ -12,6 +12,68 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.3.15] — 2026-10-18
+
+### Added
+
+- **Transfers stop cleanly on SIGINT and SIGTERM on Unix.** Chunk and publication checks remove the current staging file, retain completed destinations, and report completed, interrupted and pending items with status 130 or 143. Repeated signals preserve the first cancellation and cannot bypass cleanup; stdout content keeps its report on stderr. (#283)
+
+- **Transfers coordinate access to their backing image.** `ImageLock` gives
+  import callers an exclusive, non-blocking guard before they open a writable
+  driver or consume input. Exports with an image path hold a shared guard;
+  when another writer holds the image, they continue with a stderr warning
+  that exported bytes may be changing. Dropping the guard explicitly releases
+  the lock, including while a forked child retains an inherited descriptor. (#277)
+
+- **Exports can verify the synced staging file before publication.** The
+  additive `ExportOptions`, `export_args_with_verify`, `export_with_options`
+  and `export_file_with_options` APIs enable `--verify`: bounded read-back
+  must match the copied byte count and SHA-256 before the destination is
+  published. A mismatch reports both digests, removes staging and preserves
+  an existing destination. Verification of stdout is a usage error (exit 2),
+  and file reports claim `verified: true` only after successful read-back.
+  Existing export APIs and public struct fields remain compatible. (#273)
+
+- Transfers can refuse local paths that identify their backing image before
+  reading bytes or creating staging files. Drivers opt in through the
+  additive, defaulted `FileSource::image_path`; `refuse_image_alias` provides
+  the same preflight for import sources and every local path in a tree.
+  Hard links, symlink chains and Unix device numbers are checked regardless
+  of partition offset or `--replace`. Refusals name both paths with exit 1. (#274)
+
+- **Tree exports can preserve links.** The additive link-aware export API and
+  `--preserve=links` arguments copy each regular inode once and recreate symbolic
+  targets unchanged without following them. Targets escaping DEST are reported;
+  the default refuses symbolic links and reports separately copied hard links.
+  Repeated directory identities are refused as loops under either policy. (#280)
+
+- **Tree exports can preserve access and modification times.** Additive time
+  options and `--preserve=times` restore directories after their descendants
+  and verify results through host metadata. Rounded, clamped or rejected times
+  fail the affected item while preserving its published data; pre-epoch and
+  unavailable source times are reported. Times can be combined with link
+  preservation; symbolic link times are left unchanged and reported without
+  following targets. Existing entry points retain host timestamps. (#281)
+
+- **Transfers report progress only on stderr.** Existing export entry points
+  automatically rewrite one terminal line and remain silent when stderr is
+  piped. Additive progress arguments and entry points enable JSON completion
+  lines per regular file, with intermediate updates limited to one per second.
+  File and overall logical byte counts include known totals before copying;
+  tree totals come from metadata listings, and unavailable totals stay unknown.
+  Content on stdout and final reports remain unchanged. Link and timestamp
+  preservation retain their existing opt-in behavior. (#282)
+
+- **Directory trees can be exported through `TreeSource`.** The additive recursive export API copies each file through the existing staged transfer, refuses unsafe child names and destination symlinks, bounds depth to 64 by default, merges existing directories and reports every visited item with a nonzero status for any incomplete item. Existing files require `--replace`; verification and backing-image locks remain available. (#278)
+
+### Fixed
+
+- **Tree exports refuse destination name collisions.** Source names are probed on each destination directory's filesystem before its children are copied. The first listed name is kept; later case variants or other equivalent names are reported as `refused: collides with <name>`, even with `--replace`. Case-sensitive destinations retain distinct names, and refused directories are never traversed. (#279)
+
+- **Per-target floors read a CRLF floors file.** `test-floor.sh --targets`
+  strips the carriage return a Windows checkout leaves on each line, which it
+  had refused as a non-numeric floor. (#274)
+
 ## [0.3.14] — 2026-10-17
 
 ### Added
@@ -985,7 +1047,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.14...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.15...HEAD
+[0.3.15]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.14...v0.3.15
 [0.3.14]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.13...v0.3.14
 [0.3.13]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.12...v0.3.13
 [0.3.12]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.11...v0.3.12
