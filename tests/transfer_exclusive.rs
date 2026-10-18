@@ -36,21 +36,31 @@ fn dropped_guards_release_locks_while_a_forked_child_is_alive() {
     }
 }
 
-struct Scratch(PathBuf);
+// Keep loop attach/detach transitions out of unrelated guard assertions.
+// Each child process has its own mutex and never constructs Scratch.
+static HOST_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+struct Scratch {
+    root: PathBuf,
+    _host_state: std::sync::MutexGuard<'static, ()>,
+}
 impl Scratch {
     fn new(tag: &str) -> Self {
+        let host_state = HOST_STATE.lock().unwrap_or_else(|err| err.into_inner());
         let dir = std::env::temp_dir().join(format!("transfer-lock-{}-{tag}", std::process::id()));
         fs::create_dir(&dir).unwrap();
         fs::write(dir.join("image"), b"image bytes").unwrap();
-        Self(dir)
+        Self {
+            root: dir,
+            _host_state: host_state,
+        }
     }
     fn image(&self) -> PathBuf {
-        self.0.join("image")
+        self.root.join("image")
     }
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        fs::remove_dir_all(&self.root).unwrap();
     }
 }
 
@@ -85,7 +95,7 @@ fn another_process_refuses_import_before_reading_its_input() {
         .open(dir.image())
         .unwrap();
     held.lock().unwrap();
-    let input_path = dir.0.join("input");
+    let input_path = dir.root.join("input");
     fs::write(&input_path, b"producer bytes still unread").unwrap();
     let mut input = File::open(input_path).unwrap();
     let output = child(
@@ -211,7 +221,7 @@ fn export_holds_its_shared_lock_during_source_reads() {
 #[test]
 fn missing_images_fail_closed_before_export_reads() {
     let dir = Scratch::new("missing");
-    let image = dir.0.join("missing");
+    let image = dir.root.join("missing");
     assert_eq!(ImageLock::for_import(&image).unwrap_err().code, 1);
     let mut source = Source { image, reads: 0 };
     assert_eq!(
@@ -269,4 +279,101 @@ fn an_import_guard_allows_the_drivers_separate_handle_to_write() {
     drop(guard);
     target.try_lock().unwrap();
     drop(target);
+}
+
+#[cfg(target_os = "linux")]
+#[path = "support/mounted_loop.rs"]
+mod mounted_loop;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn host_mounted_images_and_devices_refuse_import_with_input_unread() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        match ImageLock::for_import(Path::new(&image)) {
+            Err(err) => {
+                eprintln!("{}", err.message);
+                std::process::exit(i32::from(err.code));
+            }
+            Ok(_guard) => {
+                std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+                std::process::exit(0);
+            }
+        }
+    }
+    let dir = Scratch::new("mounted-import");
+    let mut volume = mounted_loop::Volume::new(&dir.root, &dir.image(), true);
+    let alias = dir.root.join("image alias");
+    fs::hard_link(dir.image(), &alias).unwrap();
+    for readonly in [false, true] {
+        volume.remount(readonly);
+        for image in [&dir.image(), &volume.device, &alias] {
+            let input_path = dir.root.join("input");
+            fs::write(&input_path, b"producer bytes still unread").unwrap();
+            let mut input = File::open(input_path).unwrap();
+            let output = child(
+                "host_mounted_images_and_devices_refuse_import_with_input_unread",
+                image,
+            )
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("mounted"));
+            assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
+        }
+    }
+    volume.unmount();
+    drop(ImageLock::for_import(&dir.image()).unwrap());
+    drop(ImageLock::for_import(&volume.device).unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn host_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        let mut source = Source {
+            image: image.into(),
+            reads: 0,
+        };
+        let mut bytes = Vec::new();
+        transfer::export_file(&mut source, Destination::Writer(&mut bytes)).unwrap();
+        assert_eq!(bytes, b"abc");
+        return;
+    }
+    let dir = Scratch::new("mounted-export");
+    let mut volume = mounted_loop::Volume::new(&dir.root, &dir.image(), false);
+    for readonly in [false, true] {
+        volume.remount(readonly);
+        for image in [&dir.image(), &volume.device] {
+            let output = child(
+                "host_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not",
+                image,
+            )
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(stderr.contains("mounted read-write"), !readonly, "{stderr}");
+            assert_eq!(stderr.contains("may be changing"), !readonly, "{stderr}");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_host_mount_probes_refuse_import_with_input_unread() {
+    let dir = Scratch::new("probe-failure");
+    let input_path = dir.root.join("input");
+    fs::write(&input_path, b"producer bytes still unread").unwrap();
+    let mut input = File::open(input_path).unwrap();
+    let output = child(
+        "host_mounted_images_and_devices_refuse_import_with_input_unread",
+        Path::new("/dev/zero"),
+    )
+    .stdin(Stdio::from(input.try_clone().unwrap()))
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot determine host mount state"));
+    assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
 }

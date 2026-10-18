@@ -7,13 +7,19 @@ use std::path::Path;
 
 use super::super::output::CliError;
 
+#[cfg(target_os = "linux")]
+#[path = "transfer_mount_linux.rs"]
+mod host_mount;
+
 /// A non-blocking lock on the backing image or device, independent of its
 /// partition offset. Keep the guard alive through the entire transfer.
 ///
 /// Imports take an exclusive lock; exports try a shared lock and warn when
 /// a writer already holds it. These are cooperative locks: they cannot stop
 /// a program that ignores the locking protocol, or prevent path replacement.
-/// Host mount-state checks are separate from advisory lock ownership.
+/// Linux also checks the current mount namespace, including loop-backed
+/// images and mounted partitions. This is a preflight snapshot, not a lock
+/// against subsequent mounts or mounts hidden in another namespace.
 #[derive(Debug)]
 #[must_use = "dropping the guard releases the image lock"]
 pub struct ImageLock {
@@ -36,6 +42,9 @@ impl ImageLock {
     /// read-only handle and never creates or truncates an image.
     ///
     /// Contention and unsupported or failed lock operations have exit code 1.
+    /// Linux mount probes also fail closed with exit code 1, including when
+    /// another loop's backing identity is unreadable or a Btrfs/ZFS mount
+    /// prevents reliable device membership resolution.
     pub fn for_import(image: &Path) -> Result<Self, CliError> {
         let file = open(image)?;
         lock(&file, true).map_err(|err| {
@@ -44,7 +53,15 @@ impl ImageLock {
                 image.display()
             ))
         })?;
-        Ok(Self { _file: file })
+        let guard = Self { _file: file };
+        #[cfg(target_os = "linux")]
+        if host_mount::state(image)?.mounted {
+            return Err(CliError::failed(format!(
+                "cannot import into host-mounted image {}",
+                image.display()
+            )));
+        }
+        Ok(guard)
     }
 
     /// Try to hold a shared image lock for an export. A competing exclusive
@@ -53,6 +70,15 @@ impl ImageLock {
     /// deliver the warning, return exit code 1 before any source read.
     pub fn for_export(image: &Path, warnings: &mut dyn Write) -> Result<Option<Self>, CliError> {
         let file = open(image)?;
+        #[cfg(target_os = "linux")]
+        if host_mount::state(image)?.read_write {
+            writeln!(
+                warnings,
+                "warning: image {} is mounted read-write; exported bytes may be changing",
+                image.display()
+            )
+            .map_err(|err| CliError::failed(format!("cannot report image mount warning: {err}")))?;
+        }
         match lock(&file, false) {
             Ok(()) => Ok(Some(Self { _file: file })),
             Err(TryLockError::WouldBlock) => {
