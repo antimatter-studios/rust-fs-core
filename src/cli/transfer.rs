@@ -63,6 +63,7 @@ pub use xattrs::{
 #[path = "transfer_manifest.rs"]
 pub mod manifest;
 pub use manifest::{export_args_with_manifest, export_args_with_resume, ExportManifestOptions};
+pub use manifest::{export_tree_with_manifest, export_with_manifest};
 
 #[path = "transfer_lock.rs"]
 mod image_lock;
@@ -107,6 +108,12 @@ pub const CHUNK: usize = 1 << 20;
 
 /// A file a driver can read at a position: what `export` copies from.
 pub trait FileSource {
+    /// Identity captured by the driver from the opened image and filesystem.
+    /// Required only by verified exports with a manifest; legacy sources refuse.
+    fn manifest_identity(&self) -> Result<manifest::Identity, CliError> {
+        Err(CliError::refused("export manifest identity unavailable"))
+    }
+
     /// The backing image or device, before applying any partition offset.
     /// Supply this to protect file exports against image aliases. Existing
     /// sources default to no identity; drivers should override this when
@@ -752,6 +759,25 @@ pub fn export_with_progress(
     options: ExportOptions,
     progress: &mut Progress<'_>,
 ) -> Result<Outcome, CliError> {
+    export_recorded(request, source, options, progress, None)
+}
+
+fn export_recorded(
+    request: &ExportRequest,
+    source: &mut dyn FileSource,
+    options: ExportOptions,
+    progress: &mut Progress<'_>,
+    mut ledger: Option<&mut manifest::ExportLedger>,
+) -> Result<Outcome, CliError> {
+    let identity = if ledger.is_some() && options.verify {
+        Some(manifest::export_identity(
+            source.manifest_identity()?,
+            Path::new(&request.path),
+            source.image_path(),
+        )?)
+    } else {
+        None
+    };
     let options = CopyOptions::from(options);
     let cancellation = Cancellation::install()?;
     progress.set_totals(Some(source.size()), Some(1));
@@ -802,6 +828,9 @@ pub fn export_with_progress(
         }
         Err(error) => return Err(error),
     };
+    if let (Some(ledger), Some(identity)) = (ledger.as_mut(), identity) {
+        ledger.record(identity, dest, &copied)?;
+    }
     let path = request.path.to_string_lossy();
     let report = Json::object([
         ("path", Json::from(path.as_ref())),

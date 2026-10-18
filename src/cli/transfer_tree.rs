@@ -39,6 +39,12 @@ pub struct TreeEntry {
 }
 /// A driver's directory listing, metadata and positioned file reads.
 pub trait TreeSource {
+    /// Identity of this file captured from the opened image and filesystem.
+    /// Required only for verified manifest recording; legacy sources refuse.
+    fn manifest_identity(&mut self, _path: &Path) -> Result<manifest::Identity, CliError> {
+        Err(CliError::refused("export manifest identity unavailable"))
+    }
+
     /// Read opaque extended attributes without following symbolic links.
     /// Override with an empty vector when supported but no attributes exist.
     /// The default refuses preservation rather than silently losing metadata.
@@ -537,6 +543,25 @@ pub fn export_tree_with_xattrs_and_progress(
     xattrs: XattrOptions,
     progress: &mut Progress<'_>,
 ) -> Result<Outcome, CliError> {
+    export_tree_recorded(
+        request,
+        source,
+        options,
+        (links, times, xattrs),
+        progress,
+        None,
+    )
+}
+
+pub(super) fn export_tree_recorded(
+    request: &ExportRequest,
+    source: &mut dyn TreeSource,
+    options: TreeOptions,
+    policies: (LinkOptions, TimeOptions, XattrOptions),
+    progress: &mut Progress<'_>,
+    mut ledger: Option<&mut manifest::ExportLedger>,
+) -> Result<Outcome, CliError> {
+    let (links, times, xattrs) = policies;
     let cancellation = Cancellation::install()?;
     let Output::File(dest) = &request.output else {
         return Err(CliError::usage("tree export needs a local DEST"));
@@ -564,7 +589,7 @@ pub fn export_tree_with_xattrs_and_progress(
     }
     let mut pending = vec![(root, dest.clone(), metadata, 0usize)];
     let mut directories = HashSet::new();
-    let mut files: HashMap<u64, (PathBuf, Json)> = HashMap::new();
+    let mut files: HashMap<u64, (PathBuf, Copied)> = HashMap::new();
     let mut items = Vec::new();
     let mut counts = [0u64; 5];
     let mut cancel_code = 0;
@@ -578,6 +603,8 @@ pub fn export_tree_with_xattrs_and_progress(
         }
         let mut reason = String::new();
         let mut evidence = Json::Null;
+        let mut identity = None;
+        let mut completion = None;
         let result = (|| -> Result<usize, CliError> {
             cancellation.check(0, metadata.size)?;
             if depth > options.max_depth {
@@ -635,6 +662,13 @@ pub fn export_tree_with_xattrs_and_progress(
                     return Ok(1);
                 }
                 TreeKind::File => {
+                    if ledger.is_some() && options.verify {
+                        identity = Some(manifest::export_identity(
+                            source.manifest_identity(&path)?,
+                            &path,
+                            source.image_path(),
+                        )?);
+                    }
                     if existing
                         .as_ref()
                         .is_some_and(|m| m.is_dir() || !request.replace)
@@ -647,7 +681,11 @@ pub fn export_tree_with_xattrs_and_progress(
                         if links.preserve_links {
                             cancellation.check(0, metadata.size)?;
                             publish_link(&local, request.replace, |p| fs::hard_link(first, p))?;
-                            evidence = copied.clone();
+                            evidence = Json::object([
+                                ("bytes", Json::from(copied.bytes)),
+                                ("sha256", Json::from(copied.sha256_hex())),
+                            ]);
+                            completion = Some(copied.clone());
                             reason = "hard link preserved".into();
                             progress.advance(metadata.size);
                             return Ok(0);
@@ -677,7 +715,8 @@ pub fn export_tree_with_xattrs_and_progress(
                     ]);
                     files
                         .entry(metadata.inode)
-                        .or_insert_with(|| (local.clone(), evidence.clone()));
+                        .or_insert_with(|| (local.clone(), copied.clone()));
+                    completion = Some(copied);
                 }
                 TreeKind::Directory => {
                     if !directories.insert(metadata.inode) {
@@ -752,8 +791,17 @@ pub fn export_tree_with_xattrs_and_progress(
             if status == 0 && times.preserve_times && metadata.kind == TreeKind::File {
                 append_reason(&mut reason, &preserve_times(&local, &metadata)?);
             }
+            if let (Some(ledger), Some(identity), Some(copied)) =
+                (ledger.as_mut(), identity, completion)
+            {
+                // A ledger error aborts traversal: later copies cannot outrun evidence.
+                ledger.record(identity, &local, &copied)?;
+            }
             Ok(status)
         });
+        if ledger.as_ref().is_some_and(|ledger| ledger.failed) {
+            return Err(result.expect_err("a failed append stops the transfer"));
+        }
         let status = match result {
             Ok(s) => s,
             Err(e) => {
