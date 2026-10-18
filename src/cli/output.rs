@@ -18,6 +18,12 @@ pub const EXIT_USAGE: u8 = 2;
 /// Exit status: the verb exists, and this driver cannot do it — not
 /// implemented yet, or the format is read-only.
 pub const EXIT_UNSUPPORTED: u8 = 3;
+/// Exit status: the operation completed and its output is usable, but
+/// some data could not be recovered; the report says which. Not 0, which
+/// a script takes as safe to discard the source, and not 1, because the
+/// output is there to use. 4 is left for a request the volume's current
+/// state refused.
+pub const EXIT_PARTIAL: u8 = 5;
 
 /// A JSON value, with object keys kept in the order they were added so
 /// the output reads the way the code builds it.
@@ -437,6 +443,24 @@ pub fn finish(program: &str, format: Format, result: Result<Outcome, CliError>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_partial_result_has_its_own_exit_status() {
+        // The contract's table: 0 done, 1 failed, 2 usage, 3 unsupported,
+        // 4 refused by the volume's current state, 5 partial. A script
+        // reads the number, so it is pinned, and no other row may share it.
+        assert_eq!(EXIT_PARTIAL, 5);
+        let refused_by_state = 4;
+        for other in [
+            0,
+            EXIT_FAILED,
+            EXIT_USAGE,
+            EXIT_UNSUPPORTED,
+            refused_by_state,
+        ] {
+            assert_ne!(EXIT_PARTIAL, other);
+        }
+    }
 
     #[test]
     fn strings_are_escaped_and_control_characters_survive() {
