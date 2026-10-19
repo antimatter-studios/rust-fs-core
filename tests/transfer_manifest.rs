@@ -2635,7 +2635,7 @@ fn tree_import_resume_skips_only_unchanged_verified_files() {
     let skipped = items
         .iter()
         .find(|item| has_destination(item, "/image/tree/file"))
-        .unwrap();
+        .unwrap_or_else(|| panic!("/image/tree/file: {items:?}"));
     let (_, read) = Manifest::open(&ledger).unwrap();
     let earlier = read
         .entries
