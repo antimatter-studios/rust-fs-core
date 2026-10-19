@@ -497,19 +497,20 @@ fn macos_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not() {
         // The mounted raw device is held exclusively by DiskImages, so it
         // cannot be opened for export. The image path remains readable and
         // exercises the mount warning without racing that host lock.
-        for image in [&volume.image] {
-            let output = child(
-                "macos_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not",
-                image,
-            )
-            .output()
-            .unwrap();
-            assert!(output.status.success(), "{output:?}");
-            let stderr = String::from_utf8(output.stderr).unwrap();
-            // DiskImages may hold its own lock on an attached image, which
-            // warns separately; only the mount warning tracks the mount mode.
-            assert_eq!(stderr.contains("mounted read-write"), !readonly, "{stderr}");
-        }
+        // The mounted raw device is held exclusively by DiskImages, so it
+        // cannot be opened for export. The image path remains readable and
+        // exercises the mount warning without racing that host lock.
+        let output = child(
+            "macos_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not",
+            &volume.image,
+        )
+        .output()
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        // DiskImages may hold its own lock on an attached image, which
+        // warns separately; only the mount warning tracks the mount mode.
+        assert_eq!(stderr.contains("mounted read-write"), !readonly, "{stderr}");
     }
 }
 

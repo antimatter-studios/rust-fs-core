@@ -190,6 +190,7 @@ mod probe {
     const ERROR_MORE_DATA: i32 = 234;
     const ERROR_VIRTDISK_NOT_VIRTUAL_DISK: u32 = 0xC03A_0015;
     const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const GET_STORAGE_DEPENDENCY_FLAG_HOST_VOLUMES: u32 = 0x0000_0001;
     // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
     const SHARE_ALL: u32 = 7;
     const FILE_READ_ONLY_VOLUME: u32 = 0x0008_0000;
@@ -531,7 +532,7 @@ mod probe {
             let status = unsafe {
                 GetStorageDependencyInformation(
                     device.as_raw_handle(),
-                    0,
+                    GET_STORAGE_DEPENDENCY_FLAG_HOST_VOLUMES,
                     size,
                     buffer.as_mut_ptr().cast(),
                     &mut used,
