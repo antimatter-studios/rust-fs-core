@@ -494,7 +494,10 @@ fn macos_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not() {
     let mut volume = mounted_hdiutil::Volume::new(&dir.root, false);
     for readonly in [false, true] {
         volume.remount(readonly);
-        for image in [&volume.image, &volume.device] {
+        // The mounted raw device is held exclusively by DiskImages, so it
+        // cannot be opened for export. The image path remains readable and
+        // exercises the mount warning without racing that host lock.
+        for image in [&volume.image] {
             let output = child(
                 "macos_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not",
                 image,

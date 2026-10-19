@@ -62,6 +62,7 @@ impl Volume {
                  attach vdisk\n\
                  create partition primary\n\
                  format fs=ntfs quick label=transfer\n\
+                 assign\n\
                  detach vdisk\n"
             ),
         )
