@@ -15,9 +15,9 @@
 # running last month's rules.
 set -euo pipefail
 
-EXPECTED_SHA256="1d6c04c827b22c2836e4b9d3977fda083f1ec322d8408a6b2ae5bf72de42b3e5"
-BEGIN='<!-- BEGIN SHARED BLOCK: agent-core v7'
-END='<!-- END SHARED BLOCK: agent-core v7 -->'
+EXPECTED_SHA256="1f9d7d85f68196088ee36428968ea4c365c6f99d41b908fd8d2e848a97e5b570"
+BEGIN='<!-- BEGIN SHARED BLOCK: agent-core v8'
+END='<!-- END SHARED BLOCK: agent-core v8 -->'
 
 ROOT="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 FILE="$ROOT/AGENTS.md"
@@ -49,4 +49,4 @@ fi
 declared="$(grep -oE 'sha256:[0-9a-f]{64}' "$FILE" | head -1 | cut -d: -f2)"
 [ "$declared" = "$EXPECTED_SHA256" ] || die "the BEGIN marker declares sha256:$declared but the canonical digest is $EXPECTED_SHA256"
 
-echo "agents-core-check: AGENTS.md carries agent-core v7, unmodified"
+echo "agents-core-check: AGENTS.md carries agent-core v8, unmodified"

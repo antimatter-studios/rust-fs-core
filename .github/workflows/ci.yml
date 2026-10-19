@@ -7,10 +7,11 @@ on:
   # decides whether they land. The queue reads ci-ok only from a workflow
   # that triggers here.
   merge_group:
-  # By hand, on any branch: a pull request's test-only commit is pushed to
-  # red/<branch> and CI dispatched there, so the run records the new tests
-  # failing without the fix (#306). A dispatch has no range to diff, so the
-  # changes job answers true and it is the full pipeline.
+  # By hand, on any branch: a full-pipeline run of a ref no pull request
+  # covers. A dispatch has no range to diff, so the changes job answers true
+  # and it is the full pipeline. A pull request's red evidence is not made
+  # this way: it is the pull request's own run while its title starts "red:"
+  # (agent-core v8).
   # tests/scripts/test-ci-dispatch.sh fails if either stops being so.
   workflow_dispatch:
 env:

@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # ci.yml can be started by hand on any branch, and a run started that way is
-# the full pipeline. A pull request's test-only commit is pushed to its own
-# red/<branch> ref and CI is dispatched there, so the run can show the new
-# tests failing without the fix (#306). Without `workflow_dispatch` that
-# dispatch is refused; with it but with the `changes` job answering `false`,
-# or a job gated on the event, the run is green for having tested nothing --
-# which reads exactly like the red it was meant to record never happening.
+# the full pipeline. Without `workflow_dispatch` that run is refused; with it
+# but with the `changes` job answering `false`, or a job gated on the event,
+# the run is green for having tested nothing -- which reads exactly like a
+# full pipeline that passed.
 #
 #   bash tests/scripts/test-ci-dispatch.sh
 set -uo pipefail
@@ -56,7 +54,7 @@ else
     : > "$out"
     (
         cd "$sandbox" &&
-            EVENT=workflow_dispatch REF=refs/heads/red/some-branch \
+            EVENT=workflow_dispatch REF=refs/heads/some-branch \
             PR_BASE='' PR_HEAD='' MQ_BASE='' MQ_HEAD='' PUSH_BEFORE='' PUSH_AFTER='' \
             GITHUB_OUTPUT="$out" bash -c "$classify"
     ) > "$sandbox/log" 2>&1
