@@ -12,6 +12,12 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.3.17] — 2026-10-19
+
+### Added
+
+- Linux transfers inspect host mount state for image files and block devices, including mounted partitions and device-mapper holders. Imports refuse mounted targets before consuming input; exports warn on read-write mounts. Unreadable mount or loop backing state fails closed. Block targets and associated images also fail closed when Btrfs or ZFS multi-device mounts prevent reliable membership resolution. (#320)
+
 ## [0.3.16] — 2026-10-19
 
 ### Added
@@ -1081,7 +1087,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.16...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.17...HEAD
+[0.3.17]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.16...v0.3.17
 [0.3.16]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.15...v0.3.16
 [0.3.15]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.14...v0.3.15
 [0.3.14]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.13...v0.3.14

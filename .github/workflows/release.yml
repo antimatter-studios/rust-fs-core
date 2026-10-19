@@ -63,7 +63,7 @@ jobs:
       # that combination.
       - name: test (release, quiet and budgeted)
         run: |
-          bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli
+          bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli -- --quiet
           bash scripts/core.sh test-floor release 348
       - name: keep the full test transcripts
         if: always()
