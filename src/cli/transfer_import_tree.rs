@@ -97,10 +97,10 @@ pub fn import_args_with_tree() -> [Arg; 6] {
             .help("Maximum entry depth below SOURCE (root is zero)"),
         Arg::new("preserve")
             .long("preserve")
-            .value_parser(["links", "times"])
+            .value_parser(["links", "times", "sparse"])
             .value_delimiter(',')
             .action(ArgAction::Append)
-            .help("Preserve links and/or times; a sink lacking one refuses each affected item"),
+            .help("Preserve links, times and/or sparse holes; a sink lacking one refuses each affected item"),
     ]
 }
 
