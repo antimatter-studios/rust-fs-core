@@ -1,7 +1,10 @@
 [package]
 name = "rust-fs-core"
-version = "0.3.15"
+version = "0.3.16"
 edition = "2021"
+# The oldest toolchain the crate builds on with every feature on: the `cli`
+# feature's transfer locks use `File::try_lock`, stable since 1.89.0 (#379).
+rust-version = "1.89"
 license = "MIT"
 description = "Pure-Rust block-device framework — BlockRead/BlockDevice traits + FileDevice + CallbackDevice + LRU cache. Foundation crate for the rust-fs-* drivers and rust-img-* containers."
 repository = "https://github.com/antimatter-studios/rust-fs-core"
