@@ -2,3 +2,5 @@
 # The import probe-failure case raises this to eleven; no mount tools may skip.
 # #375's two-device Btrfs oracle raises this to twelve.
 transfer_exclusive 12
+# #354 adds the two Linux named-stream import cases to the 21 Linux xattr cases.
+transfer_xattr 23
