@@ -2621,7 +2621,7 @@ fn tree_import_resume_skips_only_unchanged_verified_files() {
         let item = items
             .iter()
             .find(|item| has_destination(item, name))
-            .unwrap_or_else(|| panic!("{name}"));
+            .unwrap_or_else(|| panic!("{name}: {items:?}"));
         item.get("status").cloned().unwrap()
     };
     assert_eq!(status("/image/tree/file"), Json::from("skipped"));
