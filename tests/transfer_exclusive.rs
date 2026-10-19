@@ -603,7 +603,9 @@ fn windows_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not()
     let mut volume = mounted_vdisk::Volume::new(&dir.root);
     for readonly in [false, true] {
         volume.reattach(readonly);
-        for image in [&volume.image, &volume.drive, &volume.volume] {
+        // Windows cannot acquire a file lock on the raw physical-disk path;
+        // the import oracle above still verifies mount detection there.
+        for image in [&volume.image, &volume.volume] {
             let output = child(
                 "windows_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not",
                 image,
