@@ -1,6 +1,7 @@
 //! Local tree imports; the driver owns name equivalence and directory creation.
 use super::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 
 /// Additive directory capability over the existing single-file staging API.
 pub trait TreeSink: FileSink {
@@ -13,14 +14,35 @@ pub trait TreeSink: FileSink {
     /// Create a directory, or merge an exact existing directory and return true.
     /// Refuse files, symbolic links and aliases; never replace them to make room.
     fn create_dir(&mut self, path: &Path) -> Result<bool, CliError>;
+    /// The destination format named when an optional capability is refused.
+    fn format_name(&self) -> &str {
+        "this sink"
+    }
     /// Preserve a symbolic link without following its opaque target. Drivers
     /// lacking this capability refuse it even when preservation is requested.
     /// Never overwrite an existing name; creation must be atomic and exclusive.
     fn create_symbolic_link(&mut self, _path: &Path, _target: &Path) -> Result<(), CliError> {
-        Err(CliError::refused(
-            "this sink cannot preserve symbolic links",
-        ))
+        Err(unsupported(self.format_name(), "symbolic links"))
     }
+    /// Add `path` as another name for the already published file `existing`.
+    /// Never overwrite an existing name; drivers lacking hard links refuse.
+    fn create_hard_link(&mut self, _path: &Path, _existing: &Path) -> Result<(), CliError> {
+        Err(unsupported(self.format_name(), "hard links"))
+    }
+    /// Set the access and modification times of a published item; `None`
+    /// leaves that time unchanged. Drivers lacking settable times refuse.
+    fn set_times(
+        &mut self,
+        _path: &Path,
+        _accessed: Option<SystemTime>,
+        _modified: Option<SystemTime>,
+    ) -> Result<(), CliError> {
+        Err(unsupported(self.format_name(), "times"))
+    }
+}
+
+fn unsupported(format: &str, capability: &str) -> CliError {
+    CliError::refused(format!("{capability} not supported by {format}"))
 }
 
 /// Recursive import options kept separate from existing request literals.
@@ -30,8 +52,11 @@ pub struct ImportTreeOptions {
     pub recursive: bool,
     /// Maximum depth below the root, which is depth zero.
     pub max_depth: usize,
-    /// Recreate symbolic links rather than follow their targets.
+    /// Recreate symbolic links rather than follow their targets, and repeat
+    /// names of one source file as hard links rather than copies.
     pub preserve_links: bool,
+    /// Set access and modification times, directories after their children.
+    pub preserve_times: bool,
 }
 impl Default for ImportTreeOptions {
     fn default() -> Self {
@@ -39,6 +64,7 @@ impl Default for ImportTreeOptions {
             recursive: false,
             max_depth: 64,
             preserve_links: false,
+            preserve_times: false,
         }
     }
 }
@@ -49,10 +75,11 @@ impl ImportTreeOptions {
             recursive: m.get_flag("recursive"),
             max_depth: *m.get_one::<usize>("max-depth").expect("clap default"),
             preserve_links: LinkOptions::from_matches(m)?.preserve_links,
+            preserve_times: TimeOptions::from_matches(m)?.preserve_times,
         })
     }
 }
-/// Import arguments with recursion, depth bounds and symbolic link preservation.
+/// Import arguments with recursion, depth bounds, and link and time preservation.
 pub fn import_args_with_tree() -> [Arg; 6] {
     let [source, path, replace] = import_args();
     [
@@ -70,8 +97,10 @@ pub fn import_args_with_tree() -> [Arg; 6] {
             .help("Maximum entry depth below SOURCE (root is zero)"),
         Arg::new("preserve")
             .long("preserve")
-            .value_parser(["links"])
-            .help("Preserve symbolic links without following their targets"),
+            .value_parser(["links", "times"])
+            .value_delimiter(',')
+            .action(ArgAction::Append)
+            .help("Preserve links and/or times; a sink lacking one refuses each affected item"),
     ]
 }
 
@@ -82,6 +111,9 @@ pub fn import_args_with_tree() -> [Arg; 6] {
 /// uses the single-file bounded transaction and source-identity checks; this is
 /// not a snapshot of the tree. Callers must exclude concurrent tree mutation.
 /// The sink holds one exclusive backing-image lock for the entire traversal.
+/// Preserved times and links use optional sink capabilities; a sink lacking
+/// one refuses each affected item by name rather than dropping the metadata.
+/// Directory times are set after the traversal, deepest first.
 pub fn import_tree(
     request: &ImportRequest,
     sink: Option<&mut dyn TreeSink>,
@@ -109,6 +141,8 @@ pub fn import_tree(
     let mut merged = 0u64;
     let mut cancel_code = 0;
     let mut in_flight = Json::Null;
+    let mut linked: HashMap<(u64, u64), PathBuf> = HashMap::new();
+    let mut directory_times = Vec::new();
     while let Some((local, dest, depth, checked)) = pending.pop() {
         let mut copy = Json::Null;
         let result = (|| -> Result<(), CliError> {
@@ -131,7 +165,12 @@ pub fn import_tree(
                     return Err(CliError::refused("symbolic link requires --preserve=links"));
                 }
                 let target = fs::read_link(&local).map_err(|e| CliError::failed(e.to_string()))?;
-                return sink.create_symbolic_link(&dest, &target);
+                sink.create_symbolic_link(&dest, &target)?;
+                return set_times(sink, &dest, &m, options);
+            }
+            let inode = file_identity(&m).filter(|_| options.preserve_links && m.is_file());
+            if let Some(existing) = inode.and_then(|id| linked.get(&id)) {
+                return sink.create_hard_link(&dest, existing);
             }
             if m.is_file() {
                 let copied =
@@ -142,9 +181,16 @@ pub fn import_tree(
                     ("created", Json::from(!copied.replaced)),
                     ("replaced", Json::from(copied.replaced)),
                 ]);
+                if let Some(id) = inode {
+                    linked.insert(id, dest.clone());
+                }
+                set_times(sink, &dest, &m, options)?;
             } else if m.is_dir() {
                 if sink.create_dir(&dest)? {
                     merged += 1;
+                }
+                if options.preserve_times {
+                    directory_times.push((items.len(), m.clone()));
                 }
                 let entries = fs::read_dir(&local)
                     .map_err(|e| CliError::failed(e.to_string()))?
@@ -209,6 +255,39 @@ pub fn import_tree(
             break;
         }
     }
+    for (index, m) in directory_times.into_iter().rev() {
+        if cancel_code != 0 {
+            break;
+        }
+        let Some(Json::Obj(fields)) = items.get_mut(index) else {
+            continue;
+        };
+        let field = |fields: &[(String, Json)], key: &str| {
+            fields
+                .iter()
+                .position(|(k, _)| k == key)
+                .expect("item field")
+        };
+        if !matches!(&fields[field(fields, "status")].1, Json::Str(s) if s == "completed") {
+            continue;
+        }
+        let Json::Str(dest) = &fields[field(fields, "destination")].1 else {
+            continue;
+        };
+        if let Err(e) = set_times(sink, Path::new(dest), &m, options) {
+            let status = if e.code == super::super::output::EXIT_UNSUPPORTED {
+                2
+            } else {
+                3
+            };
+            counts[0] -= 1;
+            counts[status] += 1;
+            let at = field(fields, "status");
+            fields[at].1 = Json::from(["refused", "failed"][status - 2]);
+            let at = field(fields, "reason");
+            fields[at].1 = Json::from(e.message);
+        }
+    }
     Ok(Outcome::report(Json::object([
         ("completed", Json::from(counts[0])),
         ("skipped", Json::from(counts[1])),
@@ -250,4 +329,32 @@ pub fn import_tree(
     } else {
         u8::from(counts[1..].iter().any(|n| *n != 0))
     }))
+}
+
+/// Apply the source's access and modification times when they are preserved.
+fn set_times(
+    sink: &mut dyn TreeSink,
+    dest: &Path,
+    metadata: &fs::Metadata,
+    options: ImportTreeOptions,
+) -> Result<(), CliError> {
+    if !options.preserve_times {
+        return Ok(());
+    }
+    sink.set_times(dest, metadata.accessed().ok(), metadata.modified().ok())
+}
+
+/// The host identity shared by every hard link to one file, where the host
+/// exposes it; elsewhere each name is imported as an independent copy.
+fn file_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.nlink() > 1).then(|| (metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
 }
