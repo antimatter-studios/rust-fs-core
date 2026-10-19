@@ -39,6 +39,14 @@ pub struct TreeEntry {
 }
 /// A driver's directory listing, metadata and positioned file reads.
 pub trait TreeSource {
+    /// Read opaque extended attributes without following symbolic links.
+    /// Override with an empty vector when supported but no attributes exist.
+    /// The default refuses preservation rather than silently losing metadata.
+    fn extended_attributes(&mut self, _path: &Path) -> Result<Vec<ExtendedAttribute>, CliError> {
+        Err(CliError::refused(
+            "extended attributes not supported by this source",
+        ))
+    }
     /// Backing image identity; supplying it enables alias refusal and image locks.
     fn image_path(&self) -> Option<&Path> {
         None
@@ -506,6 +514,29 @@ pub fn export_tree_with_progress(
     times: TimeOptions,
     progress: &mut Progress<'_>,
 ) -> Result<Outcome, CliError> {
+    export_tree_with_xattrs_and_progress(
+        request,
+        source,
+        options,
+        links,
+        times,
+        XattrOptions::default(),
+        progress,
+    )
+}
+
+/// Export with optional host attributes and stderr-only progress. Attribute
+/// errors refuse the affected item after publication; siblings still run.
+/// Attribute calls never follow symbolic links or create metadata side files.
+pub fn export_tree_with_xattrs_and_progress(
+    request: &ExportRequest,
+    source: &mut dyn TreeSource,
+    options: TreeOptions,
+    links: LinkOptions,
+    times: TimeOptions,
+    xattrs: XattrOptions,
+    progress: &mut Progress<'_>,
+) -> Result<Outcome, CliError> {
     let cancellation = Cancellation::install()?;
     let Output::File(dest) = &request.output else {
         return Err(CliError::usage("tree export needs a local DEST"));
@@ -715,6 +746,9 @@ pub fn export_tree_with_progress(
             Ok(0)
         })();
         let result = result.and_then(|status| {
+            if status == 0 && xattrs.preserve_xattrs {
+                xattrs::preserve(&local, source.extended_attributes(&path)?)?;
+            }
             if status == 0 && times.preserve_times && metadata.kind == TreeKind::File {
                 append_reason(&mut reason, &preserve_times(&local, &metadata)?);
             }
