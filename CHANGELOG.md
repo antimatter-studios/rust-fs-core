@@ -12,6 +12,40 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.3.16] — 2026-10-19
+
+### Added
+
+- **A partial result has its own exit status.** `cli::output::EXIT_PARTIAL`
+  is 5: the operation completed and its output is usable, but some data
+  could not be recovered, and the report says which. A rescue or salvage
+  verb exits with it instead of 0, which says every byte was recovered, or
+  1, which says there is nothing to use. (#362)
+
+- `cli::output::EXIT_REFUSED = 4` and `CliError::refused_by_state` identify operations refused because of the volume's current state, separately from unsupported operations (exit 3). (#363)
+
+- **Tree imports preserve times, hard links and symbolic links through optional sink capabilities.** `--preserve` on import accepts `times`, `links` or `times,links`. Sinks gain `set_times`, `create_hard_link` and a `format_name`; repeated names of one source file become hard links to the first published name, and directory times are applied after their children. A sink lacking a capability reports each affected item as `refused: <capability> not supported by <format>` and the run exits nonzero, instead of dropping the metadata. (#299)
+
+- **Recursive imports validate names through the destination format.** The additive `TreeSink` and tree import arguments create directories, stream checked file transactions, refuse reserved names and case collisions without changing their spelling, and report partial trees while continuing siblings. Symbolic links require explicit preservation and sink support; a single exclusive image lock covers the traversal. (#287)
+
+- **Single-file imports stream through driver-owned staging.** The additive `FileSink` and shared import arguments accept local files or stdin with bounded memory, refuse unsupported sinks and atomic replacement before consuming input, persist before publication, abort failed or cancelled copies, and report bytes, SHA-256 and creation or replacement. (#284)
+
+- **Verified transfer evidence has durable storage.** The optional CLI manifest API writes typed local and image identities, byte counts, SHA-256 and completion timestamps as synced JSON lines. It excludes unverified attempts, refuses concurrent writers, and reports and removes a torn final line before appending again. Export and import command integration follows separately. (#294)
+
+- Manifest locks are explicitly released on drop even while a forked child retains an inherited descriptor. (#294)
+
+- **Bounded file copies gain sparse preservation through additive APIs.** `SparseOptions` parses `sparse` alongside `times` and `links` in the existing repeatable, comma-delimited preservation argument. `export_file_with_sparse` seeks over zero chunks and sets the final logical length before sync and optional read-back verification; streaming writers still receive every byte. `import_file_with_sparse` omits zero writes only when the staged sink declares sparse support and can set its final length; missing support refuses before consuming input, and length failures abort before publication. Existing option literals and dense entry points stay compatible. Logical counts, progress and SHA-256 include holes as zeros. Command-level and recursive-tree policy wiring follows separately. (#302)
+
+- **Tree exports preserve extended attributes through an optional source capability.** `export_args_with_xattrs` accepts `--preserve=xattrs` alongside the existing preservation policies. The new export entry points write opaque names and values through host calls that never follow symbolic links, verify the host read-back, and report unsupported sources, attributes and namespaces per item as `refused`. Siblings continue, published contents remain, and no metadata side files are created. Host attribute support is optional under `cli`; host imports and named streams remain separate follow-up work. (#307)
+
+- **Manifest evidence can authorize an earlier-verification skip.** The shared CLI ledger API requires current endpoint identities and a bounded fresh SHA-256 read of the source, consults only the latest destination record, and returns the original completion time. Missing, changed, partial or superseded evidence requires copying from byte zero. Access-time changes alone do not invalidate evidence. Export and import `--resume` command integration follows separately. (#298)
+
+- **Local imports reject sources that change during copying.** The additive `LocalSource` and `import_local_file` API record an open file's identity, length and modification time, plus Unix change time, then recheck the handle and optional source name after copying and persistence. Changes abort staging and preserve the destination; successful reports retain the read-byte SHA-256 and name the restored-mtime detection limitation on hosts without change-time support. (#286)
+
+### Changed
+
+- **The crate declares `rust-version = "1.89"`.** The `cli` feature's transfer locks use `File::try_lock` and `TryLockError`, stable since Rust 1.89.0, so a consumer on an older toolchain now gets cargo's "requires rustc 1.89" instead of `E0658: use of unstable library feature file_lock`. Without `cli` the crate still builds on 1.88. (#379)
+
 ## [0.3.15] — 2026-10-18
 
 ### Added
@@ -1047,7 +1081,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.15...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.16...HEAD
+[0.3.16]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.15...v0.3.16
 [0.3.15]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.14...v0.3.15
 [0.3.14]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.13...v0.3.14
 [0.3.13]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.12...v0.3.13

@@ -1,3 +1,0 @@
-### Added
-
-- **Tree exports preserve extended attributes through an optional source capability.** `export_args_with_xattrs` accepts `--preserve=xattrs` alongside the existing preservation policies. The new export entry points write opaque names and values through host calls that never follow symbolic links, verify the host read-back, and report unsupported sources, attributes and namespaces per item as `refused`. Siblings continue, published contents remain, and no metadata side files are created. Host attribute support is optional under `cli`; host imports and named streams remain separate follow-up work.
