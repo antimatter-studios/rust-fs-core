@@ -445,3 +445,23 @@ fn local_tasks_and_automation_use_budgeted_tiers_and_keep_the_logs() {
     assert!(ci.matches("actions/upload-artifact@v4").count() >= 2);
     assert!(release.contains("actions/upload-artifact@v4"));
 }
+
+#[test]
+fn the_release_tier_prints_progress_not_one_line_per_test() {
+    // v0.3.16's release run printed 1014 lines against a 1000-line budget
+    // (run 39203088290): 657 of them were libtest's one `... ok` line per
+    // test, so the transcript grew with every test added. libtest's --quiet
+    // prints a dot per test but keeps the `Running` and `test result:` lines
+    // that test-floor.sh counts.
+    let chores = std::fs::read_to_string(repo().join("chores.yml")).unwrap();
+    let release = std::fs::read_to_string(repo().join(".github/workflows/release.yml")).unwrap();
+    let expected = "scripts/tier.sh \"test (release)\" release 1000 60000 -- cargo test --locked --release --all-targets --features cli -- --quiet";
+    assert!(
+        chores.contains(expected),
+        "chores.yml's release tier lists every test: {expected}"
+    );
+    assert!(
+        release.contains(expected),
+        "release.yml's release tier lists every test: {expected}"
+    );
+}
