@@ -223,3 +223,64 @@ impl Drop for Btrfs {
         }
     }
 }
+
+/// One ZFS pool striped over a loop device per image, its root dataset
+/// mounted; the kernel reports the dataset by pool name, not by any member.
+pub struct Zfs {
+    pub devices: Vec<PathBuf>,
+    modes: Vec<u32>,
+    pool: String,
+    imported: bool,
+}
+impl Zfs {
+    pub fn new(root: &Path, images: &[PathBuf]) -> Self {
+        // Sparse; above zpool's 64 MiB per-vdev minimum.
+        let (devices, modes): (Vec<_>, Vec<_>) = images
+            .iter()
+            .map(|image| attach(image, 128 * 1024 * 1024))
+            .unzip();
+        let pool = format!("fscore{}", std::process::id());
+        let mount = root.join("zfs-mount");
+        let mut args: Vec<&OsStr> = vec![
+            "create".as_ref(),
+            "-f".as_ref(),
+            "-m".as_ref(),
+            mount.as_os_str(),
+            pool.as_ref(),
+        ];
+        args.extend(devices.iter().map(|device| device.as_os_str()));
+        run("zpool", &args);
+        run("udevadm", &["settle".as_ref()]);
+        Self {
+            devices,
+            modes,
+            pool,
+            imported: true,
+        }
+    }
+    pub fn set_readonly(&mut self, readonly: bool) {
+        let property = format!("readonly={}", if readonly { "on" } else { "off" });
+        run(
+            "zfs",
+            &["set".as_ref(), property.as_ref(), self.pool.as_ref()],
+        );
+    }
+    pub fn export(&mut self) {
+        run("zpool", &["export".as_ref(), self.pool.as_ref()]);
+        run("udevadm", &["settle".as_ref()]);
+        self.imported = false;
+    }
+}
+impl Drop for Zfs {
+    fn drop(&mut self) {
+        if self.imported {
+            run(
+                "zpool",
+                &["destroy".as_ref(), "-f".as_ref(), self.pool.as_ref()],
+            );
+        }
+        for (device, mode) in self.devices.iter().zip(&self.modes) {
+            detach(device, *mode);
+        }
+    }
+}

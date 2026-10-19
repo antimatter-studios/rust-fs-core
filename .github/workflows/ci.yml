@@ -106,7 +106,7 @@ jobs:
       - run: cargo build --locked --all-targets
       - name: Linux mounted-transfer oracle prerequisites
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y util-linux e2fsprogs fdisk udev btrfs-progs
+        run: sudo apt-get update && sudo apt-get install -y util-linux e2fsprogs fdisk udev btrfs-progs zfsutils-linux && sudo modprobe zfs
       # AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP ACKNOWLEDGES A REAL GAP.
       # tests/device_node_size.rs covers the Linux device-size probe's
       # success path with a loop device, and losetup needs root, which
@@ -220,7 +220,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Linux mounted-transfer oracle prerequisites
-        run: sudo apt-get update && sudo apt-get install -y util-linux e2fsprogs fdisk udev btrfs-progs
+        run: sudo apt-get update && sudo apt-get install -y util-linux e2fsprogs fdisk udev btrfs-progs zfsutils-linux && sudo modprobe zfs
       # THE SAME ACKNOWLEDGEMENT AS THE `test` JOB, and it has to be
       # here rather than inherited: this job runs the suite too, under
       # llvm-cov, and it is not root either. Without it
