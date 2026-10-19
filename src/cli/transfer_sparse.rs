@@ -28,6 +28,7 @@ impl SparseOptions {
 pub(super) struct CopyOptions {
     pub verify: bool,
     pub sparse: SparseOptions,
+    pub xattrs: XattrOptions,
 }
 impl From<ExportOptions> for CopyOptions {
     fn from(options: ExportOptions) -> Self {

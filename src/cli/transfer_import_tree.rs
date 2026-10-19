@@ -39,6 +39,16 @@ pub trait TreeSink: FileSink {
     ) -> Result<(), CliError> {
         Err(unsupported(self.format_name(), "times"))
     }
+    /// Set one opaque extended attribute on a published item without following
+    /// symbolic links. Preserve the name and bytes exactly or refuse; never
+    /// rename, truncate or drop it. Drivers lacking attributes refuse.
+    fn set_extended_attribute(
+        &mut self,
+        _path: &Path,
+        _attribute: &ExtendedAttribute,
+    ) -> Result<(), CliError> {
+        Err(unsupported(self.format_name(), "extended attributes"))
+    }
 }
 
 fn unsupported(format: &str, capability: &str) -> CliError {
@@ -205,6 +215,7 @@ pub(super) fn import_tree_recorded(
                 }
                 let target = fs::read_link(&local).map_err(|e| CliError::failed(e.to_string()))?;
                 sink.create_symbolic_link(&dest, &target)?;
+                xattrs::import_attributes(sink, &local, &dest, copy_options.xattrs)?;
                 return set_times(sink, &dest, &m, options);
             }
             if m.is_file() && copy_options.sparse.preserve_sparse && !sink.supports_sparse() {
@@ -255,6 +266,7 @@ pub(super) fn import_tree_recorded(
                 if let Some(id) = inode {
                     linked.insert(id, dest.clone());
                 }
+                xattrs::import_attributes(sink, &local, &dest, copy_options.xattrs)?;
                 set_times(sink, &dest, &m, options)?;
             } else if m.is_dir() {
                 if sink.create_dir(&dest)? {
@@ -291,6 +303,8 @@ pub(super) fn import_tree_recorded(
                     ));
                 }
                 pending.extend(children.into_iter().rev());
+                // Queued children still run when the directory's attributes refuse.
+                xattrs::import_attributes(sink, &local, &dest, copy_options.xattrs)?;
             } else {
                 return Err(CliError::refused("unsupported entry type"));
             }

@@ -656,6 +656,7 @@ pub fn import_with_sparse(
         CopyOptions {
             verify: options.verify,
             sparse,
+            ..CopyOptions::default()
         },
         sink,
         None,

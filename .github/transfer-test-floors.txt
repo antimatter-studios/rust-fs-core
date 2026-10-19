@@ -44,4 +44,5 @@ transfer_sparse 7
 transfer_sparse_commands 2
 # #303 adds eight portable xattr policy/refusal cases and host attribute oracles.
 # #353 adds seven portable named-stream capability and no-side-file cases.
-transfer_xattr 15
+# #304 adds two portable import cases and two Linux/macOS host-tool import oracles.
+transfer_xattr 17

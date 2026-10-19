@@ -124,6 +124,88 @@ pub fn export_tree_with_xattrs(
     )
 }
 
+/// Tree import arguments adding `xattrs` to the existing preservation policies.
+/// Pass [`XattrOptions::from_matches`] to [`import_tree_with_xattrs`].
+pub fn import_args_with_xattrs() -> [Arg; 6] {
+    let [source, path, replace, recursive, depth, preserve] = import_args_with_tree();
+    [source, path, replace, recursive, depth,
+        preserve.value_parser(["links", "times", "sparse", "xattrs"])
+            .help("Preserve links, times, sparse holes and/or extended attributes; a sink lacking one refuses each affected item")]
+}
+
+/// Import with opt-in host extended attributes, read without following
+/// symbolic links and passed to [`TreeSink::set_extended_attribute`]. A sink
+/// lacking the capability refuses each attributed item by attribute name after
+/// its contents are published; siblings and a refused directory's children
+/// continue. Hard-linked names share the first name's attributes.
+pub fn import_tree_with_xattrs(
+    request: &ImportRequest,
+    sink: Option<&mut dyn TreeSink>,
+    options: ImportTreeOptions,
+    xattrs: XattrOptions,
+) -> Result<Outcome, CliError> {
+    import_tree::import_tree_recorded(
+        request,
+        sink,
+        options,
+        CopyOptions {
+            xattrs,
+            ..CopyOptions::default()
+        },
+        None,
+    )
+}
+
+/// Hand a local item's host attributes to the sink when they are preserved.
+/// Neither the host nor the sink is queried otherwise.
+pub(super) fn import_attributes(
+    sink: &mut dyn TreeSink,
+    local: &Path,
+    dest: &Path,
+    options: XattrOptions,
+) -> Result<(), CliError> {
+    if !options.preserve_xattrs {
+        return Ok(());
+    }
+    let attributes = host_attributes(local).map_err(|e| {
+        let message = format!("extended attributes unreadable: {e}");
+        if e.kind() == io::ErrorKind::Unsupported {
+            CliError::refused(message)
+        } else {
+            CliError::failed(message)
+        }
+    })?;
+    for attribute in attributes {
+        sink.set_extended_attribute(dest, &attribute)
+            .map_err(|mut error| {
+                error.message =
+                    format!("extended attribute {:?}: {}", attribute.name, error.message);
+                error
+            })?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn host_attributes(local: &Path) -> io::Result<Vec<ExtendedAttribute>> {
+    let mut attributes = Vec::new();
+    for name in xattr::list(local)? {
+        // An attribute removed after listing is no longer part of the source.
+        if let Some(value) = xattr::get(local, &name)? {
+            attributes.push(ExtendedAttribute { name, value });
+        }
+    }
+    Ok(attributes)
+}
+
+#[cfg(not(unix))]
+fn host_attributes(_local: &Path) -> io::Result<Vec<ExtendedAttribute>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "host extended attributes are unsupported",
+    ))
+}
+
 pub(super) fn preserve(local: &Path, attributes: Vec<ExtendedAttribute>) -> Result<(), CliError> {
     for attribute in attributes {
         let refused = |e: String| {
