@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::output::CliError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // Bound individual record buffers during serialization and recovery.
 const MAX_LINE: usize = 64 * 1024;
@@ -88,6 +89,145 @@ pub struct ManifestRead {
     /// An unterminated last line was ignored and durably removed. The caller
     /// must report this to the user even when it contained otherwise valid JSON.
     pub torn_tail: bool,
+}
+
+/// Whether a file needs a complete copy or has evidence of earlier verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResumeDecision {
+    /// Copy from byte zero, including any partial or changed file.
+    Copy,
+    /// Report `skipped: verified earlier`, with this original completion time.
+    /// This is not a verification of destination bytes performed now.
+    Skipped {
+        /// Time recorded after the earlier verification and publication.
+        completed_at: Timestamp,
+    },
+}
+
+impl ManifestRead {
+    /// Check the latest evidence for this destination against fresh identities
+    /// and a SHA-256 streamed from the source's beginning through EOF.
+    /// Missing or changed evidence requires a complete copy; read errors fail.
+    /// Memory is bounded by the transfer chunk size, irrespective of file size.
+    /// Access time is excluded because reading a file can change it.
+    ///
+    /// The caller must capture identities from the actual opened endpoints,
+    /// retain transfer locks, and revalidate those snapshots before applying a
+    /// skip. This storage API cannot detect concurrent endpoint mutations.
+    /// It neither appends evidence nor marks anything as verified now. Report
+    /// `torn_tail` separately, even when this decision requires copying.
+    pub fn check_resume(
+        &self,
+        source: &Identity,
+        destination: &Identity,
+        reader: &mut dyn Read,
+    ) -> Result<ResumeDecision, CliError> {
+        // A later transfer from another source supersedes the old destination
+        // evidence too. Never search backwards for an older matching digest.
+        let Some(entry) = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| same_location(&entry.destination, destination))
+        else {
+            return Ok(ResumeDecision::Copy);
+        };
+        let failed = |e| CliError::failed(format!("resume source digest: {e}"));
+        validate(entry).map_err(failed)?;
+        let size_matches = |identity: &Identity| match identity {
+            Identity::Local(local) => local.size == entry.bytes,
+            Identity::Image { .. } => true,
+        };
+        if !same_identity(&entry.source, source)
+            || !same_identity(&entry.destination, destination)
+            || !size_matches(source)
+            || !size_matches(destination)
+        {
+            return Ok(ResumeDecision::Copy);
+        }
+        let mut buffer = vec![0; super::CHUNK];
+        let mut digest = Sha256::new();
+        let mut bytes = 0u64;
+        loop {
+            let n = match reader.read(&mut buffer) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => result.map_err(failed)?,
+            };
+            if n == 0 {
+                break;
+            }
+            if n > buffer.len() {
+                return Err(failed(io::Error::other("reader exceeded the buffer")));
+            }
+            let Some(total) = bytes.checked_add(n as u64) else {
+                return Ok(ResumeDecision::Copy);
+            };
+            bytes = total;
+            if bytes > entry.bytes {
+                return Ok(ResumeDecision::Copy);
+            }
+            digest.update(&buffer[..n]);
+        }
+        if bytes != entry.bytes || format!("{:x}", digest.finalize()) != entry.sha256 {
+            return Ok(ResumeDecision::Copy);
+        }
+        Ok(ResumeDecision::Skipped {
+            completed_at: entry.completed_at,
+        })
+    }
+}
+
+fn same_location(a: &Identity, b: &Identity) -> bool {
+    match (a, b) {
+        (Identity::Local(a), Identity::Local(b)) => a.path == b.path,
+        (
+            Identity::Image {
+                path: a,
+                image: ai,
+                offset: ao,
+                ..
+            },
+            Identity::Image {
+                path: b,
+                image: bi,
+                offset: bo,
+                ..
+            },
+        ) => a == b && ai.path == bi.path && ao == bo,
+        _ => false,
+    }
+}
+
+fn same_local(a: &LocalIdentity, b: &LocalIdentity) -> bool {
+    a.path == b.path
+        && a.device == b.device
+        && a.inode == b.inode
+        && a.size == b.size
+        && a.modified == b.modified
+        && a.changed == b.changed
+}
+
+fn same_identity(a: &Identity, b: &Identity) -> bool {
+    match (a, b) {
+        (Identity::Local(a), Identity::Local(b)) => same_local(a, b),
+        (
+            Identity::Image {
+                path: a,
+                image: ai,
+                offset: ao,
+                filesystem_uuid: au,
+                inode: an,
+            },
+            Identity::Image {
+                path: b,
+                image: bi,
+                offset: bo,
+                filesystem_uuid: bu,
+                inode: bn,
+            },
+        ) => a == b && same_local(ai, bi) && ao == bo && au == bu && an == bn,
+        _ => false,
+    }
 }
 
 /// An exclusively locked JSONL ledger. Keep it open for the whole transfer.
