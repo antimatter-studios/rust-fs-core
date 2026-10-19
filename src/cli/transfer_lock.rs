@@ -15,11 +15,14 @@ mod host_mount;
 #[path = "transfer_mount_macos.rs"]
 mod host_mount;
 
-// Platform-neutral, so every host tests it; the Windows probe that feeds it
-// is #371.
-#[cfg(test)]
+// The decisions are platform-neutral, so every host tests them; the probe
+// that feeds them is Windows-only.
+#[cfg(any(windows, test))]
 #[path = "transfer_mount_windows.rs"]
 mod windows_mount;
+
+#[cfg(windows)]
+use windows_mount as host_mount;
 
 /// A non-blocking lock on the backing image or device, independent of its
 /// partition offset. Keep the guard alive through the entire transfer.
@@ -35,6 +38,8 @@ mod windows_mount;
 /// against subsequent mounts or mounts hidden in another namespace.
 /// macOS checks attached disk images, their slices and synthesized APFS
 /// containers against the mount table, with the same snapshot limits.
+/// Windows checks volumes, their disk extents and attached virtual disks by
+/// backing-file identity, with the same snapshot limits.
 #[derive(Debug)]
 #[must_use = "dropping the guard releases the image lock"]
 pub struct ImageLock {
@@ -60,10 +65,12 @@ impl ImageLock {
     /// Linux mount probes also fail closed with exit code 1, including when
     /// another loop's backing identity is unreadable or a Btrfs/ZFS mount
     /// prevents reliable device membership resolution. macOS mount probes
-    /// run before the lock, because DiskImages may lock an attached image.
+    /// run before the lock, because DiskImages may lock an attached image;
+    /// Windows probes run there too, and any failed volume or virtual-disk
+    /// query also fails closed with exit code 1.
     pub fn for_import(image: &Path) -> Result<Self, CliError> {
         let file = open(image)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         refuse_mounted(image)?;
         lock(&file, true).map_err(|err| {
             CliError::failed(format!(
@@ -137,7 +144,7 @@ impl ImageLock {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn refuse_mounted(image: &Path) -> Result<(), CliError> {
     if host_mount::state(image)?.mounted {
         return Err(CliError::failed(format!(
