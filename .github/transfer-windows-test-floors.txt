@@ -1,0 +1,4 @@
+# #372 adds three real Windows virtual-disk mount oracle cases above the seven
+# cases every host runs; no diskpart, Mount-DiskImage or administrator
+# prerequisite may skip.
+transfer_exclusive 10

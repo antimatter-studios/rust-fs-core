@@ -528,3 +528,111 @@ fn macos_failed_host_mount_probes_refuse_import_with_input_unread() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot determine host mount state"));
     assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
 }
+
+#[cfg(windows)]
+#[path = "support/mounted_vdisk.rs"]
+mod mounted_vdisk;
+
+#[cfg(windows)]
+#[test]
+fn windows_attached_images_and_volumes_refuse_import_with_input_unread() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        match ImageLock::for_import(Path::new(&image)) {
+            Err(err) => {
+                eprintln!("{}", err.message);
+                std::process::exit(i32::from(err.code));
+            }
+            Ok(_guard) => {
+                std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+                std::process::exit(0);
+            }
+        }
+    }
+    if !mounted_vdisk::host() {
+        return;
+    }
+    let dir = Scratch::new("vdisk-import");
+    let mut volume = mounted_vdisk::Volume::new(&dir.root);
+    for readonly in [false, true] {
+        volume.reattach(readonly);
+        for image in [&volume.image, &volume.drive, &volume.volume] {
+            let input_path = dir.root.join("input");
+            fs::write(&input_path, b"producer bytes still unread").unwrap();
+            let mut input = File::open(input_path).unwrap();
+            let output = child(
+                "windows_attached_images_and_volumes_refuse_import_with_input_unread",
+                image,
+            )
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{image:?}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("mounted"),
+                "{image:?}: {output:?}"
+            );
+            assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
+        }
+    }
+    // After detach the image is an ordinary file again.
+    volume.detach();
+    drop(ImageLock::for_import(&volume.image).unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        let mut source = Source {
+            image: image.into(),
+            reads: 0,
+        };
+        let mut bytes = Vec::new();
+        transfer::export_file(&mut source, Destination::Writer(&mut bytes)).unwrap();
+        assert_eq!(bytes, b"abc");
+        return;
+    }
+    if !mounted_vdisk::host() {
+        return;
+    }
+    let dir = Scratch::new("vdisk-export");
+    let mut volume = mounted_vdisk::Volume::new(&dir.root);
+    for readonly in [false, true] {
+        volume.reattach(readonly);
+        for image in [&volume.image, &volume.drive, &volume.volume] {
+            let output = child(
+                "windows_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not",
+                image,
+            )
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{image:?}: {output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(
+                stderr.contains("mounted read-write"),
+                !readonly,
+                "{image:?}: {stderr}"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_failed_host_mount_probes_refuse_import_with_input_unread() {
+    let dir = Scratch::new("vdisk-probe-failure");
+    let input_path = dir.root.join("input");
+    fs::write(&input_path, b"producer bytes still unread").unwrap();
+    let mut input = File::open(input_path).unwrap();
+    // NUL opens, but it is neither a drive nor a volume, so the probe fails.
+    let output = child(
+        "windows_attached_images_and_volumes_refuse_import_with_input_unread",
+        Path::new(r"\\.\NUL"),
+    )
+    .stdin(Stdio::from(input.try_clone().unwrap()))
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot check Windows mounts"));
+    assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
+}
