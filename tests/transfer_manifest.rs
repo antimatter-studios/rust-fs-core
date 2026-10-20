@@ -184,6 +184,161 @@ fn export_manifest_refuses_destination_symlinks_to_an_external_ledger() {
         b"not a record; must not recover"
     );
 }
+fn import_paths(tag: &str, tree: bool) -> (PathBuf, PathBuf, PathBuf) {
+    let (manifest, image, source) = export_paths(tag);
+    if tree {
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), b"source must remain intact").unwrap();
+    } else {
+        fs::write(&source, b"source must remain intact").unwrap();
+    }
+    (manifest, image, source)
+}
+
+#[test]
+fn import_manifest_opens_external_ledgers_and_reports_recovery() {
+    for tree in [false, true] {
+        let (manifest, image, source) = import_paths(
+            if tree {
+                "import-safe-tree"
+            } else {
+                "import-safe-file"
+            },
+            tree,
+        );
+        let (ledger, read) = Manifest::open_for_import(&manifest, &image, &source, tree).unwrap();
+        assert!(read.entries.is_empty());
+        assert!(!read.torn_tail);
+        drop(ledger);
+        fs::write(&manifest, b"torn record").unwrap();
+        let (ledger, read) = Manifest::open_for_import(&manifest, &image, &source, tree).unwrap();
+        assert!(read.torn_tail);
+        drop(ledger);
+        assert!(fs::read(&manifest).unwrap().is_empty());
+        let file = if tree { source.join("file") } else { source };
+        assert_eq!(fs::read(file).unwrap(), b"source must remain intact");
+        assert_eq!(fs::read(image).unwrap(), b"image must remain intact");
+    }
+}
+
+#[test]
+fn import_manifest_refuses_image_names_and_hard_links_without_recovery() {
+    let (manifest, image, source) = import_paths("import-image-alias", false);
+    fs::hard_link(&image, &manifest).unwrap();
+    for alias in [&image, &manifest] {
+        assert!(Manifest::open_for_import(alias, &image, &source, false).is_err());
+        assert_eq!(fs::read(alias).unwrap(), b"image must remain intact");
+    }
+    assert_eq!(fs::read(source).unwrap(), b"source must remain intact");
+}
+
+#[test]
+fn import_manifest_refuses_single_source_names_and_hard_links() {
+    let (manifest, image, source) = import_paths("import-source-alias", false);
+    fs::hard_link(&source, &manifest).unwrap();
+    for alias in [&source, &manifest] {
+        assert!(Manifest::open_for_import(alias, &image, &source, false).is_err());
+        assert_eq!(fs::read(alias).unwrap(), b"source must remain intact");
+    }
+    assert_eq!(fs::read(image).unwrap(), b"image must remain intact");
+}
+
+#[test]
+fn import_manifest_refuses_source_tree_containment_before_creation() {
+    let (_, image, source) = import_paths("import-containment", true);
+    for manifest in [
+        source.clone(),
+        source.join("ledger"),
+        source.join("new/../ledger"),
+    ] {
+        assert!(Manifest::open_for_import(&manifest, &image, &source, true).is_err());
+    }
+    assert!(!source.join("ledger").exists());
+    assert!(!source.join("new").exists());
+    assert_eq!(
+        fs::read(source.join("file")).unwrap(),
+        b"source must remain intact"
+    );
+}
+
+#[test]
+fn import_manifest_refuses_hard_links_to_nested_source_files() {
+    let (manifest, image, source) = import_paths("import-tree-hard-link", true);
+    fs::create_dir(source.join("nested")).unwrap();
+    let file = source.join("nested/another");
+    fs::write(&file, b"nested source must remain intact").unwrap();
+    fs::hard_link(&file, &manifest).unwrap();
+    assert!(Manifest::open_for_import(&manifest, &image, &source, true).is_err());
+    assert_eq!(fs::read(file).unwrap(), b"nested source must remain intact");
+}
+
+#[test]
+fn import_manifest_identity_errors_and_nonregular_ledgers_fail_before_creation() {
+    let (manifest, image, source) = import_paths("import-identity-error", false);
+    assert!(
+        Manifest::open_for_import(&manifest, &image.with_extension("missing"), &source, false)
+            .is_err()
+    );
+    assert!(!manifest.exists());
+    assert!(
+        Manifest::open_for_import(&manifest, &image, &source.with_extension("missing"), false)
+            .is_err()
+    );
+    assert!(!manifest.exists());
+    fs::create_dir(&manifest).unwrap();
+    assert!(Manifest::open_for_import(&manifest, &image, &source, false).is_err());
+    assert_eq!(fs::read(source).unwrap(), b"source must remain intact");
+}
+
+#[cfg(unix)]
+#[test]
+fn import_manifest_refuses_symlinks_to_image_and_source_files() {
+    use std::os::unix::fs::symlink;
+    for target_kind in 0..3 {
+        let (manifest, image, source) =
+            import_paths(&format!("import-symlink-{target_kind}"), target_kind == 2);
+        let target = match target_kind {
+            0 => image.clone(),
+            1 => source.clone(),
+            _ => source.join("file"),
+        };
+        symlink(&target, &manifest).unwrap();
+        let before = fs::read(&target).unwrap();
+        assert!(Manifest::open_for_import(&manifest, &image, &source, target_kind == 2).is_err());
+        assert_eq!(fs::read(target).unwrap(), before);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn import_manifest_resolves_symlinked_source_ancestors_before_containment() {
+    use std::os::unix::fs::symlink;
+    let (manifest, image, source) = import_paths("import-parent-symlink", true);
+    let alias = manifest.with_file_name("alias");
+    symlink(&source, &alias).unwrap();
+    assert!(Manifest::open_for_import(&alias.join("ledger"), &image, &source, true).is_err());
+    assert!(Manifest::open_for_import(&source.join("ledger"), &image, &alias, true).is_err());
+    assert!(!source.join("ledger").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn import_manifest_refuses_source_symlinks_to_external_ledgers_and_dangling_paths() {
+    use std::os::unix::fs::symlink;
+    let (manifest, image, source) = import_paths("import-external-ledger", true);
+    fs::write(&manifest, b"torn record must remain intact").unwrap();
+    symlink(&manifest, source.join("alias")).unwrap();
+    assert!(Manifest::open_for_import(&manifest, &image, &source, true).is_err());
+    assert_eq!(
+        fs::read(&manifest).unwrap(),
+        b"torn record must remain intact"
+    );
+    let dangling = manifest.with_file_name("dangling");
+    symlink(source.join("missing"), &dangling).unwrap();
+    assert!(Manifest::open_for_import(&dangling, &image, &source, true).is_err());
+    assert!(!source.join("missing").exists());
+}
+
 fn entry() -> ManifestEntry {
     let time = Timestamp {
         seconds: 123,
