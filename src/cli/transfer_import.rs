@@ -34,7 +34,10 @@ pub trait FileSink {
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), CliError>;
     /// Persist all staged content and metadata before publication.
     fn persist(&mut self) -> Result<(), CliError>;
-    /// Read the staged file back, for callers requesting verification.
+    /// Read the persisted staged file back, for callers requesting
+    /// verification. Called only after `persist`, at increasing offsets with at
+    /// most `CHUNK` bytes; return 0 at end of file. Read through a fresh view of
+    /// the image (what is on disk), never the write cache that `write_at` filled.
     fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<usize, CliError>;
     /// Atomically publish the staged file; return whether a name was replaced.
     /// No-replace must also refuse names created since `stage`. On failure the
@@ -173,6 +176,16 @@ pub fn import_local_file(
     path: &Path,
     replace: bool,
 ) -> Result<Copied, CliError> {
+    import_checked_local_file(source, sink, path, replace, ImportOptions::default())
+}
+
+fn import_checked_local_file(
+    source: &mut dyn LocalSource,
+    sink: Option<&mut dyn FileSink>,
+    path: &Path,
+    replace: bool,
+    options: ImportOptions,
+) -> Result<Copied, CliError> {
     let sink = capable(sink, replace)?;
     let identity = SourceIdentity::capture(source.file())
         .map_err(|e| CliError::failed(format!("cannot inspect import source: {e}")))?;
@@ -184,6 +197,7 @@ pub fn import_local_file(
         replace,
         ImportContext {
             size: Some(identity.metadata.len()),
+            verify: options.verify,
             ..ImportContext::default()
         },
         |source, bytes| identity.check(source, bytes),
@@ -271,6 +285,7 @@ struct ImportContext<'a> {
     size: Option<u64>,
     cancellation: Option<&'a Cancellation>,
     sparse: SparseOptions,
+    verify: bool,
 }
 
 fn import_stream<S: Read + ?Sized>(
@@ -285,6 +300,7 @@ fn import_stream<S: Read + ?Sized>(
         size,
         cancellation,
         sparse,
+        verify,
     } = context;
     let sink = capable(sink, replace)?;
     if sparse.preserve_sparse && !sink.supports_sparse() {
@@ -337,7 +353,7 @@ fn import_stream<S: Read + ?Sized>(
             bytes = next;
         }
         cancellation.check(bytes, bytes)?;
-        let sha256 = digest.finalize().into();
+        let sha256: [u8; 32] = digest.finalize().into();
         validate(source, bytes)?;
         if sparse.preserve_sparse {
             sink.set_sparse_len(bytes)?;
@@ -346,6 +362,14 @@ fn import_stream<S: Read + ?Sized>(
         cancellation.check(bytes, bytes)?;
         persisted?;
         validate(source, bytes)?;
+        if verify {
+            let sent = Copied {
+                bytes,
+                sha256,
+                replaced: false,
+            };
+            verify_staged(sink, &mut buffer, path, &sent, cancellation)?;
+        }
         cancellation.check(bytes, bytes)?;
         let replaced = sink.publish(replace)?;
         Ok(Copied {
@@ -363,6 +387,50 @@ fn import_stream<S: Read + ?Sized>(
         return Err(error);
     }
     result
+}
+
+/// Read the persisted staged file back through the sink in `CHUNK` pieces,
+/// reusing the copy buffer. Reading stops one chunk past the expected length,
+/// because anything longer is already a mismatch.
+fn verify_staged(
+    sink: &mut dyn FileSink,
+    buffer: &mut [u8],
+    path: &Path,
+    sent: &Copied,
+    cancellation: &Cancellation,
+) -> Result<(), CliError> {
+    let mut digest = Sha256::new();
+    let mut bytes = 0u64;
+    while bytes <= sent.bytes {
+        cancellation.check(bytes, sent.bytes)?;
+        let n = sink.read_at(bytes, buffer)?;
+        if n == 0 {
+            break;
+        }
+        if n > buffer.len() {
+            return Err(CliError::failed("read-back returned an invalid byte count"));
+        }
+        digest.update(&buffer[..n]);
+        bytes = bytes
+            .checked_add(n as u64)
+            .ok_or_else(|| CliError::failed("verification byte count overflow"))?;
+    }
+    let read_back = Copied {
+        bytes,
+        sha256: digest.finalize().into(),
+        replaced: false,
+    };
+    if read_back.bytes != sent.bytes || read_back.sha256 != sent.sha256 {
+        return Err(CliError::failed(format!(
+            "verification failed for {}: sent {} bytes, sha256 {}; read back {} bytes, sha256 {}",
+            path.display(),
+            sent.bytes,
+            sent.sha256_hex(),
+            read_back.bytes,
+            read_back.sha256_hex()
+        )));
+    }
+    Ok(())
 }
 
 /// A local import source, parsed without opening it or consuming stdin.
@@ -399,6 +467,44 @@ pub fn import_args() -> [Arg; 3] {
     ]
 }
 
+/// Optional import behavior. Existing entry points use the default, which
+/// publishes without read-back verification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImportOptions {
+    /// Read the persisted staged file back through the sink and publish only
+    /// when its length and SHA-256 match the bytes sent.
+    pub verify: bool,
+}
+
+impl ImportOptions {
+    /// Parse the options from [`import_args_with_verify`]. Matches from the
+    /// original [`import_args`] also work, with verification disabled.
+    pub fn from_matches(matches: &ArgMatches) -> Result<Self, CliError> {
+        let verify = matches
+            .try_get_one::<bool>("verify")
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false);
+        Ok(Self { verify })
+    }
+}
+
+/// The original import arguments plus `--verify`. Drivers opting in parse
+/// [`ImportOptions::from_matches`] and call [`import_with_options`].
+pub fn import_args_with_verify() -> [Arg; 4] {
+    let [source, path, replace] = import_args();
+    [
+        source,
+        path,
+        replace,
+        Arg::new("verify")
+            .long("verify")
+            .action(ArgAction::SetTrue)
+            .help("Read the persisted staged file back and verify its length and SHA-256 before publishing"),
+    ]
+}
+
 impl ImportRequest {
     /// Parse [`import_args`] without performing I/O.
     pub fn from_matches(matches: &ArgMatches) -> Result<Self, CliError> {
@@ -427,13 +533,28 @@ pub fn import(
     request: &ImportRequest,
     sink: Option<&mut dyn FileSink>,
 ) -> Result<Outcome, CliError> {
+    import_with_options(request, ImportOptions::default(), sink)
+}
+
+/// Import with optional read-back verification. A successful report carries
+/// `verified: true` only after the persisted staged bytes matched the copy.
+pub fn import_with_options(
+    request: &ImportRequest,
+    options: ImportOptions,
+    sink: Option<&mut dyn FileSink>,
+) -> Result<Outcome, CliError> {
     let sink = capable(sink, request.replace)?;
     let copied = match &request.input {
-        Input::Stdin => import_file(
+        Input::Stdin => import_stream(
             &mut io::stdin().lock(),
             Some(sink),
             &request.path,
             request.replace,
+            ImportContext {
+                verify: options.verify,
+                ..ImportContext::default()
+            },
+            |_, _| Ok(()),
         )?,
         Input::File(local) => {
             if let Some(image) = sink.image_path() {
@@ -442,7 +563,13 @@ pub fn import(
             let file = File::open(local)
                 .map_err(|e| CliError::failed(format!("open {}: {e}", local.display())))?;
             let mut source = NamedSource { file, path: local };
-            import_local_file(&mut source, Some(sink), &request.path, request.replace)?
+            import_checked_local_file(
+                &mut source,
+                Some(sink),
+                &request.path,
+                request.replace,
+                options,
+            )?
         }
     };
     let limitation = (!cfg!(unix) && matches!(&request.input, Input::File(_))).then_some(
@@ -460,16 +587,19 @@ pub fn import(
         ("sha256", Json::from(copied.sha256_hex())),
         ("created", Json::from(!copied.replaced)),
         ("replaced", Json::from(copied.replaced)),
+        ("verified", Json::from(options.verify)),
         (
             "limitations",
             Json::Arr(limitation.into_iter().map(Json::from).collect()),
         ),
     ]);
+    let verified_text = if options.verify { ", verified" } else { "" };
     Ok(Outcome::report(report).with_text(format!(
-        "imported {} bytes to {} (sha256 {}){}",
+        "imported {} bytes to {} (sha256 {}{}){}",
         copied.bytes,
         request.path.display(),
         copied.sha256_hex(),
+        verified_text,
         limitation_text
     )))
 }

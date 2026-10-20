@@ -47,6 +47,8 @@ struct Sink {
     written: u64,
     persisted: bool,
     discard: bool,
+    read_back: usize,
+    corrupt_read: bool,
     after_write: Option<Box<dyn FnOnce()>>,
     during_persist: Option<Box<dyn FnOnce()>>,
 }
@@ -97,9 +99,17 @@ impl FileSink for Sink {
         Ok(())
     }
     fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<usize, CliError> {
+        assert!(self.persisted, "read-back preceded persistence");
+        assert!(bytes.len() <= CHUNK);
+        self.read_back += 1;
         let mut data = &self.staged.as_ref().unwrap()[offset as usize..];
-        data.read(bytes)
-            .map_err(|e| CliError::failed(e.to_string()))
+        let n = data
+            .read(bytes)
+            .map_err(|e| CliError::failed(e.to_string()))?;
+        if self.corrupt_read && offset == 0 && n > 0 {
+            bytes[0] = b'x';
+        }
+        Ok(n)
     }
     fn publish(&mut self, _: bool) -> Result<bool, CliError> {
         assert!(self.persisted, "publication preceded persistence");
@@ -541,4 +551,83 @@ fn cancellation_during_persistence_aborts_before_publication() {
     assert_eq!(error.code, 143);
     assert_eq!(sink.old.as_deref(), Some(b"old".as_slice()));
     assert!(sink.staged.is_none());
+}
+
+fn verified_import(sink: &mut Sink, verify: bool) -> Result<fs_core::cli::Outcome, CliError> {
+    let local = std::env::temp_dir().join(format!(
+        "core-import-verify-{}-{verify}-{}",
+        std::process::id(),
+        sink.corrupt_read
+    ));
+    std::fs::write(&local, b"abc").unwrap();
+    let request = ImportRequest {
+        input: Input::File(local.clone()),
+        path: "/target".into(),
+        replace: true,
+    };
+    let options = transfer::ImportOptions { verify };
+    let result = transfer::import_with_options(&request, options, Some(sink));
+    std::fs::remove_file(local).unwrap();
+    result
+}
+#[test]
+fn a_verified_import_reads_the_persisted_file_back_before_publication() {
+    let mut sink = old_sink();
+    let report = verified_import(&mut sink, true)
+        .unwrap()
+        .report
+        .unwrap()
+        .to_compact();
+    assert!(sink.read_back > 0, "the staged file was not read back");
+    assert!(report.contains("\"verified\": true"), "{report}");
+    assert_eq!(sink.old.as_deref(), Some(b"abc".as_slice()));
+    let mut unverified = old_sink();
+    let report = verified_import(&mut unverified, false)
+        .unwrap()
+        .report
+        .unwrap()
+        .to_compact();
+    assert_eq!(unverified.read_back, 0);
+    assert!(report.contains("\"verified\": false"), "{report}");
+}
+#[test]
+fn a_changed_byte_on_read_back_is_not_published() {
+    // FIPS 180-2's published "abc" digest; the corrupted read-back is "xbc".
+    const SENT: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    // Independently computed with `printf xbc | shasum -a 256`.
+    const READ_BACK: &str = "11f995635483d63d73611c514dba734e51e45a04ab45b7f29cbb1ee03127748f";
+    let mut sink = Sink {
+        corrupt_read: true,
+        ..old_sink()
+    };
+    let error = verified_import(&mut sink, true).unwrap_err();
+    assert_eq!(error.code, 1);
+    assert!(error.message.contains(SENT), "{}", error.message);
+    assert!(error.message.contains(READ_BACK), "{}", error.message);
+    assert!(sink.read_back > 0);
+    assert_eq!(sink.old.as_deref(), Some(b"old".as_slice()));
+    assert!(sink.staged.is_none());
+}
+#[test]
+fn verify_is_an_opt_in_import_argument() {
+    let parse = |args: &[&str]| {
+        let matches = Command::new("import")
+            .args(transfer::import_args_with_verify())
+            .try_get_matches_from(args)
+            .unwrap();
+        transfer::ImportOptions::from_matches(&matches)
+            .unwrap()
+            .verify
+    };
+    assert!(!parse(&["import", "-", "/target"]));
+    assert!(parse(&["import", "-", "/target", "--verify"]));
+    let plain = Command::new("import")
+        .args(transfer::import_args())
+        .try_get_matches_from(["import", "-", "/target"])
+        .unwrap();
+    assert!(
+        !transfer::ImportOptions::from_matches(&plain)
+            .unwrap()
+            .verify
+    );
 }
