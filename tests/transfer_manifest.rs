@@ -1863,3 +1863,151 @@ fn recursive_resume_alias_preflight_precedes_all_source_reads() {
         assert_eq!(fs::read(dest.join("nested/untouched")).unwrap(), before);
     }
 }
+
+#[test]
+fn import_resume_arguments_preserve_tree_and_verify_options() {
+    use fs_core::cli::transfer::{self, ImportManifestOptions, ImportRequest, ImportTreeOptions};
+    let matches = fs_core::cli::clap::Command::new("import")
+        .args(transfer::import_args_with_resume())
+        .try_get_matches_from([
+            "import",
+            "source",
+            "/tree",
+            "--resume",
+            "--manifest",
+            "ledger.jsonl",
+            "--recursive",
+            "--max-depth",
+            "12",
+            "--verify",
+            "--replace",
+            "--preserve=times,links",
+        ])
+        .unwrap();
+    let options = ImportManifestOptions::from_matches(&matches).unwrap();
+    assert_eq!(options.manifest, Some(PathBuf::from("ledger.jsonl")));
+    assert!(options.resume);
+    let request = ImportRequest::from_matches(&matches).unwrap();
+    assert!(request.replace);
+    assert_eq!(
+        request.input,
+        transfer::Input::File(PathBuf::from("source"))
+    );
+    assert!(
+        transfer::ImportOptions::from_matches(&matches)
+            .unwrap()
+            .verify
+    );
+    let tree = ImportTreeOptions::from_matches(&matches).unwrap();
+    assert!(tree.recursive && tree.preserve_links && tree.preserve_times);
+    assert_eq!(tree.max_depth, 12);
+}
+
+#[test]
+fn import_resume_arguments_require_a_manifest_even_with_custom_parsers() {
+    use fs_core::cli::clap::{Arg, ArgAction};
+    use fs_core::cli::transfer::{self, ImportManifestOptions, ImportRequest};
+    let error = fs_core::cli::clap::Command::new("import")
+        .args(transfer::import_args_with_resume())
+        .try_get_matches_from(["import", "source", "/file", "--resume"])
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        fs_core::cli::clap::error::ErrorKind::MissingRequiredArgument
+    );
+    let matches = fs_core::cli::clap::Command::new("import")
+        .args(transfer::import_args())
+        .arg(Arg::new("resume").long("resume").action(ArgAction::SetTrue))
+        .try_get_matches_from(["import", "source", "/file", "--resume"])
+        .unwrap();
+    let error = ImportManifestOptions::from_matches(&matches).unwrap_err();
+    assert_eq!(error.code, 2);
+    assert!(error.message.contains("--manifest"));
+    assert!(ImportRequest::from_matches(&matches).is_err());
+}
+
+#[test]
+fn import_manifest_and_resume_arguments_refuse_stdin() {
+    use fs_core::cli::transfer::{self, ImportManifestOptions, ImportRequest};
+    for resume in [false, true] {
+        let mut args = vec!["import", "-", "/file", "--manifest", "ledger.jsonl"];
+        if resume {
+            args.push("--resume");
+        }
+        let matches = fs_core::cli::clap::Command::new("import")
+            .args(transfer::import_args_with_resume())
+            .try_get_matches_from(args)
+            .unwrap();
+        let error = ImportManifestOptions::from_matches(&matches).unwrap_err();
+        assert_eq!(error.code, 2);
+        assert!(error.message.contains("stdin"));
+        assert!(ImportRequest::from_matches(&matches).is_err());
+    }
+}
+
+#[test]
+fn import_manifest_arguments_accept_single_files_without_resume_or_verify() {
+    use fs_core::cli::transfer::{self, ImportManifestOptions, ImportOptions};
+    let matches = fs_core::cli::clap::Command::new("import")
+        .args(transfer::import_args_with_manifest())
+        .try_get_matches_from(["import", "source", "/file", "--manifest", "ledger.jsonl"])
+        .unwrap();
+    let options = ImportManifestOptions::from_matches(&matches).unwrap();
+    assert_eq!(options.manifest, Some(PathBuf::from("ledger.jsonl")));
+    assert!(!options.resume);
+    assert!(!ImportOptions::from_matches(&matches).unwrap().verify);
+    assert!(fs_core::cli::clap::Command::new("import")
+        .args(transfer::import_args_with_resume())
+        .try_get_matches_from(["import", "source", "/file", "--manifest"])
+        .is_err());
+}
+
+#[test]
+fn import_manifest_options_default_for_all_legacy_argument_sets() {
+    use fs_core::cli::transfer::{self, ImportManifestOptions, ImportRequest};
+    let commands = [
+        fs_core::cli::clap::Command::new("import").args(transfer::import_args()),
+        fs_core::cli::clap::Command::new("import").args(transfer::import_args_with_verify()),
+        fs_core::cli::clap::Command::new("import").args(transfer::import_args_with_tree()),
+        fs_core::cli::clap::Command::new("import").args(transfer::import_args_with_resume()),
+    ];
+    for command in commands {
+        let matches = command
+            .try_get_matches_from(["import", "-", "/file"])
+            .unwrap();
+        assert_eq!(
+            ImportManifestOptions::from_matches(&matches).unwrap(),
+            ImportManifestOptions::default()
+        );
+        assert_eq!(
+            ImportRequest::from_matches(&matches).unwrap().input,
+            fs_core::cli::transfer::Input::Stdin
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn import_manifest_arguments_keep_non_unicode_paths() {
+    use fs_core::cli::transfer::{self, ImportManifestOptions};
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let ledger = OsString::from_vec(b"ledger-\xff.jsonl".to_vec());
+    let matches = fs_core::cli::clap::Command::new("import")
+        .args(transfer::import_args_with_resume())
+        .try_get_matches_from([
+            OsString::from("import"),
+            OsString::from("source"),
+            OsString::from("/file"),
+            OsString::from("--resume"),
+            OsString::from("--manifest"),
+            ledger.clone(),
+        ])
+        .unwrap();
+    assert_eq!(
+        ImportManifestOptions::from_matches(&matches)
+            .unwrap()
+            .manifest,
+        Some(PathBuf::from(ledger))
+    );
+}

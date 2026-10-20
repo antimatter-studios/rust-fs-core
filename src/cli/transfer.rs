@@ -62,7 +62,10 @@ pub use xattrs::{
 
 #[path = "transfer_manifest.rs"]
 pub mod manifest;
-pub use manifest::{export_args_with_manifest, export_args_with_resume, ExportManifestOptions};
+pub use manifest::{
+    export_args_with_manifest, export_args_with_resume, import_args_with_manifest,
+    import_args_with_resume, ExportManifestOptions, ImportManifestOptions,
+};
 pub use manifest::{export_tree_with_manifest, export_with_manifest};
 
 #[path = "transfer_lock.rs"]
