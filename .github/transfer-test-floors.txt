@@ -28,7 +28,8 @@ transfer_import_tree 8
 # #326 adds six portable import-manifest path safety cases (plus three Unix).
 # #331 adds five portable export manifest/resume argument cases (plus one Unix).
 # #322 adds four portable verified export recording and host-identity cases.
-transfer_manifest 39
+# #332 adds six portable single-file export resume cases against hashlib and JSON reader oracles.
+transfer_manifest 45
 # #268 adds seven portable sparse cases and two Unix host-allocation oracles.
 transfer_sparse 7
 # #303 adds eight portable xattr policy/refusal cases and host attribute oracles.

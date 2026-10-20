@@ -22,7 +22,7 @@ const MAX_LINE: usize = 64 * 1024;
 
 #[path = "transfer_export_manifest.rs"]
 mod export;
-pub(super) use export::{export_identity, ExportLedger};
+pub(super) use export::{export_identity, skipped, ExportLedger};
 pub use export::{export_tree_with_manifest, export_with_manifest};
 
 /// Opt-in export ledger arguments, separate from existing request literals.
