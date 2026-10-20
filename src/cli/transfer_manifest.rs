@@ -27,7 +27,7 @@ pub use export::{export_tree_with_manifest, export_with_manifest};
 
 #[path = "transfer_import_manifest.rs"]
 mod import;
-pub(super) use import::{import_identity, ImportLedger};
+pub(super) use import::{import_identity, import_skipped, ImportLedger};
 pub use import::{import_tree_with_manifest, import_with_manifest};
 
 /// Opt-in export ledger arguments, separate from existing request literals.
