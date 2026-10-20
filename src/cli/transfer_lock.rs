@@ -15,6 +15,12 @@ mod host_mount;
 #[path = "transfer_mount_macos.rs"]
 mod host_mount;
 
+// Platform-neutral, so every host tests it; the Windows probe that feeds it
+// is #371.
+#[cfg(test)]
+#[path = "transfer_mount_windows.rs"]
+mod windows_mount;
+
 /// A non-blocking lock on the backing image or device, independent of its
 /// partition offset. Keep the guard alive through the entire transfer.
 ///
