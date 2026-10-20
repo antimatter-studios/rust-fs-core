@@ -143,7 +143,7 @@ jobs:
         run: |
           # Run 39337729352 measured 1040 lines / 59713 bytes cold; see chores.yml.
           bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli
-          bash scripts/core.sh test-floor debug 486
+          bash scripts/core.sh test-floor debug 488
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug
           if [ "$RUNNER_OS" = Linux ]; then
             bash scripts/core.sh test-floor --targets .github/transfer-linux-test-floors.txt debug
@@ -228,7 +228,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh coverage coverage 1200 70000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90
-          bash scripts/core.sh test-floor coverage 486
+          bash scripts/core.sh test-floor coverage 488
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt coverage
           bash scripts/core.sh test-floor --targets .github/transfer-linux-test-floors.txt coverage
         env:

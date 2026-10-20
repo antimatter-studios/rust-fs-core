@@ -57,8 +57,9 @@ use sparse::{CopyOptions, SparseFile};
 #[path = "transfer_xattr.rs"]
 mod xattrs;
 pub use xattrs::{
-    export_args_with_xattrs, export_tree_with_xattrs, preserve_named_streams, ExtendedAttribute,
-    NamedStream, NamedStreamSink, XattrOptions,
+    export_args_with_xattrs, export_tree_with_xattrs, import_args_with_xattrs,
+    import_tree_with_xattrs, preserve_named_streams, ExtendedAttribute, NamedStream,
+    NamedStreamSink, XattrOptions,
 };
 
 #[path = "transfer_manifest.rs"]
@@ -244,6 +245,7 @@ pub fn export_file_with_sparse(
         CopyOptions {
             verify: options.verify,
             sparse,
+            ..CopyOptions::default()
         },
         &name,
         &mut progress,
@@ -774,6 +776,7 @@ pub fn export_with_sparse(
         CopyOptions {
             verify: options.verify,
             sparse,
+            ..CopyOptions::default()
         },
         &mut progress,
         None,

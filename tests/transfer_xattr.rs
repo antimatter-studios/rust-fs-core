@@ -2,10 +2,11 @@
 #![cfg(feature = "cli")]
 use fs_core::cli::clap::Command;
 use fs_core::cli::transfer::{
-    self, ExportRequest, ExtendedAttribute, LinkOptions, Output, TimeOptions, TreeEntry, TreeKind,
-    TreeMetadata, TreeOptions, TreeSource, XattrOptions,
+    self, ExportRequest, ExtendedAttribute, ImportRequest, ImportTreeOptions, Input, LinkOptions,
+    Output, TimeOptions, TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource, XattrOptions,
 };
 use fs_core::cli::{CliError, Json, Outcome};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 struct Source {
@@ -440,5 +441,228 @@ fn host_export_names_the_refused_stream_without_creating_side_files() {
         .map(|e| e.unwrap().file_name())
         .collect();
     assert_eq!(names, [std::ffi::OsString::from("file")]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// Imports read host attributes and hand them to an optional sink capability.
+macro_rules! import_sink {
+    ($name:ident) => {
+        #[derive(Default)]
+        struct $name {
+            files: Vec<PathBuf>,
+            staged: Option<PathBuf>,
+            attributes: Vec<(PathBuf, ExtendedAttribute)>,
+        }
+        impl transfer::FileSink for $name {
+            fn stage(&mut self, path: &Path, _: bool) -> Result<(), CliError> {
+                self.staged = Some(path.into());
+                Ok(())
+            }
+            fn write_at(&mut self, _: u64, _: &[u8]) -> Result<(), CliError> {
+                Ok(())
+            }
+            fn persist(&mut self) -> Result<(), CliError> {
+                Ok(())
+            }
+            fn read_at(&mut self, _: u64, _: &mut [u8]) -> Result<usize, CliError> {
+                unreachable!()
+            }
+            fn publish(&mut self, _: bool) -> Result<bool, CliError> {
+                self.files.push(self.staged.take().unwrap());
+                Ok(false)
+            }
+            fn abort(&mut self) -> Result<(), CliError> {
+                self.staged = None;
+                Ok(())
+            }
+        }
+    };
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+import_sink!(AttributeSink);
+import_sink!(NoAttributeSink);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl transfer::TreeSink for AttributeSink {
+    fn validate_name(&mut self, _: &Path, name: &OsStr) -> Result<OsString, CliError> {
+        Ok(name.into())
+    }
+    fn create_dir(&mut self, _: &Path) -> Result<bool, CliError> {
+        Ok(false)
+    }
+    fn set_extended_attribute(
+        &mut self,
+        path: &Path,
+        attribute: &ExtendedAttribute,
+    ) -> Result<(), CliError> {
+        self.attributes.push((path.into(), attribute.clone()));
+        Ok(())
+    }
+}
+impl transfer::TreeSink for NoAttributeSink {
+    fn validate_name(&mut self, _: &Path, name: &OsStr) -> Result<OsString, CliError> {
+        Ok(name.into())
+    }
+    fn create_dir(&mut self, _: &Path) -> Result<bool, CliError> {
+        Ok(false)
+    }
+    fn format_name(&self) -> &str {
+        "the attribute-free sink"
+    }
+}
+fn import_root(tag: &str) -> PathBuf {
+    let root = destination(&format!("import-{tag}"));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"data").unwrap();
+    std::fs::create_dir(root.join("dir")).unwrap();
+    root
+}
+fn import(root: &Path, sink: &mut dyn transfer::TreeSink, preserve: bool) -> Outcome {
+    transfer::import_tree_with_xattrs(
+        &ImportRequest {
+            input: Input::File(root.into()),
+            path: "/dest".into(),
+            replace: false,
+        },
+        Some(sink),
+        ImportTreeOptions {
+            recursive: true,
+            ..ImportTreeOptions::default()
+        },
+        XattrOptions {
+            preserve_xattrs: preserve,
+        },
+    )
+    .unwrap()
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn item<'a>(result: &'a Outcome, destination: &str) -> &'a Json {
+    let Some(Json::Arr(items)) = result.report.as_ref().unwrap().get("items") else {
+        panic!("no items: {:?}", result.report);
+    };
+    items
+        .iter()
+        .find(|item| matches!(item.get("destination"), Some(Json::Str(d)) if d == destination))
+        .unwrap_or_else(|| panic!("no item for {destination}: {:?}", result.report))
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn field<'a>(item: &'a Json, key: &str) -> &'a str {
+    match item.get(key) {
+        Some(Json::Str(s)) => s,
+        other => panic!("unexpected {key}: {other:?}"),
+    }
+}
+#[test]
+fn import_xattrs_combine_with_existing_preserve_policies() {
+    let matches = Command::new("import")
+        .args(transfer::import_args_with_xattrs())
+        .try_get_matches_from([
+            "import",
+            "src",
+            "/dest",
+            "--preserve=times,xattrs",
+            "--recursive",
+        ])
+        .unwrap();
+    assert!(
+        XattrOptions::from_matches(&matches)
+            .unwrap()
+            .preserve_xattrs
+    );
+    let options = ImportTreeOptions::from_matches(&matches).unwrap();
+    assert!(options.recursive && options.preserve_times && !options.preserve_links);
+}
+#[test]
+fn disabled_xattr_import_needs_no_sink_capability() {
+    let root = import_root("disabled");
+    let mut sink = NoAttributeSink::default();
+    let result = import(&root, &mut sink, false);
+    assert_eq!(count(&result, "completed"), 3, "{:?}", result.report);
+    assert_eq!(count(&result, "refused"), 0, "{:?}", result.report);
+    assert_eq!(sink.files, [PathBuf::from("/dest/file")]);
+    assert!(sink.attributes.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+/// Write an attribute with the host's own tool, independent of this crate.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn set_host_attribute(path: &Path, name: &str, value: &[u8]) {
+    use std::process::Command;
+    let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
+    #[cfg(target_os = "linux")]
+    let output = Command::new("python3")
+        .args(["-c", "import os,sys; os.setxattr(sys.argv[1], sys.argv[2], bytes.fromhex(sys.argv[3]), follow_symlinks=False)"])
+        .arg(path).arg(name).arg(&hex).output().expect("install python3 for the host xattr oracle");
+    #[cfg(target_os = "macos")]
+    let output = if value.is_empty() {
+        Command::new("/usr/bin/xattr")
+            .args(["-w", name, ""])
+            .arg(path)
+            .output()
+    } else {
+        Command::new("/usr/bin/xattr")
+            .args(["-wx", name, &hex])
+            .arg(path)
+            .output()
+    }
+    .expect("the host xattr oracle is required");
+    assert!(output.status.success(), "host xattr oracle: {output:?}");
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn host_attributes_written_by_the_host_tool_import_into_a_capable_sink() {
+    let root = import_root("capable");
+    let bytes = vec![0, 255, 10, 42];
+    set_host_attribute(&root.join("file"), "user.core-import", &bytes);
+    set_host_attribute(&root.join("file"), "user.core-empty", &[]);
+    set_host_attribute(&root.join("dir"), "user.core-dir", b"d");
+    let mut sink = AttributeSink::default();
+    let result = import(&root, &mut sink, true);
+    assert_eq!(count(&result, "completed"), 3, "{:?}", result.report);
+    assert_eq!(count(&result, "refused"), 0, "{:?}", result.report);
+    // Hosts may add their own attributes; only the ones written above are graded.
+    let ours = |at: &str| {
+        let mut found: Vec<_> = sink
+            .attributes
+            .iter()
+            .filter(|(path, a)| {
+                path == Path::new(at) && a.name.to_string_lossy().starts_with("user.core-")
+            })
+            .map(|(_, a)| (a.name.clone(), a.value.clone()))
+            .collect();
+        found.sort();
+        found
+    };
+    assert_eq!(
+        ours("/dest/file"),
+        [
+            (OsString::from("user.core-empty"), vec![]),
+            (OsString::from("user.core-import"), bytes),
+        ]
+    );
+    assert_eq!(
+        ours("/dest/dir"),
+        [(OsString::from("user.core-dir"), b"d".to_vec())]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_sink_without_the_capability_refuses_each_attributed_item() {
+    let root = import_root("incapable");
+    set_host_attribute(&root.join("file"), "user.core-import", b"value");
+    set_host_attribute(&root.join("dir"), "user.core-dir", b"d");
+    let mut sink = NoAttributeSink::default();
+    let result = import(&root, &mut sink, true);
+    assert_ne!(result.code, 0, "{:?}", result.report);
+    for at in ["/dest/file", "/dest/dir"] {
+        let item = item(&result, at);
+        assert_eq!(field(item, "status"), "refused", "{item:?}");
+        let reason = field(item, "reason");
+        assert!(
+            reason.contains("extended attributes not supported by the attribute-free sink"),
+            "{reason}"
+        );
+    }
+    // The contents were published; only the attribute is refused, not dropped.
+    assert_eq!(sink.files, [PathBuf::from("/dest/file")]);
     std::fs::remove_dir_all(root).unwrap();
 }

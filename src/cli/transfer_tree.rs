@@ -760,6 +760,7 @@ pub(super) fn export_tree_recorded(
                         CopyOptions {
                             verify: options.verify,
                             sparse,
+                            ..CopyOptions::default()
                         },
                         progress,
                         &cancellation,
