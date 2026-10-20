@@ -37,6 +37,14 @@ impl From<ExportOptions> for CopyOptions {
         }
     }
 }
+impl From<ImportOptions> for CopyOptions {
+    fn from(options: ImportOptions) -> Self {
+        Self {
+            verify: options.verify,
+            ..Self::default()
+        }
+    }
+}
 
 pub(super) struct SparseFile<'a>(pub &'a mut File);
 impl Write for SparseFile<'_> {

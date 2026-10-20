@@ -73,15 +73,16 @@ chore_min_version: 0.6.0
 # #333 adds four portable recursive resume cases (472), plus a Unix signal oracle.
 # #343 adds three portable verified file-import recording cases (475).
 # #344 adds two portable verified tree-import recording cases (477).
+# #301 adds two portable sparse command/tree cases (479), plus a Unix host oracle.
 # symlink cases; CI runs the tests and measures execution.
 # Release uses the same selection and measured the same 557 lines / 31,295
 # bytes after its cold LTO build. Coverage measured 575 lines / 32,607 bytes
 # and executed the same 374 tests as the post-change debug run:
 #
 #   tier       measured locally       budget           floor
-#   debug      1040 lines (CI, cold)  1200 / 70,000     477
-#   release    751 lines (CI, cold)   1000 / 60,000     477
-#   coverage   575 / 32,607 bytes     1200 / 70,000     477
+#   debug      1040 lines (CI, cold)  1200 / 70,000     479
+#   release    751 lines (CI, cold)   1000 / 60,000     479
+#   coverage   575 / 32,607 bytes     1200 / 70,000     479
 #   semver     (see below)              40 / 4,000       -
 #
 # THE DEBUG AND RELEASE ROWS MOVED ON 2026-10-06, from 750 / 50,000: the v0.3.5
@@ -236,14 +237,14 @@ tasks:
     desc: Debug-profile suite, including every target
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli'
-      - 'bash scripts/core.sh test-floor debug 477'
+      - 'bash scripts/core.sh test-floor debug 479'
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug'
 
   test:release:
     desc: Release-profile suite, including every target
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli -- --quiet'
-      - 'bash scripts/core.sh test-floor release 477'
+      - 'bash scripts/core.sh test-floor release 479'
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt release'
 
   test:
@@ -256,7 +257,7 @@ tasks:
     desc: Instrumented suite with the same 90% line-coverage gate as CI
     cmds:
       - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh coverage coverage 1200 70000 -- cargo llvm-cov --features cli --html --output-dir target/llvm-cov --fail-under-lines 90'
-      - 'bash scripts/core.sh test-floor coverage 477'
+      - 'bash scripts/core.sh test-floor coverage 479'
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt coverage'
 
   clean:
