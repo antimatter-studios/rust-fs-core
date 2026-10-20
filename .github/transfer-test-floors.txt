@@ -26,7 +26,8 @@ transfer_import_tree 8
 # #295 adds ten portable resume-evidence cases; CI measures execution.
 # #321 adds six portable export-manifest path safety cases (plus three Unix).
 # #326 adds six portable import-manifest path safety cases (plus three Unix).
-transfer_manifest 30
+# #331 adds five portable export manifest/resume argument cases (plus one Unix).
+transfer_manifest 35
 # #268 adds seven portable sparse cases and two Unix host-allocation oracles.
 transfer_sparse 7
 # #303 adds eight portable xattr policy/refusal cases and host attribute oracles.
