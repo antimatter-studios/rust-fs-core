@@ -410,6 +410,49 @@ fn a_replacement_that_exactly_fits_is_published() {
     assert_eq!(sink.asked, Some((2 * CHUNK) as u64));
     assert_eq!(sink.old.as_ref().map(Vec::len), Some(2 * CHUNK));
 }
+// Stdin has no size to ask about up front, so the staged copy is checked at
+// its new length before each chunk is written.
+#[test]
+fn a_stdin_replacement_that_outgrows_the_free_space_is_refused() {
+    let mut source = Producer {
+        left: (4 * CHUNK) as u64,
+        fail: false,
+        reads: 0,
+    };
+    let mut sink = old_sink();
+    let free = (2 * CHUNK) as u64 + METADATA;
+    sink.free = Some(free);
+    let error = copy(&mut source, Some(&mut sink), true).unwrap_err();
+    assert_eq!(error.code, 1);
+    let needed = (3 * CHUNK) as u64 + METADATA;
+    assert!(
+        error.message.contains(&format!("needs {needed} bytes")),
+        "{error:?}"
+    );
+    assert!(
+        error.message.contains(&format!("{free} bytes free")),
+        "{error:?}"
+    );
+    assert_eq!(sink.asked, Some((3 * CHUNK) as u64));
+    assert_eq!(sink.written, (2 * CHUNK) as u64);
+    assert_eq!(sink.old.as_deref(), Some(b"old".as_slice()));
+    assert!(sink.staged.is_none());
+}
+#[test]
+fn a_stdin_replacement_that_fits_as_it_grows_is_published() {
+    let mut source = Producer {
+        left: (2 * CHUNK) as u64,
+        fail: false,
+        reads: 0,
+    };
+    let mut sink = old_sink();
+    sink.free = Some((2 * CHUNK) as u64 + METADATA);
+    let copied = copy(&mut source, Some(&mut sink), true).unwrap();
+    assert_eq!(copied.bytes, (2 * CHUNK) as u64);
+    assert!(copied.replaced);
+    assert_eq!(sink.asked, Some((2 * CHUNK) as u64));
+    assert_eq!(sink.old.as_ref().map(Vec::len), Some(2 * CHUNK));
+}
 fn changed_source(name: &str, hook: fn(&Path)) {
     let mut source = local_source(name, Some(hook));
     let mut sink = old_sink();

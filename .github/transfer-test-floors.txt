@@ -18,7 +18,8 @@ transfer_cancel 1
 # #263 adds nine portable source-identity cases and one Unix change-time oracle.
 # #262 adds three portable read-back verification cases.
 # #261 adds two portable free-space cases.
-transfer_import 27
+# #365 adds two portable stdin free-space cases.
+transfer_import 29
 # #264 adds eight portable recursive-import cases and a Unix symlink case.
 # #267 adds three Unix hard-link, symbolic-link and time capability cases.
 transfer_import_tree 8
