@@ -141,7 +141,8 @@ jobs:
       - name: test (quiet, budgeted, with an executed-test floor)
         shell: bash
         run: |
-          bash scripts/tier.sh "test (debug)" debug 1000 60000 -- cargo test --locked --all-targets --features cli
+          # Run 39337729352 measured 1040 lines / 59713 bytes cold; see chores.yml.
+          bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli
           bash scripts/core.sh test-floor debug 464
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug
           if [ "$RUNNER_OS" = Linux ]; then

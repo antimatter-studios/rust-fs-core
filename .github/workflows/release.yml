@@ -49,7 +49,7 @@ jobs:
 
       - name: test (debug, quiet and budgeted)
         run: |
-          bash scripts/tier.sh "test (debug)" debug 1000 60000 -- cargo test --locked --all-targets --features cli
+          bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli
           bash scripts/core.sh test-floor debug 348
       # A RELEASE-PROFILE RUN, DECIDED IN #111. The profile published is
       # the release one, and optimisation can change behaviour the debug
