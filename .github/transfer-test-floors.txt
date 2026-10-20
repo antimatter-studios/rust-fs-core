@@ -34,7 +34,8 @@ transfer_import_tree 8
 # #343 adds three portable verified single-file import recording cases.
 # #344 adds two portable verified recursive import recording cases.
 # #340 adds five portable single-file import resume cases against hashlib and JSON reader oracles.
-transfer_manifest 64
+# #341 adds one portable tree import resume case against hashlib oracles.
+transfer_manifest 65
 # #268 adds seven portable sparse cases and two Unix host-allocation oracles.
 transfer_sparse 7
 # #303 adds eight portable xattr policy/refusal cases and host attribute oracles.
