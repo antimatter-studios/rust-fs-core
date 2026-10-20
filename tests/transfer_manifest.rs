@@ -524,6 +524,298 @@ fn evidence(entries: Vec<ManifestEntry>) -> ManifestRead {
     }
 }
 
+// Driver identities are supplied independently of the local publication.
+struct ExportSource {
+    image: PathBuf,
+    ledger: PathBuf,
+    reads: usize,
+    verified: bool,
+}
+impl fs_core::cli::transfer::FileSource for ExportSource {
+    fn image_path(&self) -> Option<&std::path::Path> {
+        Some(&self.image)
+    }
+    fn manifest_identity(&self) -> Result<Identity, fs_core::cli::CliError> {
+        assert!(
+            self.verified,
+            "unverified copies need no identity capability"
+        );
+        let mut identity = entry().source;
+        if let Identity::Image { image, .. } = &mut identity {
+            image.path = self.image.clone();
+        }
+        Ok(identity)
+    }
+    fn size(&self) -> u64 {
+        3
+    }
+    fn read_at(&mut self, _: u64, buf: &mut [u8]) -> Result<usize, fs_core::cli::CliError> {
+        self.reads += 1;
+        buf[..3].copy_from_slice(b"abc");
+        Ok(3)
+    }
+}
+impl fs_core::cli::transfer::TreeSource for ExportSource {
+    fn image_path(&self) -> Option<&std::path::Path> {
+        Some(&self.image)
+    }
+    fn manifest_identity(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<Identity, fs_core::cli::CliError> {
+        use fs_core::cli::transfer::FileSource;
+        let mut identity = FileSource::manifest_identity(self)?;
+        if let Identity::Image { path: recorded, .. } = &mut identity {
+            *recorded = path.into();
+        }
+        Ok(identity)
+    }
+    fn metadata(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<fs_core::cli::transfer::TreeMetadata, fs_core::cli::CliError> {
+        use fs_core::cli::transfer::{TreeKind, TreeMetadata};
+        Ok(TreeMetadata {
+            kind: if path == std::path::Path::new("/image/file") {
+                TreeKind::Directory
+            } else {
+                TreeKind::File
+            },
+            size: 3,
+            inode: if path.ends_with("later") { 2 } else { 1 },
+            accessed: None,
+            modified: None,
+        })
+    }
+    fn read_dir(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<Vec<fs_core::cli::transfer::TreeEntry>, fs_core::cli::CliError> {
+        Ok(["first", "later"]
+            .into_iter()
+            .map(|name| fs_core::cli::transfer::TreeEntry {
+                name: name.into(),
+                metadata: self.metadata(&path.join(name)).unwrap(),
+            })
+            .collect())
+    }
+    fn read_file_at(
+        &mut self,
+        path: &std::path::Path,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, fs_core::cli::CliError> {
+        use fs_core::cli::transfer::FileSource;
+        if path.ends_with("later") {
+            let lines = fs::read_to_string(&self.ledger).unwrap();
+            assert_eq!(
+                lines.lines().count(),
+                2 * usize::from(self.verified),
+                "first publication must be persisted before next read"
+            );
+            assert!(Manifest::open(&self.ledger).is_err(), "ledger stays locked");
+            return Err(fs_core::cli::CliError::failed("later read failed"));
+        }
+        FileSource::read_at(self, offset, buf)
+    }
+}
+fn export_run(tag: &str, verify: bool, tree: bool) -> (PathBuf, PathBuf, fs_core::cli::Outcome) {
+    use fs_core::cli::transfer::{
+        self, ExportManifestOptions, ExportOptions, ExportRequest, Output, TreeOptions,
+    };
+    let (ledger, image, dest) = export_paths(tag);
+    if tree && verify {
+        let (mut previous, _) = Manifest::open(&ledger).unwrap();
+        previous.append(&entry(), true).unwrap();
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ledger)
+        .unwrap()
+        .write_all(b"torn tail")
+        .unwrap();
+    let mut source = ExportSource {
+        image,
+        ledger: ledger.clone(),
+        reads: 0,
+        verified: verify,
+    };
+    let request = ExportRequest {
+        path: "/image/file".into(),
+        output: Output::File(dest.clone()),
+        replace: false,
+    };
+    let manifest = ExportManifestOptions {
+        manifest: Some(ledger.clone()),
+        resume: false,
+    };
+    let outcome = if tree {
+        transfer::export_tree_with_manifest(
+            &request,
+            &mut source,
+            TreeOptions {
+                recursive: true,
+                verify,
+                ..TreeOptions::default()
+            },
+            &manifest,
+        )
+    } else {
+        transfer::export_with_manifest(&request, &mut source, ExportOptions { verify }, &manifest)
+    }
+    .unwrap();
+    assert_eq!(
+        outcome.report.as_ref().unwrap().get("manifest_torn_tail"),
+        Some(&fs_core::cli::Json::Bool(true))
+    );
+    (ledger, dest, outcome)
+}
+
+#[test]
+fn verified_file_exports_capture_published_host_and_driver_identities() {
+    let (ledger, dest, outcome) = export_run("record-file", true, false);
+    assert_eq!(outcome.code, 0);
+    let (_, read) = Manifest::open(&ledger).unwrap();
+    assert_eq!(read.entries.len(), 1);
+    let recorded = &read.entries[0];
+    let mut expected = entry().source;
+    if let Identity::Image { image, .. } = &mut expected {
+        image.path = ledger.with_file_name("image");
+    }
+    assert_eq!(recorded.source, expected);
+    assert_eq!(recorded.bytes, 3);
+    assert_eq!(recorded.sha256, entry().sha256);
+    let Identity::Local(local) = &recorded.destination else {
+        panic!("local destination")
+    };
+    assert_eq!(local.path, dest);
+    assert_eq!(local.size, fs::metadata(&dest).unwrap().len());
+    let script = r#"import json,os,sys
+e=json.loads(open(sys.argv[1]).read()); s=os.stat(sys.argv[2]); d=e['destination']
+assert (d['device'],d['inode'],d['size'])==(s.st_dev,s.st_ino,s.st_size)
+changed=s.st_ctime_ns
+if os.name=='nt':
+    import ctypes,msvcrt
+    from ctypes import wintypes
+    get=ctypes.WinDLL('kernel32',use_last_error=True).GetFileInformationByHandleEx
+    get.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
+    basic=ctypes.create_string_buffer(40)
+    with open(sys.argv[2],'rb') as f:
+        assert get(msvcrt.get_osfhandle(f.fileno()),0,basic,len(basic))
+    changed=(ctypes.c_longlong.from_buffer(basic,24).value-116444736000000000)*100
+for field,ns in [('accessed',s.st_atime_ns),('modified',s.st_mtime_ns),('changed',changed)]:
+    assert d[field]['seconds']*10**9+d[field]['nanoseconds']==ns
+"#;
+    let result = Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args(["-c", script])
+        .arg(ledger)
+        .arg(dest)
+        .output()
+        .expect("install Python 3 for host stat oracle");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn unverified_file_and_tree_exports_append_no_evidence() {
+    for tree in [false, true] {
+        let (ledger, dest, _) = export_run(
+            if tree {
+                "unverified-tree"
+            } else {
+                "unverified-file"
+            },
+            false,
+            tree,
+        );
+        assert!(fs::read(ledger).unwrap().is_empty());
+        assert_eq!(
+            fs::read(if tree { dest.join("first") } else { dest }).unwrap(),
+            b"abc"
+        );
+    }
+}
+
+#[test]
+fn tree_exports_persist_each_verified_file_before_a_later_failure() {
+    let (ledger, dest, outcome) = export_run("record-tree", true, true);
+    assert_ne!(outcome.code, 0);
+    let (_, read) = Manifest::open(&ledger).unwrap();
+    assert_eq!(read.entries.len(), 2);
+    assert_eq!(read.entries[0], entry());
+    let Identity::Image { path, .. } = &read.entries[1].source else {
+        panic!("image source")
+    };
+    assert_eq!(path, &PathBuf::from("/image/file/first"));
+    assert_eq!(fs::read(dest.join("first")).unwrap(), b"abc");
+    assert!(!dest.join("later").exists());
+}
+
+#[test]
+fn manifest_adapters_refuse_unsafe_paths_before_any_transfer_reads() {
+    use fs_core::cli::transfer::{
+        self, ExportManifestOptions, ExportOptions, ExportRequest, Output, TreeOptions,
+    };
+    for tree in [false, true] {
+        let (ledger, image, dest) = export_paths(if tree {
+            "adapter-unsafe-tree"
+        } else {
+            "adapter-unsafe-file"
+        });
+        for unsafe_path in [
+            image.clone(),
+            dest.clone(),
+            if tree {
+                dest.join("ledger")
+            } else {
+                dest.clone()
+            },
+        ] {
+            let mut source = ExportSource {
+                image: image.clone(),
+                ledger: ledger.clone(),
+                reads: 0,
+                verified: true,
+            };
+            let request = ExportRequest {
+                path: "/image/file".into(),
+                output: Output::File(dest.clone()),
+                replace: true,
+            };
+            let manifest = ExportManifestOptions {
+                manifest: Some(unsafe_path),
+                resume: false,
+            };
+            let result = if tree {
+                transfer::export_tree_with_manifest(
+                    &request,
+                    &mut source,
+                    TreeOptions {
+                        recursive: true,
+                        verify: true,
+                        ..TreeOptions::default()
+                    },
+                    &manifest,
+                )
+            } else {
+                transfer::export_with_manifest(
+                    &request,
+                    &mut source,
+                    ExportOptions { verify: true },
+                    &manifest,
+                )
+            };
+            assert!(result.is_err());
+            assert_eq!(source.reads, 0);
+            assert!(!dest.exists());
+        }
+    }
+}
+
 #[test]
 fn export_resume_arguments_preserve_tree_and_metadata_options() {
     use fs_core::cli::transfer::{self, ExportManifestOptions, ExportRequest, TreeOptions};
