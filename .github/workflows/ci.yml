@@ -148,6 +148,9 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             bash scripts/core.sh test-floor --targets .github/transfer-linux-test-floors.txt debug
           fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            bash scripts/core.sh test-floor --targets .github/transfer-macos-test-floors.txt debug
+          fi
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
           EXPECT_OVERFLOW_CHECKS: "1"

@@ -377,3 +377,109 @@ fn failed_host_mount_probes_refuse_import_with_input_unread() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot determine host mount state"));
     assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
 }
+
+#[cfg(target_os = "macos")]
+#[path = "support/mounted_hdiutil.rs"]
+mod mounted_hdiutil;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_attached_images_and_devices_refuse_import_with_input_unread() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        match ImageLock::for_import(Path::new(&image)) {
+            Err(err) => {
+                eprintln!("{}", err.message);
+                std::process::exit(i32::from(err.code));
+            }
+            Ok(_guard) => {
+                std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+                std::process::exit(0);
+            }
+        }
+    }
+    if !mounted_hdiutil::host() {
+        return;
+    }
+    let dir = Scratch::new("hdiutil-import");
+    let mut volume = mounted_hdiutil::Volume::new(&dir.root, true);
+    let alias = dir.root.join("image alias");
+    fs::hard_link(&volume.image, &alias).unwrap();
+    for readonly in [false, true] {
+        volume.remount(readonly);
+        for image in [&volume.image, &volume.device, &alias] {
+            let input_path = dir.root.join("input");
+            fs::write(&input_path, b"producer bytes still unread").unwrap();
+            let mut input = File::open(input_path).unwrap();
+            let output = child(
+                "macos_attached_images_and_devices_refuse_import_with_input_unread",
+                image,
+            )
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("mounted"));
+            assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
+        }
+    }
+    // Attached but unmounted is not mounted; after detach the image is free.
+    volume.unmount();
+    drop(ImageLock::for_import(&volume.device).unwrap());
+    volume.detach();
+    drop(ImageLock::for_import(&volume.image).unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        let mut source = Source {
+            image: image.into(),
+            reads: 0,
+        };
+        let mut bytes = Vec::new();
+        transfer::export_file(&mut source, Destination::Writer(&mut bytes)).unwrap();
+        assert_eq!(bytes, b"abc");
+        return;
+    }
+    if !mounted_hdiutil::host() {
+        return;
+    }
+    let dir = Scratch::new("hdiutil-export");
+    let mut volume = mounted_hdiutil::Volume::new(&dir.root, false);
+    for readonly in [false, true] {
+        volume.remount(readonly);
+        for image in [&volume.image, &volume.device] {
+            let output = child(
+                "macos_read_write_mounts_warn_on_export_stderr_and_read_only_mounts_do_not",
+                image,
+            )
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            // DiskImages may hold its own lock on an attached image, which
+            // warns separately; only the mount warning tracks the mount mode.
+            assert_eq!(stderr.contains("mounted read-write"), !readonly, "{stderr}");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_failed_host_mount_probes_refuse_import_with_input_unread() {
+    let dir = Scratch::new("hdiutil-probe-failure");
+    let input_path = dir.root.join("input");
+    fs::write(&input_path, b"producer bytes still unread").unwrap();
+    let mut input = File::open(input_path).unwrap();
+    let output = child(
+        "macos_attached_images_and_devices_refuse_import_with_input_unread",
+        Path::new("/dev/zero"),
+    )
+    .stdin(Stdio::from(input.try_clone().unwrap()))
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot determine host mount state"));
+    assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
+}

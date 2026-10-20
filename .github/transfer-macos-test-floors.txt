@@ -1,0 +1,3 @@
+# #316 adds three real macOS DiskImages mount oracle cases above the eight
+# existing Unix cases; no hdiutil, diskutil or sudo prerequisite may skip.
+transfer_exclusive 11
