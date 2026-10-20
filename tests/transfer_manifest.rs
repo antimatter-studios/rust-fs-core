@@ -1602,11 +1602,7 @@ impl fs_core::cli::transfer::TreeSource for ResumeTree {
         #[cfg(unix)]
         if self.signal_during_read {
             self.signal_during_read = false;
-            assert!(Command::new("kill")
-                .args(["-TERM", &std::process::id().to_string()])
-                .status()
-                .unwrap()
-                .success());
+            signal_hook::low_level::raise(signal_hook::consts::SIGTERM).unwrap();
         }
         if self.mutate_inode {
             self.mutate_inode = false;
