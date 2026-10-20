@@ -1599,6 +1599,10 @@ impl fs_core::cli::transfer::TreeSource for ResumeTree {
         buf: &mut [u8],
     ) -> Result<usize, fs_core::cli::CliError> {
         self.reads.push((path.into(), offset));
+        // kill(1) exiting only proves SIGTERM was posted to the process: the
+        // kernel may hand it to another thread, whose handler can still be
+        // pending when the read returns (#352). raise(3) returns only after
+        // the handler has run, so the signal is observed during the read.
         #[cfg(unix)]
         if self.signal_during_read {
             self.signal_during_read = false;
