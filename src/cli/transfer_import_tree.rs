@@ -49,6 +49,12 @@ pub trait TreeSink: FileSink {
     ) -> Result<(), CliError> {
         Err(unsupported(self.format_name(), "extended attributes"))
     }
+    /// The optional named-stream capability, reached only for items carrying
+    /// host named streams. Drivers lacking streams keep the default, and each
+    /// such item is refused by stream name after its contents are published.
+    fn named_stream_sink(&mut self) -> Option<&mut dyn NamedStreamSink> {
+        None
+    }
 }
 
 fn unsupported(format: &str, capability: &str) -> CliError {

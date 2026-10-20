@@ -36,8 +36,9 @@ pub trait NamedStreamSink {
 /// Copy named streams only when `--preserve=xattrs` is enabled. Neither optional
 /// capability is queried otherwise. Errors name the affected stream and retain
 /// the sink's refusal/failure classification. Earlier stream writes remain.
-/// Host tree exports use an explicitly incapable sink; host stream import is a
-/// separate platform capability and no side-file layout is implied here.
+/// Host tree exports use an explicitly incapable sink; tree imports read host
+/// streams themselves (see [`import_tree_with_xattrs`]). No side-file layout
+/// is implied here.
 pub fn preserve_named_streams(
     source: &mut dyn TreeSource,
     path: &Path,
@@ -130,7 +131,7 @@ pub fn import_args_with_xattrs() -> [Arg; 6] {
     let [source, path, replace, recursive, depth, preserve] = import_args_with_tree();
     [source, path, replace, recursive, depth,
         preserve.value_parser(["links", "times", "sparse", "xattrs"])
-            .help("Preserve links, times, sparse holes and/or extended attributes; a sink lacking one refuses each affected item")]
+            .help("Preserve links, times, sparse holes and/or extended attributes and named streams; a sink lacking one refuses each affected item")]
 }
 
 /// Import with opt-in host extended attributes, read without following
@@ -138,6 +139,13 @@ pub fn import_args_with_xattrs() -> [Arg; 6] {
 /// lacking the capability refuses each attributed item by attribute name after
 /// its contents are published; siblings and a refused directory's children
 /// continue. Hard-linked names share the first name's attributes.
+///
+/// Host named streams follow the attributes: on macOS a regular file's
+/// resource fork becomes the stream `rsrc` (and is not also passed as the
+/// `com.apple.ResourceFork` attribute), handed to
+/// [`TreeSink::named_stream_sink`]. A sink without that capability refuses the
+/// item by stream name. Hosts without named streams pass none, and ordinary
+/// files are never read as stream side files.
 pub fn import_tree_with_xattrs(
     request: &ImportRequest,
     sink: Option<&mut dyn TreeSink>,
@@ -167,14 +175,15 @@ pub(super) fn import_attributes(
     if !options.preserve_xattrs {
         return Ok(());
     }
-    let attributes = host_attributes(local).map_err(|e| {
-        let message = format!("extended attributes unreadable: {e}");
+    let unreadable = |what: &str, e: io::Error| {
+        let message = format!("{what} unreadable: {e}");
         if e.kind() == io::ErrorKind::Unsupported {
             CliError::refused(message)
         } else {
             CliError::failed(message)
         }
-    })?;
+    };
+    let attributes = host_attributes(local).map_err(|e| unreadable("extended attributes", e))?;
     for attribute in attributes {
         sink.set_extended_attribute(dest, &attribute)
             .map_err(|mut error| {
@@ -183,13 +192,36 @@ pub(super) fn import_attributes(
                 error
             })?;
     }
+    let streams = host_named_streams(local).map_err(|e| unreadable("named streams", e))?;
+    for stream in streams {
+        let format = sink.format_name().to_owned();
+        let written = match sink.named_stream_sink() {
+            Some(capable) => capable.set_named_stream(dest, &stream),
+            None => Err(CliError::refused(format!(
+                "named streams not supported by {format}"
+            ))),
+        };
+        written.map_err(|mut error| {
+            error.message = format!("named stream {:?}: {}", stream.name, error.message);
+            error
+        })?;
+    }
     Ok(())
 }
+
+// The macOS resource fork, held by the kernel under this attribute name and
+// imported as the file's named stream rather than as an attribute.
+#[cfg(target_os = "macos")]
+const RESOURCE_FORK_ATTRIBUTE: &str = "com.apple.ResourceFork";
 
 #[cfg(unix)]
 fn host_attributes(local: &Path) -> io::Result<Vec<ExtendedAttribute>> {
     let mut attributes = Vec::new();
     for name in xattr::list(local)? {
+        #[cfg(target_os = "macos")]
+        if name == RESOURCE_FORK_ATTRIBUTE {
+            continue;
+        }
         // An attribute removed after listing is no longer part of the source.
         if let Some(value) = xattr::get(local, &name)? {
             attributes.push(ExtendedAttribute { name, value });
@@ -203,6 +235,38 @@ fn host_attributes(_local: &Path) -> io::Result<Vec<ExtendedAttribute>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "host extended attributes are unsupported",
+    ))
+}
+
+/// The host's named streams: on macOS a regular file's resource fork, read
+/// through its `..namedfork/rsrc` path. Directories and symbolic links carry
+/// none, and the fork path is never opened through a link.
+#[cfg(target_os = "macos")]
+fn host_named_streams(local: &Path) -> io::Result<Vec<NamedStream>> {
+    if !fs::symlink_metadata(local)?.is_file()
+        || !xattr::list(local)?.any(|name| name == RESOURCE_FORK_ATTRIBUTE)
+    {
+        return Ok(Vec::new());
+    }
+    let value = fs::read(local.join("..namedfork/rsrc"))?;
+    Ok(vec![NamedStream {
+        name: "rsrc".into(),
+        value,
+    }])
+}
+
+// Other Unix hosts have no named streams; attributes and side files stay what
+// they are and are never reinterpreted as streams.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn host_named_streams(_local: &Path) -> io::Result<Vec<NamedStream>> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(unix))]
+fn host_named_streams(_local: &Path) -> io::Result<Vec<NamedStream>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "host named streams are unsupported",
     ))
 }
 

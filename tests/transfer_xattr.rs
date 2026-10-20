@@ -448,10 +448,12 @@ fn host_export_names_the_refused_stream_without_creating_side_files() {
 macro_rules! import_sink {
     ($name:ident) => {
         #[derive(Default)]
+        #[allow(dead_code)]
         struct $name {
             files: Vec<PathBuf>,
             staged: Option<PathBuf>,
             attributes: Vec<(PathBuf, ExtendedAttribute)>,
+            streams: Vec<(PathBuf, transfer::NamedStream)>,
         }
         impl transfer::FileSink for $name {
             fn stage(&mut self, path: &Path, _: bool) -> Result<(), CliError> {
@@ -664,5 +666,129 @@ fn a_sink_without_the_capability_refuses_each_attributed_item() {
     }
     // The contents were published; only the attribute is refused, not dropped.
     assert_eq!(sink.files, [PathBuf::from("/dest/file")]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// Imports hand host named streams to the optional stream capability only.
+import_sink!(StreamImportSink);
+impl transfer::TreeSink for StreamImportSink {
+    fn validate_name(&mut self, _: &Path, name: &OsStr) -> Result<OsString, CliError> {
+        Ok(name.into())
+    }
+    fn create_dir(&mut self, _: &Path) -> Result<bool, CliError> {
+        Ok(false)
+    }
+    fn set_extended_attribute(
+        &mut self,
+        path: &Path,
+        attribute: &ExtendedAttribute,
+    ) -> Result<(), CliError> {
+        self.attributes.push((path.into(), attribute.clone()));
+        Ok(())
+    }
+    fn named_stream_sink(&mut self) -> Option<&mut dyn transfer::NamedStreamSink> {
+        Some(self)
+    }
+}
+impl transfer::NamedStreamSink for StreamImportSink {
+    fn set_named_stream(
+        &mut self,
+        path: &Path,
+        stream: &transfer::NamedStream,
+    ) -> Result<(), CliError> {
+        self.streams.push((path.into(), stream.clone()));
+        Ok(())
+    }
+}
+/// Give a file a resource fork with the host's own attribute tool, and confirm
+/// the host exposes it as the file's named fork.
+#[cfg(target_os = "macos")]
+fn set_host_resource_fork(path: &Path, value: &[u8]) {
+    set_host_attribute(path, "com.apple.ResourceFork", value);
+    assert_eq!(std::fs::read(path.join("..namedfork/rsrc")).unwrap(), value);
+}
+#[cfg(target_os = "macos")]
+#[test]
+fn a_host_resource_fork_imports_into_a_capable_sink_as_a_named_stream() {
+    let root = import_root("fork");
+    let bytes = vec![0, 255, 10, 42, 0];
+    set_host_resource_fork(&root.join("file"), &bytes);
+    let mut sink = StreamImportSink::default();
+    let result = import(&root, &mut sink, true);
+    assert_eq!(count(&result, "completed"), 3, "{:?}", result.report);
+    assert_eq!(count(&result, "refused"), 0, "{:?}", result.report);
+    assert_eq!(
+        sink.streams,
+        [(
+            PathBuf::from("/dest/file"),
+            transfer::NamedStream {
+                name: "rsrc".into(),
+                value: bytes,
+            }
+        )]
+    );
+    // The fork is a stream, not also an ordinary extended attribute.
+    assert!(
+        !sink
+            .attributes
+            .iter()
+            .any(|(_, a)| a.name == "com.apple.ResourceFork"),
+        "{:?}",
+        sink.attributes
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sink_without_streams_refuses_the_host_stream_by_name() {
+    let root = import_root("fork-incapable");
+    set_host_resource_fork(&root.join("file"), b"fork");
+    let mut sink = AttributeSink::default();
+    let result = import(&root, &mut sink, true);
+    assert_ne!(result.code, 0, "{:?}", result.report);
+    let file = item(&result, "/dest/file");
+    assert_eq!(field(file, "status"), "refused", "{file:?}");
+    let reason = field(file, "reason");
+    assert!(
+        reason.contains("named stream \"rsrc\"")
+            && reason.contains("named streams not supported by this sink"),
+        "{reason}"
+    );
+    assert_eq!(field(item(&result, "/dest/dir"), "status"), "completed");
+    // The contents were published; only the stream is refused, not dropped.
+    assert_eq!(sink.files, [PathBuf::from("/dest/file")]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ordinary_files_named_like_stream_side_files_stay_ordinary_files() {
+    let root = import_root("side-files");
+    std::fs::write(root.join("file:rsrc"), b"side").unwrap();
+    std::fs::write(root.join("._file"), b"apple double").unwrap();
+    let mut sink = StreamImportSink::default();
+    let result = import(&root, &mut sink, true);
+    assert_eq!(count(&result, "refused"), 0, "{:?}", result.report);
+    assert!(sink.streams.is_empty(), "{:?}", sink.streams);
+    let mut files = sink.files.clone();
+    files.sort();
+    assert_eq!(
+        files,
+        ["/dest/._file", "/dest/file", "/dest/file:rsrc"].map(PathBuf::from)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn a_host_without_named_streams_imports_attributes_as_attributes_only() {
+    let root = import_root("no-streams");
+    set_host_attribute(&root.join("file"), "user.core-stream", b"not a stream");
+    let mut sink = AttributeSink::default();
+    let result = import(&root, &mut sink, true);
+    assert_eq!(count(&result, "completed"), 3, "{:?}", result.report);
+    assert_eq!(count(&result, "refused"), 0, "{:?}", result.report);
+    assert!(sink
+        .attributes
+        .iter()
+        .any(|(path, a)| path == Path::new("/dest/file") && a.name == "user.core-stream"));
     std::fs::remove_dir_all(root).unwrap();
 }
