@@ -19,8 +19,11 @@ mod host_mount;
 /// partition offset. Keep the guard alive through the entire transfer.
 ///
 /// Imports take an exclusive lock; exports try a shared lock and warn when
-/// a writer already holds it. These are cooperative locks: they cannot stop
-/// a program that ignores the locking protocol, or prevent path replacement.
+/// a writer already holds it. On macOS, a mounted target is governed by the
+/// host mount instead: a writable mount warns and exports proceed without an
+/// image lock, since DiskImages may refuse opening its device while mounted.
+/// These are cooperative locks: they cannot stop a program that ignores the
+/// locking protocol, or prevent path replacement.
 /// Linux also checks the current mount namespace, including loop-backed
 /// images and mounted partitions. This is a preflight snapshot, not a lock
 /// against subsequent mounts or mounts hidden in another namespace.
@@ -70,11 +73,35 @@ impl ImageLock {
 
     /// Try to hold a shared image lock for an export. A competing exclusive
     /// lock writes a warning and returns `None`, allowing the export to try
-    /// reading bytes that may change. Other failures, including failure to
-    /// deliver the warning, return exit code 1 before any source read.
+    /// reading bytes that may change. On macOS, a mounted target is not
+    /// lockable independently; a writable mount warns, and both mount modes
+    /// proceed without a guard. Other failures, including failure to deliver
+    /// the warning, return exit code 1 before any source read.
     pub fn for_export(image: &Path, warnings: &mut dyn Write) -> Result<Option<Self>, CliError> {
+        // DiskImages can hold an attached device busy while it is mounted.
+        // Consult the mount table before opening that device: exports from a
+        // mounted target cannot acquire our cooperative lock, but remain
+        // allowed, with an explicit warning for a writable mount.
+        #[cfg(target_os = "macos")]
+        {
+            let state = host_mount::state(image)?;
+            if state.read_write {
+                writeln!(
+                    warnings,
+                    "warning: image {} is mounted read-write; exported bytes may be changing",
+                    image.display()
+                )
+                .map_err(|err| {
+                    CliError::failed(format!("cannot report image mount warning: {err}"))
+                })?;
+            }
+            if state.mounted {
+                return Ok(None);
+            }
+        }
+
         let file = open(image)?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         if host_mount::state(image)?.read_write {
             writeln!(
                 warnings,
