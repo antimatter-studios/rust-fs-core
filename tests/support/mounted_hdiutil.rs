@@ -117,7 +117,29 @@ impl Volume {
         if self.mounted {
             self.unmount();
         }
-        run("hdiutil", &["detach".as_ref(), self.device.as_os_str()]);
+        let detached = Command::new("hdiutil")
+            .args(["detach"])
+            .arg(&self.device)
+            .output()
+            .unwrap_or_else(|err| panic!("macOS mount oracle requires hdiutil: {err}"));
+        if !detached.status.success() {
+            let stderr = String::from_utf8_lossy(&detached.stderr);
+            assert!(
+                stderr.to_ascii_lowercase().contains("resource busy"),
+                "macOS mount oracle requires hdiutil: {detached:?}"
+            );
+            // Disk Arbitration can still be releasing the just-unmounted
+            // partition. This image is disposable and all test children have
+            // exited, so force detachment to avoid leaking the device.
+            run(
+                "hdiutil",
+                &[
+                    "detach".as_ref(),
+                    "-force".as_ref(),
+                    self.device.as_os_str(),
+                ],
+            );
+        }
         self.attached = false;
     }
 }
