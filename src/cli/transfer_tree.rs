@@ -592,6 +592,7 @@ pub(super) fn export_tree_recorded(
     let mut files: HashMap<u64, (PathBuf, Copied)> = HashMap::new();
     let mut items = Vec::new();
     let mut counts = [0u64; 5];
+    let mut verified_skips = 0u64;
     let mut cancel_code = 0;
     let mut in_flight = Json::Null;
     let mut merged = 0u64;
@@ -662,6 +663,30 @@ pub(super) fn export_tree_recorded(
                     return Ok(1);
                 }
                 TreeKind::File => {
+                    if let Some(ledger) = ledger.as_deref() {
+                        if let Some(entry) = ledger.resume_tree(
+                            source,
+                            &path,
+                            metadata.size,
+                            &local,
+                            &cancellation,
+                        )? {
+                            let skipped = manifest::skipped(
+                                &ExportRequest {
+                                    path: path.clone().into_os_string(),
+                                    output: Output::File(local.clone()),
+                                    replace: request.replace,
+                                },
+                                &local,
+                                entry,
+                            );
+                            reason = skipped.text.expect("earlier verification has text");
+                            evidence = skipped.report.expect("earlier verification has evidence");
+                            verified_skips += 1;
+                            progress.advance(metadata.size);
+                            return Ok(1);
+                        }
+                    }
                     if ledger.is_some() && options.verify {
                         identity = Some(manifest::export_identity(
                             source.manifest_identity(&path)?,
@@ -819,7 +844,7 @@ pub(super) fn export_tree_recorded(
         };
         counts[status] += 1;
         if regular {
-            progress.finish_file(status == 0);
+            progress.finish_file(status == 0 || (status == 1 && !matches!(evidence, Json::Null)));
         }
         if status == 0 && times.preserve_times && metadata.kind == TreeKind::Directory {
             deferred_times.push((local.clone(), metadata, items.len()));
@@ -900,6 +925,6 @@ pub(super) fn export_tree_recorded(
     .with_code(if cancel_code != 0 {
         cancel_code
     } else {
-        u8::from(counts[1..].iter().any(|n| *n != 0))
+        u8::from(counts[1] > verified_skips || counts[2..].iter().any(|n| *n != 0))
     }))
 }

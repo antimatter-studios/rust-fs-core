@@ -1516,3 +1516,350 @@ fn resume_restarts_when_an_endpoint_changes_during_the_digest() {
         assert_recopied(&outcome, &ledger, &source, 2);
     }
 }
+
+struct ResumeTree {
+    image: PathBuf,
+    files: Vec<(String, Vec<u8>)>,
+    reads: Vec<(PathBuf, u64)>,
+    mutate_inode: bool,
+    inode_changed: bool,
+    #[cfg(unix)]
+    signal_during_read: bool,
+}
+impl fs_core::cli::transfer::TreeSource for ResumeTree {
+    fn image_path(&self) -> Option<&std::path::Path> {
+        Some(&self.image)
+    }
+    fn manifest_identity(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<Identity, fs_core::cli::CliError> {
+        Ok(Identity::Image {
+            path: path.into(),
+            image: LocalIdentity::capture(&self.image, &fs::File::open(&self.image).unwrap())?,
+            offset: 0,
+            filesystem_uuid: "tree-resume".into(),
+            inode: self
+                .files
+                .iter()
+                .position(|(name, _)| path.ends_with(name))
+                .unwrap() as u64
+                + 10
+                + u64::from(self.inode_changed) * 100,
+        })
+    }
+    fn metadata(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<fs_core::cli::transfer::TreeMetadata, fs_core::cli::CliError> {
+        use fs_core::cli::transfer::{TreeKind, TreeMetadata};
+        let file = self
+            .files
+            .iter()
+            .enumerate()
+            .find(|(_, (name, _))| path.ends_with(name));
+        Ok(TreeMetadata {
+            kind: if file.is_some() {
+                TreeKind::File
+            } else {
+                TreeKind::Directory
+            },
+            size: file.map_or(0, |(_, (_, bytes))| bytes.len() as u64),
+            inode: file.map_or(if path.ends_with("nested") { 2 } else { 1 }, |(n, _)| {
+                n as u64 + 10
+            }),
+            accessed: None,
+            modified: None,
+        })
+    }
+    fn read_dir(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<Vec<fs_core::cli::transfer::TreeEntry>, fs_core::cli::CliError> {
+        use fs_core::cli::transfer::TreeEntry;
+        let names: Vec<String> = if path.ends_with("nested") {
+            self.files.iter().map(|(name, _)| name.clone()).collect()
+        } else {
+            vec!["nested".into()]
+        };
+        names
+            .into_iter()
+            .map(|name| {
+                Ok(TreeEntry {
+                    metadata: self.metadata(&path.join(&name))?,
+                    name: name.into(),
+                })
+            })
+            .collect()
+    }
+    fn read_file_at(
+        &mut self,
+        path: &std::path::Path,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, fs_core::cli::CliError> {
+        self.reads.push((path.into(), offset));
+        #[cfg(unix)]
+        if self.signal_during_read {
+            self.signal_during_read = false;
+            assert!(Command::new("kill")
+                .args(["-TERM", &std::process::id().to_string()])
+                .status()
+                .unwrap()
+                .success());
+        }
+        if self.mutate_inode {
+            self.mutate_inode = false;
+            self.inode_changed = true;
+        }
+        let bytes = &self
+            .files
+            .iter()
+            .find(|(name, _)| path.ends_with(name))
+            .unwrap()
+            .1;
+        let start = offset as usize;
+        let n = buf.len().min(bytes.len() - start);
+        buf[..n].copy_from_slice(&bytes[start..start + n]);
+        Ok(n)
+    }
+}
+
+fn resumable_tree(tag: &str) -> (PathBuf, PathBuf, ResumeTree) {
+    let (ledger, image, dest) = export_paths(tag);
+    let mut source = ResumeTree {
+        image,
+        files: ["untouched", "rewrite", "no-record", "changed", "partial"]
+            .into_iter()
+            .map(|name| (name.into(), b"original bytes".to_vec()))
+            .collect(),
+        reads: Vec::new(),
+        mutate_inode: false,
+        inode_changed: false,
+        #[cfg(unix)]
+        signal_during_read: false,
+    };
+    let outcome = tree_resume_export(&ledger, &dest, &mut source, false, false);
+    assert_eq!(outcome.code, 0);
+    assert_eq!(records(&ledger), 5);
+    source.reads.clear();
+    (ledger, dest, source)
+}
+
+fn tree_resume_export(
+    ledger: &std::path::Path,
+    dest: &std::path::Path,
+    source: &mut ResumeTree,
+    resume: bool,
+    replace: bool,
+) -> fs_core::cli::Outcome {
+    use fs_core::cli::transfer::{self, ExportManifestOptions, ExportRequest, Output, TreeOptions};
+    transfer::export_tree_with_manifest(
+        &ExportRequest {
+            path: "/tree".into(),
+            output: Output::File(dest.into()),
+            replace,
+        },
+        source,
+        TreeOptions {
+            recursive: true,
+            verify: true,
+            ..TreeOptions::default()
+        },
+        &ExportManifestOptions {
+            manifest: Some(ledger.into()),
+            resume,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn recursive_resume_mixes_earlier_skips_with_full_restarts_and_reports_original_times() {
+    use fs_core::cli::Json;
+    let (ledger, dest, mut source) = resumable_tree("tree-resume-mixed");
+    let untouched = dest.join("nested/untouched");
+    let modified = fs::metadata(&untouched).unwrap().modified().unwrap();
+    let (_, before) = Manifest::open(&ledger).unwrap();
+    let earlier = before.entries[0].completed_at;
+    // Remove exactly one record with an independent JSON reader; all other
+    // identities remain intact, including the equal-size source rewrite.
+    let result = Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args(["-c", "import json,sys;p=sys.argv[1];rows=open(p).readlines();open(p,'w').writelines(r for r in rows if not json.loads(r)['source']['path'].endswith('no-record'))"])
+        .arg(&ledger).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    source.files[1].1 = b"rewritten data".to_vec();
+    fs::write(dest.join("nested/changed"), b"changed destination").unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(dest.join("nested/partial"))
+        .unwrap()
+        .set_len(4)
+        .unwrap();
+    let outcome = tree_resume_export(&ledger, &dest, &mut source, true, true);
+    assert_eq!(outcome.code, 0);
+    let report = outcome.report.as_ref().unwrap();
+    assert_eq!(report.get("completed"), Some(&Json::UInt(6)));
+    assert_eq!(report.get("skipped"), Some(&Json::UInt(1)));
+    assert_eq!(report.get("failed"), Some(&Json::UInt(0)));
+    let Json::Arr(items) = report.get("items").unwrap() else {
+        panic!("items")
+    };
+    let item = &items[2];
+    assert_eq!(item.get("status"), Some(&Json::from("skipped")));
+    let copy = item.get("copy").unwrap();
+    assert_eq!(copy.get("verified"), Some(&Json::Bool(false)));
+    let at = copy.get("verified_earlier_at").unwrap();
+    assert_eq!(at.get("seconds"), Some(&Json::Int(earlier.seconds)));
+    assert_eq!(
+        at.get("nanoseconds"),
+        Some(&Json::Int(i64::from(earlier.nanoseconds)))
+    );
+    let text = outcome.text.clone().unwrap_or_else(|| report.to_text());
+    assert!(
+        text.contains(&format!(
+            "verified earlier at {}.{:09}",
+            earlier.seconds, earlier.nanoseconds
+        )),
+        "{text}"
+    );
+    assert!(text.contains("not verified now"), "{text}");
+    assert_eq!(
+        fs::metadata(&untouched).unwrap().modified().unwrap(),
+        modified
+    );
+    let (_, after) = Manifest::open(&ledger).unwrap();
+    assert_eq!(
+        after.entries.len(),
+        8,
+        "only four restarted files append evidence"
+    );
+    for (name, bytes) in &source.files {
+        let local = dest.join("nested").join(name);
+        assert_eq!(&fs::read(&local).unwrap(), bytes);
+        assert!(source
+            .reads
+            .contains(&(PathBuf::from("/tree/nested").join(name), 0)));
+        let latest = after
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| matches!(&entry.destination, Identity::Local(id) if id.path == local))
+            .unwrap();
+        assert_eq!(latest.sha256, host_sha256(&local));
+    }
+    assert_eq!(after.entries[0].completed_at, earlier);
+}
+
+#[test]
+fn recursive_resume_skips_without_replace_but_refuses_unproven_existing_files() {
+    use fs_core::cli::Json;
+    let (ledger, dest, mut source) = resumable_tree("tree-resume-replace");
+    source.files[1].1 = b"rewritten data".to_vec();
+    let outcome = tree_resume_export(&ledger, &dest, &mut source, true, false);
+    assert_eq!(outcome.code, 1);
+    let report = outcome.report.unwrap();
+    assert_eq!(report.get("skipped"), Some(&Json::UInt(4)));
+    assert_eq!(report.get("refused"), Some(&Json::UInt(1)));
+    assert_eq!(
+        fs::read(dest.join("nested/rewrite")).unwrap(),
+        b"original bytes"
+    );
+    assert_eq!(records(&ledger), 5);
+}
+
+#[test]
+fn recursive_resume_revalidates_driver_identity_after_digesting() {
+    use fs_core::cli::Json;
+    let (ledger, dest, mut source) = resumable_tree("tree-resume-revalidate");
+    source.mutate_inode = true;
+    let outcome = tree_resume_export(&ledger, &dest, &mut source, true, true);
+    assert_eq!(outcome.code, 0);
+    assert_eq!(outcome.report.unwrap().get("skipped"), Some(&Json::UInt(0)));
+    assert_eq!(records(&ledger), 10);
+    assert_eq!(
+        source
+            .reads
+            .iter()
+            .filter(|(p, offset)| p.ends_with("untouched") && *offset == 0)
+            .count(),
+        2
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn recursive_resume_cancellation_during_digest_keeps_destinations_and_pending_items() {
+    use fs_core::cli::Json;
+    const CHILD: &str = "CORE_RECURSIVE_RESUME_CANCEL";
+    let name = "recursive_resume_cancellation_during_digest_keeps_destinations_and_pending_items";
+    if std::env::var_os(CHILD).is_none() {
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        return;
+    }
+    let (ledger, dest, mut source) = resumable_tree("tree-resume-cancel");
+    let before = fs::read(&ledger).unwrap();
+    source.signal_during_read = true;
+    let outcome = tree_resume_export(&ledger, &dest, &mut source, true, true);
+    assert_eq!(outcome.code, 143);
+    let report = outcome.report.unwrap();
+    assert_eq!(report.get("cancelled"), Some(&Json::Bool(true)));
+    assert_eq!(report.get("signal"), Some(&Json::UInt(15)));
+    assert_eq!(
+        report.get("in_flight").unwrap().get("status"),
+        Some(&Json::from("cancelled"))
+    );
+    let Json::Arr(pending) = report.get("pending").unwrap() else {
+        panic!("pending")
+    };
+    assert_eq!(pending.len(), 4);
+    assert_eq!(fs::read(&ledger).unwrap(), before);
+    for (name, bytes) in &source.files {
+        assert_eq!(&fs::read(dest.join("nested").join(name)).unwrap(), bytes);
+    }
+    assert_eq!(
+        source.reads.len(),
+        1,
+        "cancellation stops after the digest read"
+    );
+}
+
+#[test]
+fn recursive_resume_alias_preflight_precedes_all_source_reads() {
+    use fs_core::cli::transfer::{self, ExportManifestOptions, ExportRequest, Output, TreeOptions};
+    let (ledger, dest, mut source) = resumable_tree("tree-resume-alias");
+    let before = fs::read(dest.join("nested/untouched")).unwrap();
+    let alias = ledger.with_file_name("destination-alias");
+    fs::hard_link(dest.join("nested/untouched"), &alias).unwrap();
+    for unsafe_path in [source.image.clone(), dest.join("ledger"), alias] {
+        let result = transfer::export_tree_with_manifest(
+            &ExportRequest {
+                path: "/tree".into(),
+                output: Output::File(dest.clone()),
+                replace: true,
+            },
+            &mut source,
+            TreeOptions {
+                recursive: true,
+                verify: true,
+                ..TreeOptions::default()
+            },
+            &ExportManifestOptions {
+                manifest: Some(unsafe_path),
+                resume: true,
+            },
+        );
+        assert!(result.is_err());
+        assert!(source.reads.is_empty());
+        assert_eq!(fs::read(dest.join("nested/untouched")).unwrap(), before);
+    }
+}
