@@ -119,6 +119,16 @@ pub fn import_tree(
     sink: Option<&mut dyn TreeSink>,
     options: ImportTreeOptions,
 ) -> Result<Outcome, CliError> {
+    import_tree_recorded(request, sink, options, ImportOptions::default(), None)
+}
+
+pub(super) fn import_tree_recorded(
+    request: &ImportRequest,
+    sink: Option<&mut dyn TreeSink>,
+    options: ImportTreeOptions,
+    verify: ImportOptions,
+    mut ledger: Option<&mut manifest::ImportLedger>,
+) -> Result<Outcome, CliError> {
     let sink = sink.ok_or_else(|| CliError::refused("this driver has no tree import sink"))?;
     if request.replace && !sink.supports_atomic_replace() {
         return Err(CliError::refused(
@@ -173,8 +183,15 @@ pub fn import_tree(
                 return sink.create_hard_link(&dest, existing);
             }
             if m.is_file() {
-                let copied =
-                    import::import_tree_file(&local, sink, &dest, request.replace, &cancellation)?;
+                let copied = import::import_tree_file(
+                    &local,
+                    sink,
+                    &dest,
+                    request.replace,
+                    &cancellation,
+                    verify.verify,
+                    ledger.as_deref_mut(),
+                )?;
                 copy = Json::object([
                     ("bytes", Json::from(copied.bytes)),
                     ("sha256", Json::from(copied.sha256_hex())),
@@ -225,6 +242,10 @@ pub fn import_tree(
             }
             Ok(())
         })();
+        // A ledger error aborts traversal: later copies cannot outrun evidence.
+        if ledger.as_ref().is_some_and(|ledger| ledger.failed) {
+            return Err(result.expect_err("a failed capture or append stops the transfer"));
+        }
         let (status, reason) = match result {
             Ok(()) => (0, String::new()),
             Err(e) => {

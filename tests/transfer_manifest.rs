@@ -2173,3 +2173,171 @@ fn file_import_manifest_aliasing_the_source_is_refused_before_staging() {
     assert_eq!(sink.stages, 0, "preflight runs before any staged write");
     assert_eq!(fs::read(&source).unwrap(), b"source must remain intact");
 }
+
+// A tree sink keeps every published file, so each record can be checked
+// against the bytes the driver actually holds under that name.
+struct TreeImportSink {
+    file: ImportSink,
+    current: PathBuf,
+    published: std::collections::BTreeMap<PathBuf, Vec<u8>>,
+}
+impl fs_core::cli::transfer::FileSink for TreeImportSink {
+    fn image_path(&self) -> Option<&std::path::Path> {
+        self.file.image_path()
+    }
+    fn manifest_identity(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<Identity, fs_core::cli::CliError> {
+        assert!(
+            self.published.contains_key(path),
+            "identity follows publication"
+        );
+        self.file.manifest_identity(path)
+    }
+    fn stage(
+        &mut self,
+        path: &std::path::Path,
+        replace: bool,
+    ) -> Result<(), fs_core::cli::CliError> {
+        self.current = path.into();
+        self.file.stage(path, replace)
+    }
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), fs_core::cli::CliError> {
+        self.file.write_at(offset, bytes)
+    }
+    fn persist(&mut self) -> Result<(), fs_core::cli::CliError> {
+        self.file.persist()
+    }
+    fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<usize, fs_core::cli::CliError> {
+        self.file.read_at(offset, bytes)
+    }
+    fn publish(&mut self, replace: bool) -> Result<bool, fs_core::cli::CliError> {
+        self.published
+            .insert(self.current.clone(), self.file.staged.clone());
+        self.file.publish(replace)
+    }
+    fn abort(&mut self) -> Result<(), fs_core::cli::CliError> {
+        self.file.abort()
+    }
+}
+impl fs_core::cli::transfer::TreeSink for TreeImportSink {
+    fn validate_name(
+        &mut self,
+        _: &std::path::Path,
+        name: &std::ffi::OsStr,
+    ) -> Result<std::ffi::OsString, fs_core::cli::CliError> {
+        Ok(name.into())
+    }
+    fn create_dir(&mut self, _: &std::path::Path) -> Result<bool, fs_core::cli::CliError> {
+        Ok(false)
+    }
+}
+fn import_tree_run(
+    ledger: &std::path::Path,
+    image: &std::path::Path,
+    source: &std::path::Path,
+    verify: bool,
+) -> (
+    TreeImportSink,
+    Result<fs_core::cli::Outcome, fs_core::cli::CliError>,
+) {
+    use fs_core::cli::transfer::{
+        self, ImportManifestOptions, ImportOptions, ImportRequest, ImportTreeOptions, Input,
+    };
+    fs::create_dir(source.join("sub")).unwrap();
+    fs::write(source.join("sub").join("other"), b"a second published file").unwrap();
+    let mut sink = TreeImportSink {
+        file: ImportSink {
+            image: image.into(),
+            staged: Vec::new(),
+            stages: 0,
+            verified: verify,
+        },
+        current: PathBuf::new(),
+        published: Default::default(),
+    };
+    let request = ImportRequest {
+        input: Input::File(source.into()),
+        path: "/image/tree".into(),
+        replace: false,
+    };
+    let manifest = ImportManifestOptions {
+        manifest: Some(ledger.into()),
+        resume: false,
+    };
+    let options = ImportTreeOptions {
+        recursive: true,
+        ..ImportTreeOptions::default()
+    };
+    let outcome = transfer::import_tree_with_manifest(
+        &request,
+        Some(&mut sink),
+        options,
+        ImportOptions { verify },
+        &manifest,
+    );
+    (sink, outcome)
+}
+
+#[test]
+fn verified_tree_imports_record_each_published_file_with_both_identities() {
+    let (ledger, image, source) = import_paths("import-tree-record", true);
+    let (sink, outcome) = import_tree_run(&ledger, &image, &source, true);
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.code, 0);
+    assert_eq!(sink.published.len(), 2);
+    assert_eq!(
+        outcome.report.as_ref().unwrap().get("manifest_torn_tail"),
+        Some(&fs_core::cli::Json::Bool(false))
+    );
+    let (_, read) = Manifest::open(&ledger).unwrap();
+    assert_eq!(read.entries.len(), 2, "one record per published file");
+    for (recorded, (name, local_name)) in read.entries.iter().zip([
+        ("/image/tree/file", source.join("file")),
+        ("/image/tree/sub/other", source.join("sub").join("other")),
+    ]) {
+        let Identity::Image {
+            path,
+            image: backing,
+            ..
+        } = &recorded.destination
+        else {
+            panic!("driver destination")
+        };
+        assert_eq!(path, &PathBuf::from(name));
+        assert_eq!(backing.path, image);
+        assert_eq!(recorded.bytes, sink.published[path].len() as u64);
+        let Identity::Local(local) = &recorded.source else {
+            panic!("local source")
+        };
+        assert_eq!(local.path, local_name);
+        // Python's hashlib and os.stat check the digest and the source identity.
+        let script = r#"import hashlib,json,os,sys
+e=json.loads(open(sys.argv[1]).read().splitlines()[int(sys.argv[3])]); s=os.stat(sys.argv[2]); l=e['source']
+assert e['sha256']==hashlib.sha256(open(sys.argv[2],'rb').read()).hexdigest()
+assert (l['size'],l['modified']['seconds']*10**9+l['modified']['nanoseconds'])==(s.st_size,s.st_mtime_ns)
+if os.name!='nt':
+    assert (l['device'],l['inode'])==(s.st_dev,s.st_ino)
+"#;
+        let index = read.entries.iter().position(|e| e == recorded).unwrap();
+        let status = Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .args(["-c", script])
+            .arg(&ledger)
+            .arg(&local_name)
+            .arg(index.to_string())
+            .status()
+            .expect("python3 is required as the independent JSON and digest oracle");
+        assert!(status.success());
+    }
+}
+
+#[test]
+fn unverified_tree_imports_publish_without_recording() {
+    let (ledger, image, source) = import_paths("import-tree-unverified", true);
+    let (sink, outcome) = import_tree_run(&ledger, &image, &source, false);
+    assert_eq!(outcome.unwrap().code, 0);
+    assert_eq!(sink.published.len(), 2);
+    let (_, read) = Manifest::open(&ledger).unwrap();
+    assert!(read.entries.is_empty());
+}
