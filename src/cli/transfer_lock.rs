@@ -28,9 +28,10 @@ use windows_mount as host_mount;
 /// partition offset. Keep the guard alive through the entire transfer.
 ///
 /// Imports take an exclusive lock; exports try a shared lock and warn when
-/// a writer already holds it. On macOS, a mounted target is governed by the
-/// host mount instead: a writable mount warns and exports proceed without an
-/// image lock, since DiskImages may refuse opening its device while mounted.
+/// a writer already holds it. On macOS and Windows, a mounted target is
+/// governed by the host mount instead: a writable mount warns and exports
+/// proceed without an image lock, since the host may refuse opening its
+/// device while mounted.
 /// These are cooperative locks: they cannot stop a program that ignores the
 /// locking protocol, or prevent path replacement.
 /// Linux also checks the current mount namespace, including loop-backed
@@ -91,11 +92,11 @@ impl ImageLock {
     /// proceed without a guard. Other failures, including failure to deliver
     /// the warning, return exit code 1 before any source read.
     pub fn for_export(image: &Path, warnings: &mut dyn Write) -> Result<Option<Self>, CliError> {
-        // DiskImages can hold an attached device busy while it is mounted.
+        // The host may hold an attached device busy while it is mounted.
         // Consult the mount table before opening that device: exports from a
         // mounted target cannot acquire our cooperative lock, but remain
         // allowed, with an explicit warning for a writable mount.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             let state = host_mount::state(image)?;
             if state.read_write {
