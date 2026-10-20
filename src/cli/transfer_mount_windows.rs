@@ -155,6 +155,447 @@ pub(super) fn decide<I: PartialEq>(
     Ok(state)
 }
 
+/// Snapshots the host's volumes and attached virtual disks and decides the
+/// mount state of `image`. Any failed query fails closed, naming the query.
+#[cfg(windows)]
+pub(super) fn state(image: &std::path::Path) -> Result<MountState, super::CliError> {
+    probe::state(image).map_err(|err| {
+        super::CliError::failed(format!(
+            "cannot check Windows mounts of {}: {err}",
+            image.display()
+        ))
+    })
+}
+
+#[cfg(windows)]
+mod probe {
+    use std::ffi::c_void;
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use std::ptr::null_mut;
+
+    use super::{decide, device, Attached, Device, MountState, Target, Volume};
+
+    /// A file by volume serial number and file index.
+    type Identity = (u32, u64);
+    type Handle = *mut c_void;
+
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+    const ERROR_NO_MORE_FILES: i32 = 18;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    const ERROR_MORE_DATA: i32 = 234;
+    const ERROR_VIRTDISK_NOT_VIRTUAL_DISK: u32 = 0xC03A_0015;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    const SHARE_ALL: u32 = 7;
+    const FILE_READ_ONLY_VOLUME: u32 = 0x0008_0000;
+    const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x0056_0000;
+    const STORAGE_DEPENDENCY_INFO_VERSION_2: u64 = 2;
+    const NAME_LENGTH: usize = 260;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileInformation {
+        attributes: u32,
+        times: [u32; 6],
+        volume_serial: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+
+    /// STORAGE_DEPENDENCY_INFO_TYPE_2.
+    #[repr(C)]
+    struct Dependency {
+        type_flags: u32,
+        provider_flags: u32,
+        device_id: u32,
+        vendor_id: [u8; 16],
+        ancestor_level: u32,
+        device_name: *const u16,
+        host_volume_name: *const u16,
+        dependent_volume_name: *const u16,
+        dependent_volume_relative_path: *const u16,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn FindFirstVolumeW(name: *mut u16, length: u32) -> Handle;
+        fn FindNextVolumeW(find: Handle, name: *mut u16, length: u32) -> i32;
+        fn FindVolumeClose(find: Handle) -> i32;
+        fn GetVolumePathNamesForVolumeNameW(
+            volume: *const u16,
+            names: *mut u16,
+            length: u32,
+            needed: *mut u32,
+        ) -> i32;
+        fn GetVolumeInformationW(
+            root: *const u16,
+            name: *mut u16,
+            name_length: u32,
+            serial: *mut u32,
+            component_length: *mut u32,
+            flags: *mut u32,
+            file_system: *mut u16,
+            file_system_length: u32,
+        ) -> i32;
+        fn GetVolumeNameForVolumeMountPointW(point: *const u16, name: *mut u16, length: u32)
+            -> i32;
+        fn DeviceIoControl(
+            device: Handle,
+            code: u32,
+            input: *mut c_void,
+            input_length: u32,
+            output: *mut c_void,
+            output_length: u32,
+            returned: *mut u32,
+            overlapped: *mut c_void,
+        ) -> i32;
+        fn GetFileInformationByHandle(file: Handle, information: *mut FileInformation) -> i32;
+    }
+
+    #[link(name = "virtdisk")]
+    extern "system" {
+        fn GetStorageDependencyInformation(
+            object: Handle,
+            flags: u32,
+            size: u32,
+            information: *mut c_void,
+            used: *mut u32,
+        ) -> u32;
+    }
+
+    pub(super) fn state(image: &Path) -> io::Result<MountState> {
+        let target = match image.to_str().map(device).transpose()?.flatten() {
+            Some(Device::Drive(drive)) => {
+                return decide(Target::<Identity>::Drive(drive), &[], &volumes()?);
+            }
+            Some(Device::Volume(root)) => {
+                let name = if root.starts_with(r"\\?\") {
+                    root
+                } else {
+                    volume_name(&root)?
+                };
+                return decide(Target::<Identity>::Volume(&name), &[], &volumes()?);
+            }
+            None => identity(&open_query(image)?, image)?,
+        };
+        let volumes = volumes()?;
+        let attached = attached(&volumes)?;
+        decide(Target::File(&target), &attached, &volumes)
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(text)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    }
+
+    fn until_nul(buffer: &[u16]) -> String {
+        let end = buffer
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(buffer.len());
+        String::from_utf16_lossy(&buffer[..end])
+    }
+
+    fn failed(query: String, err: io::Error) -> io::Error {
+        io::Error::new(err.kind(), format!("{query}: {err}"))
+    }
+
+    fn last_failed(query: String) -> io::Error {
+        failed(query, io::Error::last_os_error())
+    }
+
+    /// A handle that answers queries only: no read or write access.
+    fn open_query(path: impl AsRef<Path>) -> io::Result<File> {
+        let path = path.as_ref();
+        OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(SHARE_ALL)
+            .open(path)
+            .map_err(|err| failed(format!("CreateFileW {}", path.display()), err))
+    }
+
+    fn identity(file: &File, path: &Path) -> io::Result<Identity> {
+        let mut information = FileInformation::default();
+        // SAFETY: the live File supplies a valid handle and the C-layout
+        // structure is writable for the duration of the call.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+            return Err(last_failed(format!(
+                "GetFileInformationByHandle {}",
+                path.display()
+            )));
+        }
+        let index = u64::from(information.index_high) << 32 | u64::from(information.index_low);
+        Ok((information.volume_serial, index))
+    }
+
+    fn volume_name(root: &str) -> io::Result<String> {
+        let point = wide(root);
+        let mut name = [0u16; NAME_LENGTH];
+        // SAFETY: both buffers are NUL-terminated or sized as passed.
+        if unsafe {
+            GetVolumeNameForVolumeMountPointW(point.as_ptr(), name.as_mut_ptr(), NAME_LENGTH as u32)
+        } == 0
+        {
+            return Err(last_failed(format!(
+                "GetVolumeNameForVolumeMountPointW {root}"
+            )));
+        }
+        Ok(until_nul(&name))
+    }
+
+    fn volumes() -> io::Result<Vec<Volume>> {
+        let mut name = [0u16; NAME_LENGTH];
+        // SAFETY: the buffer is writable for the length passed.
+        let find = unsafe { FindFirstVolumeW(name.as_mut_ptr(), NAME_LENGTH as u32) };
+        if find == INVALID_HANDLE_VALUE {
+            return Err(last_failed("FindFirstVolumeW".to_owned()));
+        }
+        let mut names = Vec::new();
+        let listed = loop {
+            names.push(until_nul(&name));
+            // SAFETY: `find` is the live search handle from FindFirstVolumeW.
+            if unsafe { FindNextVolumeW(find, name.as_mut_ptr(), NAME_LENGTH as u32) } == 0 {
+                let err = io::Error::last_os_error();
+                break if err.raw_os_error() == Some(ERROR_NO_MORE_FILES) {
+                    Ok(())
+                } else {
+                    Err(failed("FindNextVolumeW".to_owned(), err))
+                };
+            }
+        };
+        // SAFETY: closes the search handle exactly once.
+        unsafe { FindVolumeClose(find) };
+        listed?;
+        names.into_iter().map(volume).collect()
+    }
+
+    /// Only a mounted volume can mount a target, so only those are placed
+    /// on drives and checked for the read-only flag.
+    fn volume(name: String) -> io::Result<Volume> {
+        let mount_points = mount_points(&name)?;
+        let (drives, read_only) = if mount_points.is_empty() {
+            (Vec::new(), false)
+        } else {
+            (drives(&name)?, read_only(&name)?)
+        };
+        Ok(Volume {
+            name,
+            drives,
+            mount_points,
+            read_only,
+        })
+    }
+
+    fn mount_points(volume: &str) -> io::Result<Vec<String>> {
+        let name = wide(volume);
+        let mut buffer = vec![0u16; NAME_LENGTH];
+        loop {
+            let mut needed = 0u32;
+            // SAFETY: the name is NUL-terminated and the buffer is writable
+            // for the length passed.
+            if unsafe {
+                GetVolumePathNamesForVolumeNameW(
+                    name.as_ptr(),
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    &mut needed,
+                )
+            } != 0
+            {
+                return Ok(buffer
+                    .split(|&unit| unit == 0)
+                    .take_while(|point| !point.is_empty())
+                    .map(String::from_utf16_lossy)
+                    .collect());
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(ERROR_MORE_DATA) {
+                return Err(failed(
+                    format!("GetVolumePathNamesForVolumeNameW {volume}"),
+                    err,
+                ));
+            }
+            let grown = (needed as usize).max(buffer.len() * 2);
+            buffer.resize(grown, 0);
+        }
+    }
+
+    fn read_only(volume: &str) -> io::Result<bool> {
+        let root = wide(volume);
+        let mut flags = 0u32;
+        // SAFETY: the root is NUL-terminated; every other output is null
+        // with a zero length, as the API allows.
+        if unsafe {
+            GetVolumeInformationW(
+                root.as_ptr(),
+                null_mut(),
+                0,
+                null_mut(),
+                null_mut(),
+                &mut flags,
+                null_mut(),
+                0,
+            )
+        } == 0
+        {
+            return Err(last_failed(format!("GetVolumeInformationW {volume}")));
+        }
+        Ok(flags & FILE_READ_ONLY_VOLUME != 0)
+    }
+
+    /// The volume device: its `\\?\Volume{GUID}` name without the slash.
+    fn volume_device(volume: &str) -> io::Result<File> {
+        open_query(volume.trim_end_matches('\\'))
+    }
+
+    fn drives(volume: &str) -> io::Result<Vec<u32>> {
+        let device = volume_device(volume)?;
+        // VOLUME_DISK_EXTENTS: a count, then 24-byte DISK_EXTENTs from
+        // offset 8, each opening with its DiskNumber.
+        let mut buffer = vec![0u64; 1 + 3 * 8];
+        loop {
+            let mut returned = 0u32;
+            // SAFETY: the u64 buffer is aligned for the structure and
+            // writable for the byte length passed.
+            if unsafe {
+                DeviceIoControl(
+                    device.as_raw_handle(),
+                    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                    null_mut(),
+                    0,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * 8) as u32,
+                    &mut returned,
+                    null_mut(),
+                )
+            } != 0
+            {
+                let count = (buffer[0] as u32 as usize).min((buffer.len() - 1) / 3);
+                return Ok((0..count)
+                    .map(|index| buffer[1 + 3 * index] as u32)
+                    .collect());
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(ERROR_MORE_DATA) {
+                return Err(failed(
+                    format!("IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS {volume}"),
+                    err,
+                ));
+            }
+            let count = (buffer[0] as u32 as usize).max((buffer.len() - 1) / 3 * 2);
+            buffer.resize(1 + 3 * count, 0);
+        }
+    }
+
+    /// Every virtual disk a mounted volume sits on, by backing-file
+    /// identity, exposed as each of the volume's drives.
+    fn attached(volumes: &[Volume]) -> io::Result<Vec<Attached<Identity>>> {
+        let mut attached = Vec::new();
+        for volume in volumes
+            .iter()
+            .filter(|volume| !volume.mount_points.is_empty())
+        {
+            for backing in backing_files(&volume.name)? {
+                attached.extend(
+                    volume
+                        .drives
+                        .iter()
+                        .map(|&drive| Attached { backing, drive }),
+                );
+            }
+        }
+        Ok(attached)
+    }
+
+    fn backing_files(volume: &str) -> io::Result<Vec<Identity>> {
+        let device = volume_device(volume)?;
+        let query = || format!("GetStorageDependencyInformation {volume}");
+        let mut buffer = vec![0u64; 64];
+        loop {
+            // STORAGE_DEPENDENCY_INFO: Version, then NumberEntries.
+            buffer[0] = STORAGE_DEPENDENCY_INFO_VERSION_2;
+            let size = (buffer.len() * 8) as u32;
+            let mut used = 0u32;
+            // SAFETY: the u64 buffer is aligned for the structure and
+            // writable for the byte length passed.
+            let status = unsafe {
+                GetStorageDependencyInformation(
+                    device.as_raw_handle(),
+                    0,
+                    size,
+                    buffer.as_mut_ptr().cast(),
+                    &mut used,
+                )
+            };
+            match status {
+                0 => break,
+                ERROR_VIRTDISK_NOT_VIRTUAL_DISK => return Ok(Vec::new()),
+                ERROR_INSUFFICIENT_BUFFER if used > size => {
+                    buffer = vec![0u64; (used as usize).div_ceil(8)];
+                }
+                _ => return Err(failed(query(), io::Error::from_raw_os_error(status as i32))),
+            }
+        }
+        let capacity = (buffer.len() - 1) * 8 / std::mem::size_of::<Dependency>();
+        let count = ((buffer[0] >> 32) as usize).min(capacity);
+        // SAFETY: the entries start at offset 8, are aligned by the u64
+        // buffer, and the count is bounded by the buffer's size.
+        let entries = unsafe {
+            std::slice::from_raw_parts(buffer.as_ptr().add(1).cast::<Dependency>(), count)
+        };
+        entries
+            .iter()
+            .map(|entry| {
+                // SAFETY: the API points these strings into `buffer`, which
+                // is alive here.
+                let (host, relative) = unsafe {
+                    (
+                        terminated(entry.host_volume_name),
+                        terminated(entry.dependent_volume_relative_path),
+                    )
+                };
+                let (Some(host), Some(relative)) = (host, relative) else {
+                    return Err(failed(
+                        query(),
+                        io::Error::new(io::ErrorKind::InvalidData, "a backing file has no path"),
+                    ));
+                };
+                let separator = if host.ends_with('\\') { "" } else { "\\" };
+                let backing = format!("{host}{separator}{relative}");
+                identity(&open_query(&backing)?, Path::new(&backing))
+            })
+            .collect()
+    }
+
+    /// # Safety
+    ///
+    /// `text` is null or points to a live NUL-terminated UTF-16 string.
+    unsafe fn terminated(text: *const u16) -> Option<String> {
+        if text.is_null() {
+            return None;
+        }
+        let mut length = 0;
+        // SAFETY: the caller guarantees a NUL terminator.
+        while unsafe { *text.add(length) } != 0 {
+            length += 1;
+        }
+        // SAFETY: `length` units precede the terminator.
+        Some(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(text, length)
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

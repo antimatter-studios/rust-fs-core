@@ -1,0 +1,2 @@
+### Added
+- Windows transfers inspect host mount state for image files, physical drives and volumes, using each mounted volume's disk extents, read-only flag and the virtual disks it depends on, matched to the image by file identity. Imports refuse mounted targets before taking the lock or consuming input; exports warn on read-write mounts. Any failed volume or virtual-disk query fails closed with exit code 1, naming the query.
