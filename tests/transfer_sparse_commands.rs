@@ -223,8 +223,19 @@ fn sparse_tree_refusals_name_every_file_and_the_format_before_staging() {
     let report = out.report.unwrap();
     assert_eq!(report.get("refused"), Some(&Json::UInt(2)));
     let text = report.to_compact();
+    let items = match report.get("items") {
+        Some(Json::Arr(items)) => items,
+        _ => panic!("{text}"),
+    };
     for name in ["a", "b"] {
-        assert!(text.contains(&format!("/dest/{name}")), "{text}");
+        let destination = Path::new("/dest").join(name).to_string_lossy().into_owned();
+        assert!(
+            items.iter().any(|item| matches!(
+                item.get("destination"),
+                Some(Json::Str(actual)) if actual == &destination
+            )),
+            "{text}"
+        );
         assert!(!sink.root.join("dest").join(name).exists());
     }
     assert_eq!(
