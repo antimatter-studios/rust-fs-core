@@ -11,10 +11,67 @@ pub struct ExtendedAttribute {
     pub value: Vec<u8>,
 }
 
+/// One opaque named stream, distinct from the file's unnamed data and xattrs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedStream {
+    /// Stream name in the source namespace, never a relative side-file path.
+    pub name: OsString,
+    /// Opaque stream contents, including empty values and embedded NUL bytes.
+    pub value: Vec<u8>,
+}
+
+/// Optional named-stream destination capability, independent of file staging.
+/// The destination file or directory must already exist. Implementations must
+/// preserve the name and bytes or refuse, never encode streams as side files
+/// or ordinary extended attributes. Unsupported destinations use the default.
+pub trait NamedStreamSink {
+    /// Set one named stream on a published item without following symbolic links.
+    fn set_named_stream(&mut self, _path: &Path, _stream: &NamedStream) -> Result<(), CliError> {
+        Err(CliError::refused(
+            "named streams not supported by this sink",
+        ))
+    }
+}
+
+/// Copy named streams only when `--preserve=xattrs` is enabled. Neither optional
+/// capability is queried otherwise. Errors name the affected stream and retain
+/// the sink's refusal/failure classification. Earlier stream writes remain.
+/// Host tree exports use an explicitly incapable sink; host stream import is a
+/// separate platform capability and no side-file layout is implied here.
+pub fn preserve_named_streams(
+    source: &mut dyn TreeSource,
+    path: &Path,
+    sink: &mut dyn NamedStreamSink,
+    destination: &Path,
+    options: XattrOptions,
+) -> Result<(), CliError> {
+    if options.preserve_xattrs {
+        for stream in source.named_streams(path)? {
+            sink.set_named_stream(destination, &stream)
+                .map_err(|mut error| {
+                    error.message = format!("named stream {:?}: {}", stream.name, error.message);
+                    error
+                })?;
+        }
+    }
+    Ok(())
+}
+
+// Host streams remain unsupported until a platform has a native stream adapter.
+// Refusing here never interprets a stream name as a host path or an xattr name.
+pub(super) struct HostStreams;
+impl NamedStreamSink for HostStreams {
+    fn set_named_stream(&mut self, _path: &Path, _stream: &NamedStream) -> Result<(), CliError> {
+        Err(CliError::refused(
+            "named streams not supported by this host",
+        ))
+    }
+}
+
 /// Opt-in attribute policy, separate from existing option literals.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct XattrOptions {
-    /// Read source attributes and write them with the host's no-follow calls.
+    /// Preserve extended attributes and named streams through native capabilities.
     pub preserve_xattrs: bool,
 }
 impl XattrOptions {
@@ -37,13 +94,14 @@ pub fn export_args_with_xattrs() -> [Arg; 7] {
     let [path, dest, replace, verify, recursive, depth, preserve] = export_args_with_times();
     [path, dest, replace, verify, recursive, depth,
         preserve.value_parser(["links", "times", "sparse", "xattrs"])
-            .help("Preserve times, links, sparse holes and/or extended attributes; unsupported metadata is reported per item")]
+            .help("Preserve times, links, sparse holes and/or extended attributes and named streams; unsupported metadata is reported per item")]
 }
 
-/// Export with opt-in extended attributes, leaving existing entry points intact.
+/// Export with opt-in extended attributes and named streams.
 /// Attribute errors refuse the item after its contents have been published;
 /// already-written attributes and contents remain, and siblings continue.
 /// Host calls never follow symbolic links or manufacture metadata side files.
+/// Named streams are refused by name until a native host adapter is available.
 pub fn export_tree_with_xattrs(
     request: &ExportRequest,
     source: &mut dyn TreeSource,
