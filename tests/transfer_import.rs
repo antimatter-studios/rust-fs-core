@@ -51,10 +51,22 @@ struct Sink {
     corrupt_read: bool,
     after_write: Option<Box<dyn FnOnce()>>,
     during_persist: Option<Box<dyn FnOnce()>>,
+    free: Option<u64>,
+    asked: Option<u64>,
 }
+// The test sink's estimate of the metadata a staged file adds to its data.
+const METADATA: u64 = 4096;
 impl FileSink for Sink {
     fn supports_atomic_replace(&self) -> bool {
         self.atomic
+    }
+    fn space(&mut self, len: u64) -> Result<Option<transfer::Space>, CliError> {
+        assert!(self.staged.is_some(), "space was asked before staging");
+        self.asked = Some(len);
+        Ok(self.free.map(|free| transfer::Space {
+            free,
+            needed: len + METADATA,
+        }))
     }
     fn stage(&mut self, _: &Path, replace: bool) -> Result<(), CliError> {
         if !replace && self.old.is_some() {
@@ -356,6 +368,47 @@ fn local_source(name: &str, hook: Option<fn(&Path)>) -> HookedLocal {
         hook,
         reads: 0,
     }
+}
+// A replacement keeps the old file until publication, so the staged copy must
+// fit in the free space the sink reports beside it.
+#[test]
+fn a_replacement_without_room_for_the_staged_copy_is_refused() {
+    let mut source = local_source("no-space", None);
+    let mut sink = old_sink();
+    let needed = (2 * CHUNK) as u64 + METADATA;
+    sink.free = Some(needed - 1);
+    let error =
+        transfer::import_local_file(&mut source, Some(&mut sink), Path::new("/target"), true)
+            .unwrap_err();
+    assert_eq!(error.code, 1);
+    assert!(
+        error.message.contains(&format!("needs {needed} bytes")),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .message
+            .contains(&format!("{} bytes free", needed - 1)),
+        "{error:?}"
+    );
+    assert_eq!(sink.asked, Some((2 * CHUNK) as u64));
+    assert_eq!(sink.written, 0);
+    assert_eq!(source.reads, 0);
+    assert_eq!(sink.old.as_deref(), Some(b"old".as_slice()));
+    assert!(sink.staged.is_none());
+}
+#[test]
+fn a_replacement_that_exactly_fits_is_published() {
+    let mut source = local_source("exact-space", None);
+    let mut sink = old_sink();
+    sink.free = Some((2 * CHUNK) as u64 + METADATA);
+    let copied =
+        transfer::import_local_file(&mut source, Some(&mut sink), Path::new("/target"), true)
+            .unwrap();
+    assert_eq!(copied.bytes, (2 * CHUNK) as u64);
+    assert!(copied.replaced);
+    assert_eq!(sink.asked, Some((2 * CHUNK) as u64));
+    assert_eq!(sink.old.as_ref().map(Vec::len), Some(2 * CHUNK));
 }
 fn changed_source(name: &str, hook: fn(&Path)) {
     let mut source = local_source(name, Some(hook));

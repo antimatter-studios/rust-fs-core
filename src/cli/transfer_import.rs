@@ -32,6 +32,14 @@ pub trait FileSink {
     fn manifest_identity(&mut self, _path: &Path) -> Result<manifest::Identity, CliError> {
         Err(CliError::refused("import manifest identity unavailable"))
     }
+    /// Free space beside the staged file, and the space a staged file of `len`
+    /// data bytes needs there: data plus the driver's metadata estimate. Called
+    /// after `stage` and before any write when the input size is known. A
+    /// replaced name stays allocated until publication, so `free` must not
+    /// count it. `None` skips the check; writes still fail on ENOSPC.
+    fn space(&mut self, _len: u64) -> Result<Option<Space>, CliError> {
+        Ok(None)
+    }
     /// Create a private staged file beside `path`. Refuse existing names when
     /// `replace` is false. On failure, abort must still be safe to call.
     fn stage(&mut self, path: &Path, replace: bool) -> Result<(), CliError>;
@@ -52,6 +60,31 @@ pub trait FileSink {
     /// Remove staging without touching the final name, including after a failed
     /// stage. Report cleanup failures so abandoned staging is not hidden.
     fn abort(&mut self) -> Result<(), CliError>;
+}
+
+/// The destination space a sink reports for a staged file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Space {
+    /// Bytes the filesystem can still allocate.
+    pub free: u64,
+    /// Bytes the staged file occupies, its data and metadata together.
+    pub needed: u64,
+}
+
+// Refuse before the first write when the staged copy cannot fit; a replacement
+// must fit beside the old file, which is kept until publication.
+fn check_space(sink: &mut dyn FileSink, len: u64, replace: bool) -> Result<(), CliError> {
+    match sink.space(len)? {
+        Some(Space { free, needed }) if needed > free => Err(CliError::failed(format!(
+            "not enough space: the staged copy needs {needed} bytes, {free} bytes free{}",
+            if replace {
+                " beside the existing file"
+            } else {
+                ""
+            }
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn capable(sink: Option<&mut dyn FileSink>, replace: bool) -> Result<&mut dyn FileSink, CliError> {
@@ -369,6 +402,9 @@ fn import_stream<S: Read + ?Sized>(
     let result = (|| {
         cancellation.check(0, 0)?;
         sink.stage(path, replace)?;
+        if let Some(len) = size {
+            check_space(sink, len, replace)?;
+        }
         let mut buffer = vec![0u8; CHUNK];
         let mut digest = Sha256::new();
         loop {

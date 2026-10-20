@@ -89,7 +89,7 @@ mod import;
 pub use import::{
     import, import_args, import_args_with_verify, import_file, import_file_with_sparse,
     import_local_file, import_with_options, import_with_sparse, FileSink, ImportOptions,
-    ImportRequest, Input, LocalSource,
+    ImportRequest, Input, LocalSource, Space,
 };
 
 #[path = "transfer_import_tree.rs"]
