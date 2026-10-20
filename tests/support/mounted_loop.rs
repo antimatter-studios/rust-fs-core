@@ -122,3 +122,104 @@ impl Drop for Volume {
         run("udevadm", &["settle".as_ref()]);
     }
 }
+
+fn attach(image: &Path, size: u64) -> (PathBuf, u32) {
+    File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(image)
+        .unwrap()
+        .set_len(size)
+        .unwrap();
+    let output = run(
+        "losetup",
+        &["--find".as_ref(), "--show".as_ref(), image.as_os_str()],
+    );
+    let device = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    let mode = fs::metadata(&device).unwrap().permissions().mode();
+    run("udevadm", &["settle".as_ref()]);
+    run("chmod", &["0666".as_ref(), device.as_os_str()]);
+    (device, mode)
+}
+
+fn detach(device: &Path, mode: u32) {
+    run(
+        "chmod",
+        &[format!("{:o}", mode & 0o7777).as_ref(), device.as_os_str()],
+    );
+    run("losetup", &["--detach".as_ref(), device.as_os_str()]);
+    run("udevadm", &["settle".as_ref()]);
+}
+
+/// An attached loop device that no filesystem uses.
+pub struct Loop {
+    pub device: PathBuf,
+    mode: u32,
+}
+impl Loop {
+    pub fn new(image: &Path) -> Self {
+        let (device, mode) = attach(image, 16 * 1024 * 1024);
+        Self { device, mode }
+    }
+}
+impl Drop for Loop {
+    fn drop(&mut self) {
+        detach(&self.device, self.mode);
+    }
+}
+
+/// One Btrfs filesystem spanning a loop device per image; the kernel reports
+/// it under a synthetic device ID and names only one member as its source.
+pub struct Btrfs {
+    pub devices: Vec<PathBuf>,
+    modes: Vec<u32>,
+    mount: PathBuf,
+    mounted: bool,
+}
+impl Btrfs {
+    pub fn new(root: &Path, images: &[PathBuf]) -> Self {
+        // Sparse; above mkfs.btrfs's per-device minimum for the default profile.
+        let (devices, modes): (Vec<_>, Vec<_>) = images
+            .iter()
+            .map(|image| attach(image, 256 * 1024 * 1024))
+            .unzip();
+        let mut args: Vec<&OsStr> = vec!["-q".as_ref(), "-f".as_ref()];
+        args.extend(devices.iter().map(|device| device.as_os_str()));
+        run("mkfs.btrfs", &args);
+        run("udevadm", &["settle".as_ref()]);
+        let mount = root.join("btrfs-mount");
+        fs::create_dir(&mount).unwrap();
+        run("mount", &[devices[0].as_os_str(), mount.as_os_str()]);
+        Self {
+            devices,
+            modes,
+            mount,
+            mounted: true,
+        }
+    }
+    pub fn remount(&mut self, readonly: bool) {
+        run(
+            "mount",
+            &[
+                "-o".as_ref(),
+                if readonly { "remount,ro" } else { "remount,rw" }.as_ref(),
+                self.mount.as_os_str(),
+            ],
+        );
+    }
+    pub fn unmount(&mut self) {
+        run("umount", &[self.mount.as_os_str()]);
+        self.mounted = false;
+    }
+}
+impl Drop for Btrfs {
+    fn drop(&mut self) {
+        if self.mounted {
+            run("umount", &[self.mount.as_os_str()]);
+        }
+        for (device, mode) in self.devices.iter().zip(&self.modes) {
+            detach(device, *mode);
+        }
+    }
+}

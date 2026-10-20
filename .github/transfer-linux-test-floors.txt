@@ -1,3 +1,4 @@
 # #315 adds two real Linux mount oracle cases above the eight existing cases.
 # The import probe-failure case raises this to eleven; no mount tools may skip.
-transfer_exclusive 11
+# #375's two-device Btrfs oracle raises this to twelve.
+transfer_exclusive 12
