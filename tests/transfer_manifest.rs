@@ -2613,10 +2613,14 @@ fn tree_import_resume_skips_only_unchanged_verified_files() {
     let Some(Json::Arr(items)) = report.get("items") else {
         panic!("items")
     };
+    let has_destination = |item: &Json, name: &str| {
+        matches!(item.get("destination"), Some(Json::Str(destination))
+            if std::path::Path::new(destination) == std::path::Path::new(name))
+    };
     let status = |name: &str| {
         let item = items
             .iter()
-            .find(|item| item.get("destination") == Some(&Json::from(name)))
+            .find(|item| has_destination(item, name))
             .unwrap_or_else(|| panic!("{name}"));
         item.get("status").cloned().unwrap()
     };
@@ -2630,7 +2634,7 @@ fn tree_import_resume_skips_only_unchanged_verified_files() {
     }
     let skipped = items
         .iter()
-        .find(|item| item.get("destination") == Some(&Json::from("/image/tree/file")))
+        .find(|item| has_destination(item, "/image/tree/file"))
         .unwrap();
     let (_, read) = Manifest::open(&ledger).unwrap();
     let earlier = read
