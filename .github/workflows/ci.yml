@@ -141,7 +141,7 @@ jobs:
       - name: test (quiet, budgeted, with an executed-test floor)
         shell: bash
         run: |
-          # Run 39337729352 measured 1040 lines / 59713 bytes cold; see chores.yml.
+          # Run 39209097465 measured 1052 lines / 62179 bytes; leave 14% headroom.
           bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli
           bash scripts/core.sh test-floor debug 488
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug
@@ -150,6 +150,9 @@ jobs:
           fi
           if [ "$RUNNER_OS" = macOS ]; then
             bash scripts/core.sh test-floor --targets .github/transfer-macos-test-floors.txt debug
+          fi
+          if [ "$RUNNER_OS" = Windows ]; then
+            bash scripts/core.sh test-floor --targets .github/transfer-windows-test-floors.txt debug
           fi
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"

@@ -2621,7 +2621,7 @@ fn tree_import_resume_skips_only_unchanged_verified_files() {
         let item = items
             .iter()
             .find(|item| has_destination(item, name))
-            .unwrap_or_else(|| panic!("{name}"));
+            .unwrap_or_else(|| panic!("{name}: {items:?}"));
         item.get("status").cloned().unwrap()
     };
     assert_eq!(status("/image/tree/file"), Json::from("skipped"));
@@ -2635,7 +2635,7 @@ fn tree_import_resume_skips_only_unchanged_verified_files() {
     let skipped = items
         .iter()
         .find(|item| has_destination(item, "/image/tree/file"))
-        .unwrap();
+        .unwrap_or_else(|| panic!("/image/tree/file: {items:?}"));
     let (_, read) = Manifest::open(&ledger).unwrap();
     let earlier = read
         .entries
