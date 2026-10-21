@@ -47,18 +47,31 @@ mod unix {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    struct Generated(PathBuf);
+    /// The child's root, and the signal it acknowledges as the first.
+    struct Generated(PathBuf, Option<std::ffi::c_int>);
     impl FileSource for Generated {
         fn size(&self) -> u64 {
             (8 * CHUNK) as u64
         }
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, CliError> {
             if offset == CHUNK as u64 {
+                // The transfer registered its handler before this read, and
+                // signal-hook runs a signal's actions in registration order,
+                // so `seen` is set only once the transfer recorded the signal.
+                let seen = Arc::new(AtomicBool::new(false));
+                if let Some(first) = self.1 {
+                    signal_hook::flag::register(first, Arc::clone(&seen)).unwrap();
+                }
                 fs::write(self.0.join("ready"), b"ready").unwrap();
                 let start = Instant::now();
                 while !self.0.join("release").exists() {
+                    if seen.load(SeqCst) {
+                        fs::write(self.0.join("observed"), b"observed").unwrap();
+                    }
                     assert!(
                         start.elapsed() < Duration::from_secs(10),
                         "parent never released the slow source"
@@ -121,7 +134,11 @@ mod unix {
                 output: Output::File(root.join("dest")),
                 replace,
             };
-            let mut source = Generated(root);
+            let first = match signal {
+                "-INT" => signal_hook::consts::SIGINT,
+                _ => signal_hook::consts::SIGTERM,
+            };
+            let mut source = Generated(root, second.then_some(first));
             let result = if tree {
                 transfer::export_tree(
                     &request,
@@ -168,15 +185,36 @@ mod unix {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        let pid = child.id().to_string();
         let send = |sig: &str| {
             assert!(Command::new("kill")
-                .args([sig, &child.id().to_string()])
+                .args([sig, &pid])
                 .status()
                 .expect("install the platform kill utility for the signal oracle")
                 .success());
         };
+        // Stopped, the child cannot handle the first signal by itself, so the
+        // window a loaded runner opens by chance is open on every run and only
+        // the acknowledgement below closes it.
+        if second {
+            send("-STOP");
+        }
         send(signal);
         if second {
+            // Two pending signals have no delivery order a test can rely on:
+            // Linux runs the later-dequeued handler first, or on another
+            // thread. "First" is only defined once the child has seen it.
+            send("-CONT");
+            let start = Instant::now();
+            while !root.join("observed").exists() {
+                if start.elapsed() > Duration::from_secs(10) || child.try_wait().unwrap().is_some()
+                {
+                    let _ = child.kill();
+                    let out = child.wait_with_output().unwrap();
+                    panic!("child never observed the first signal: {out:?}");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
             send("-TERM");
         }
         fs::write(root.join("release"), b"go").unwrap();

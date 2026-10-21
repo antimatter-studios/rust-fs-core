@@ -84,6 +84,11 @@ same-file = { version = "1.0.6", optional = true }
 saphyr = "0.0.12"
 toml = "1.1.5"
 
+[target.'cfg(unix)'.dev-dependencies]
+# MIT/Apache-2.0; tests/transfer_cancel.rs's child acknowledges the first
+# signal it handles, so the test sends a second only after a first exists.
+signal-hook = { version = "0.3.18", default-features = false }
+
 [profile.release]
 lto = true
 codegen-units = 1
