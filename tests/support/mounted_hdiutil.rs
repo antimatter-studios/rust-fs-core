@@ -11,7 +11,7 @@ fn run(tool: &str, args: &[&OsStr]) -> Output {
         .unwrap_or_else(|err| panic!("macOS mount oracle requires {tool}: {err}"));
     assert!(
         output.status.success(),
-        "macOS mount oracle requires {tool}: {output:?}"
+        "macOS mount oracle requires {tool} {args:?}: {output:?}"
     );
     output
 }
@@ -131,14 +131,30 @@ impl Volume {
             // Disk Arbitration can still be releasing the just-unmounted
             // partition. This image is disposable and all test children have
             // exited, so force detachment to avoid leaking the device.
-            run(
-                "hdiutil",
-                &[
-                    "detach".as_ref(),
-                    "-force".as_ref(),
-                    self.device.as_os_str(),
-                ],
-            );
+            // A forced detach can still race Disk Arbitration while it is
+            // releasing the just-unmounted image. Retry that transient busy
+            // result instead of failing the whole macOS test immediately.
+            let mut forced = None;
+            for attempt in 0..5 {
+                let output = Command::new("hdiutil")
+                    .args(["detach", "-force"])
+                    .arg(&self.device)
+                    .output()
+                    .unwrap_or_else(|err| panic!("macOS mount oracle requires hdiutil: {err}"));
+                if output.status.success() {
+                    forced = Some(output);
+                    break;
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.to_ascii_lowercase().contains("resource busy") || attempt == 4 {
+                    panic!(
+                        "macOS mount oracle requires hdiutil detach -force {:?}: {output:?}",
+                        self.device
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1)));
+            }
+            assert!(forced.is_some(), "forced hdiutil detach did not complete");
         }
         self.attached = false;
     }
