@@ -247,6 +247,20 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  msrv:
+    # Keep the package's declared rust-version honest. This checks the full
+    # production feature surface (including `cli`) at the oldest supported
+    # compiler, independently of the pinned development toolchain above.
+    name: msrv (Rust 1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-features
+
   semver:
     # `chore check:semver`, spelled out because CI here does not install
     # chore: this tree's public API against the newest version on crates.io,
@@ -292,7 +306,7 @@ jobs:
     # ask it for AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP -- it never runs the
     # suite, so it has no privilege gap to acknowledge.
     if: always()
-    needs: [changes, test, fmt, coverage, semver]
+    needs: [changes, test, fmt, coverage, msrv, semver]
     runs-on: ubuntu-latest
     steps:
       - name: Every job ran and succeeded
