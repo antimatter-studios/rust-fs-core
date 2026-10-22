@@ -298,12 +298,18 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             ));
-            fs::create_dir_all(&path).unwrap();
+            fs::create_dir_all(path.join("block")).unwrap();
             Self(path)
         }
 
+        /// The stand-in for `/sys/class/block`: it holds only device
+        /// directories, as sysfs does, so the image lives beside it.
+        fn class_block(&self) -> PathBuf {
+            self.0.join("block")
+        }
+
         fn add_loop(&self, name: &str, backing: &Path) -> PathBuf {
-            let device = self.0.join(name);
+            let device = self.class_block().join(name);
             let loop_dir = device.join("loop");
             fs::create_dir_all(&loop_dir).unwrap();
             fs::write(
@@ -334,7 +340,7 @@ mod tests {
         tree.add_loop("loop-swap", Path::new("/root/private/swapfile"));
         let image_metadata = fs::metadata(&image).unwrap();
 
-        let found = loop_devices(&tree.0, &image, &image_metadata, &|path| {
+        let found = loop_devices(&tree.class_block(), &image, &image_metadata, &|path| {
             if path == image {
                 Ok(fs::metadata(path)?)
             } else {
@@ -357,7 +363,7 @@ mod tests {
         tree.add_loop("loop-match", &image);
         let image_metadata = fs::metadata(&image).unwrap();
 
-        let error = loop_devices(&tree.0, &image, &image_metadata, &|_| {
+        let error = loop_devices(&tree.class_block(), &image, &image_metadata, &|_| {
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "image backing file is not readable",
