@@ -2,11 +2,11 @@
 #![cfg(feature = "cli")]
 
 use std::fs::{self, File};
-use std::io::{Read, Seek, Write};
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use fs_core::cli::transfer::{self, Destination, FileSource, ImageLock};
+use fs_core::cli::transfer::{self, Destination, FileSink, FileSource, ImageLock};
 use fs_core::cli::CliError;
 
 #[cfg(unix)]
@@ -74,19 +74,53 @@ fn child(test: &str, image: &Path) -> Command {
     cmd
 }
 
+// A sink over the image that an import must never reach: a refusal has to
+// come before staging, so staging here is the defect under test.
+struct Unreachable(PathBuf);
+impl FileSink for Unreachable {
+    fn image_path(&self) -> Option<&Path> {
+        Some(&self.0)
+    }
+    fn stage(&mut self, _: &Path, _: bool) -> Result<(), CliError> {
+        panic!("import staged into {} past its refusal", self.0.display())
+    }
+    fn write_at(&mut self, _: u64, _: &[u8]) -> Result<(), CliError> {
+        unreachable!()
+    }
+    fn persist(&mut self) -> Result<(), CliError> {
+        unreachable!()
+    }
+    fn read_at(&mut self, _: u64, _: &mut [u8]) -> Result<usize, CliError> {
+        unreachable!()
+    }
+    fn publish(&mut self, _: bool) -> Result<bool, CliError> {
+        unreachable!()
+    }
+    fn abort(&mut self) -> Result<(), CliError> {
+        Ok(())
+    }
+}
+
+// The child half of every refused import: stdin goes through the real import
+// entry point, which must refuse before it stages or reads, and the refusal's
+// exit code becomes the child's.
+fn import_stdin_into(image: &Path) -> ! {
+    let mut sink = Unreachable(image.into());
+    let err = transfer::import_file(
+        &mut std::io::stdin().lock(),
+        Some(&mut sink),
+        Path::new("imported"),
+        false,
+    )
+    .expect_err("an import into a held or mounted image was accepted");
+    eprintln!("{}", err.message);
+    std::process::exit(i32::from(err.code));
+}
+
 #[test]
 fn another_process_refuses_import_before_reading_its_input() {
     if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
-        let _guard = match ImageLock::for_import(Path::new(&image)) {
-            Ok(guard) => guard,
-            Err(err) => {
-                eprintln!("{}", err.message);
-                std::process::exit(i32::from(err.code));
-            }
-        };
-        let mut input = Vec::new();
-        std::io::stdin().read_to_end(&mut input).unwrap();
-        std::process::exit(0);
+        import_stdin_into(Path::new(&image));
     }
     let dir = Scratch::new("import");
     let held = File::options()
@@ -289,16 +323,7 @@ mod mounted_loop;
 #[test]
 fn host_mounted_images_and_devices_refuse_import_with_input_unread() {
     if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
-        match ImageLock::for_import(Path::new(&image)) {
-            Err(err) => {
-                eprintln!("{}", err.message);
-                std::process::exit(i32::from(err.code));
-            }
-            Ok(_guard) => {
-                std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
-                std::process::exit(0);
-            }
-        }
+        import_stdin_into(Path::new(&image));
     }
     let dir = Scratch::new("mounted-import");
     let mut volume = mounted_loop::Volume::new(&dir.root, &dir.image(), true);
@@ -476,16 +501,7 @@ mod mounted_hdiutil;
 #[test]
 fn macos_attached_images_and_devices_refuse_import_with_input_unread() {
     if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
-        match ImageLock::for_import(Path::new(&image)) {
-            Err(err) => {
-                eprintln!("{}", err.message);
-                std::process::exit(i32::from(err.code));
-            }
-            Ok(_guard) => {
-                std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
-                std::process::exit(0);
-            }
-        }
+        import_stdin_into(Path::new(&image));
     }
     if !mounted_hdiutil::host() {
         return;
@@ -586,16 +602,7 @@ mod mounted_vdisk;
 #[test]
 fn windows_attached_images_and_volumes_refuse_import_with_input_unread() {
     if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
-        match ImageLock::for_import(Path::new(&image)) {
-            Err(err) => {
-                eprintln!("{}", err.message);
-                std::process::exit(i32::from(err.code));
-            }
-            Ok(_guard) => {
-                std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
-                std::process::exit(0);
-            }
-        }
+        import_stdin_into(Path::new(&image));
     }
     if !mounted_vdisk::host() {
         return;
