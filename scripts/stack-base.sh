@@ -25,9 +25,10 @@
 #     highest position.
 #   * With no stack yet, a new pull request stacks on the newest older open
 #     pull request, and so starts the stack; with none open, on `main`.
-#   * Open pull requests in more than one stack are refused, naming them: the
-#     repository has one stack, and an agent is told so rather than guessing
-#     which.
+#   * Multiple native stack segments are accepted only when their base/head
+#     branches prove one complete chain from main, in each segment's native
+#     order. Positions restart in each segment, so they cannot order the
+#     segments themselves. Missing links, forks and cycles are refused.
 #
 # A pull request taken out of the stack because its fix cannot come soon is
 # open but in no stack; it is never anyone's base.
@@ -36,10 +37,11 @@
 # Run from inside the branch's work tree.
 #
 # Inputs, each with a default that asks git or GitHub (tests set them):
-#   STACK_BASE_PRS   "NUMBER BRANCH STACK POSITION" lines, the repository's
+#   STACK_BASE_PRS   "NUMBER BRANCH STACK POSITION BASE" lines, the repository's
 #                    open pull requests, with "-" for STACK and POSITION
 #                    when a pull request is in no stack (default: the
-#                    GitHub API, through gh)
+#                    GitHub API, through gh). Legacy four-column inputs
+#                    still work for a single stack; joining segments needs BASE.
 #   STACK_BASE_SELF  this branch's pull request number, empty when it has
 #                    none yet (default: the open pull request whose head is
 #                    this branch)
@@ -58,7 +60,7 @@ if [ -n "${STACK_BASE_PRS+set}" ]; then
 else
     command -v gh >/dev/null 2>&1 || die "gh is not installed: it lists the open pull requests"
     prs="$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=open&per_page=100' \
-        --jq '.[] | "\(.number) \(.head.ref) \(.stack.number // "-") \(.stack.position // "-")"')" ||
+        --jq '.[] | "\(.number) \(.head.ref) \(.stack.number // "-") \(.stack.position // "-") \(.base.ref)"')" ||
         die "listing the open pull requests failed"
 fi
 
@@ -67,7 +69,7 @@ fi
 rows="$(printf '%s\n' "$prs" | awk '
     NF >= 4 && $1 ~ /^[0-9]+$/ &&
     (($3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/) || ($3 == "-" && $4 == "-")) {
-        print $1, $2, $3, $4
+        print $1, $2, $3, $4, ($5 == "" ? "-" : $5)
     }')"
 
 if [ -n "${STACK_BASE_SELF+set}" ]; then
@@ -81,8 +83,68 @@ esac
 
 stacks="$(printf '%s\n' "$rows" | awk '$3 != "-" { print $3 }' | sort -un)"
 if [ "$(printf '%s\n' "$stacks" | grep -c .)" -gt 1 ]; then
+    # A native stack ID is a segment, not proof that its branch chain is
+    # disconnected. Validate every link before selecting any branch.
+    if chain_base="$(printf '%s\n' "$rows" | awk -v self="$self" -v main="$main" '
+        function refuse(message) { print message; exit 1 }
+        $3 != "-" {
+            n++
+            number[n] = $1
+            head[n] = $2
+            stack[n] = $3
+            position[n] = $4
+            base[n] = $5
+            if ($2 in by_head) problem = "duplicate head branches"
+            if ($1 in by_number) problem = "duplicate pull requests"
+            by_head[$2] = n
+            by_number[$1] = n
+            if ($5 == "-") problem = "missing base branch metadata"
+        }
+        END {
+            if (problem != "") refuse(problem)
+            for (i = 1; i <= n; i++) {
+                if (base[i] in by_head) {
+                    parent = by_head[base[i]]
+                    if (child[parent]) refuse("a branch has multiple successors")
+                    child[parent] = i
+                } else if (base[i] == main) {
+                    if (root) refuse("disconnected roots")
+                    root = i
+                } else {
+                    refuse("a predecessor is missing")
+                }
+            }
+            if (!root) refuse("no chain starts at the main branch")
+            current = root
+            while (current) {
+                if (visited[current]) refuse("a branch cycle")
+                visited[current] = 1
+                count++
+                group = stack[current]
+                if (group != previous_group) {
+                    if (seen_group[group]) refuse("interleaved native segments")
+                    seen_group[group] = 1
+                } else if (position[current] + 0 <= previous_position + 0) {
+                    refuse("native positions contradict branch order")
+                }
+                if (number[current] == self) {
+                    own_base = previous ? head[previous] : main
+                    own_base_found = 1
+                }
+                previous = current
+                previous_group = group
+                previous_position = position[current]
+                current = child[current]
+            }
+            if (count != n) refuse("disconnected or cyclic branches")
+            print own_base_found ? own_base : head[previous]
+        }
+    ')"; then
+        printf '%s\n' "$chain_base"
+        exit 0
+    fi
     detail="$(printf '%s\n' "$rows" | awk '$3 != "-" { printf "  stack %s: #%s (%s, position %s)\n", $3, $1, $2, $4 }' | sort)"
-    die "the open pull requests are in more than one stack; a repository has one, so join them before stacking more:
+    die "the open pull requests are in more than one stack without one verified branch chain ($chain_base):
 $detail"
 fi
 
