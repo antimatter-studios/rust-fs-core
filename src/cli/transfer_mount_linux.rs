@@ -47,28 +47,13 @@ fn probe(image: &Path) -> io::Result<MountState> {
             "target is neither an image file nor a block device",
         ));
     }
-    for entry in fs::read_dir("/sys/class/block")? {
-        let device = entry?.path();
-        let backing = device.join("loop/backing_file");
-        if !backing.try_exists()? {
-            continue;
-        }
-        let bytes = fs::read(backing)?;
-        // sysfs appends one newline; preserve spaces and non-UTF-8 names.
-        let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-        if bytes.is_empty() {
-            continue;
-        }
-        let backing = fs::metadata(Path::new(std::ffi::OsStr::from_bytes(bytes)))?;
-        let same =
-            if metadata.file_type().is_block_device() && backing.file_type().is_block_device() {
-                metadata.rdev() == backing.rdev()
-            } else {
-                metadata.dev() == backing.dev() && metadata.ino() == backing.ino()
-            };
-        if same {
-            collect(&device, &mut devices)?;
-        }
+    for device in loop_devices(
+        Path::new("/sys/class/block"),
+        &image,
+        &metadata,
+        &|path: &Path| fs::metadata(path),
+    )? {
+        collect(&device, &mut devices)?;
     }
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
     let members = if devices.is_empty() || !mountinfo.contains(" - btrfs ") {
@@ -103,6 +88,54 @@ fn probe(image: &Path) -> io::Result<MountState> {
         }
         Ok(dev_id(metadata.rdev()))
     })
+}
+
+/// Find loop devices backed by `image`. An unrelated loop may point into a
+/// directory the caller cannot stat (for example a root-owned swapfile); it
+/// must not make every transfer on the host fail. Keep failing closed when a
+/// failed stat could refer to the image being checked.
+fn loop_devices(
+    class_block: &Path,
+    image: &Path,
+    image_metadata: &fs::Metadata,
+    metadata_for_backing: &dyn Fn(&Path) -> io::Result<fs::Metadata>,
+) -> io::Result<Vec<PathBuf>> {
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(class_block)? {
+        let device = entry?.path();
+        let backing = device.join("loop/backing_file");
+        if !backing.try_exists()? {
+            continue;
+        }
+        let bytes = fs::read(backing)?;
+        // sysfs appends one newline; preserve spaces and non-UTF-8 names.
+        let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        if bytes.is_empty() {
+            continue;
+        }
+        let backing_path = Path::new(std::ffi::OsStr::from_bytes(bytes));
+        let backing_metadata = match metadata_for_backing(backing_path) {
+            Ok(metadata) => metadata,
+            Err(error) if path_may_be_image(backing_path, image) => return Err(error),
+            Err(_) => continue,
+        };
+        let same = if image_metadata.file_type().is_block_device()
+            && backing_metadata.file_type().is_block_device()
+        {
+            image_metadata.rdev() == backing_metadata.rdev()
+        } else {
+            image_metadata.dev() == backing_metadata.dev()
+                && image_metadata.ino() == backing_metadata.ino()
+        };
+        if same {
+            matches.push(device);
+        }
+    }
+    Ok(matches)
+}
+
+fn path_may_be_image(backing: &Path, image: &Path) -> bool {
+    backing == image || fs::canonicalize(backing).is_ok_and(|canonical| canonical == image)
 }
 
 fn dev_id(dev: u64) -> String {
@@ -253,8 +286,92 @@ fn mounts(
 mod tests {
     use super::*;
 
+    struct TestTree(PathBuf);
+
+    impl TestTree {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "rust-fs-core-loop-probe-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(path.join("block")).unwrap();
+            Self(path)
+        }
+
+        /// The stand-in for `/sys/class/block`: it holds only device
+        /// directories, as sysfs does, so the image lives beside it.
+        fn class_block(&self) -> PathBuf {
+            self.0.join("block")
+        }
+
+        fn add_loop(&self, name: &str, backing: &Path) -> PathBuf {
+            let device = self.class_block().join(name);
+            let loop_dir = device.join("loop");
+            fs::create_dir_all(&loop_dir).unwrap();
+            fs::write(
+                loop_dir.join("backing_file"),
+                backing.as_os_str().as_bytes(),
+            )
+            .unwrap();
+            device
+        }
+    }
+
+    impl Drop for TestTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn unresolved(source: &str) -> io::Result<String> {
         Err(invalid(format!("unexpected source lookup {source}")))
+    }
+
+    #[test]
+    fn inaccessible_unrelated_loop_does_not_hide_matching_loop() {
+        let tree = TestTree::new();
+        let image = tree.0.join("image.raw");
+        fs::write(&image, b"image").unwrap();
+        let matching = tree.add_loop("loop-match", &image);
+        tree.add_loop("loop-swap", Path::new("/root/private/swapfile"));
+        let image_metadata = fs::metadata(&image).unwrap();
+
+        let found = loop_devices(&tree.class_block(), &image, &image_metadata, &|path| {
+            if path == image {
+                Ok(fs::metadata(path)?)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unrelated backing file is not readable",
+                ))
+            }
+        })
+        .unwrap();
+
+        assert_eq!(found, vec![matching]);
+    }
+
+    #[test]
+    fn inaccessible_backing_file_that_is_the_image_still_fails_closed() {
+        let tree = TestTree::new();
+        let image = tree.0.join("image.raw");
+        fs::write(&image, b"image").unwrap();
+        tree.add_loop("loop-match", &image);
+        let image_metadata = fs::metadata(&image).unwrap();
+
+        let error = loop_devices(&tree.class_block(), &image, &image_metadata, &|_| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "image backing file is not readable",
+            ))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]
