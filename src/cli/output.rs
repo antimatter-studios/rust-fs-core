@@ -343,11 +343,31 @@ impl Outcome {
 }
 
 /// A failure: printed as `{"error": message, "code": code}` on stderr (or
-/// `<tool>: <message>` with `--text`), and `code` is the exit status.
+/// `<tool>: <message>` with `--text`), and `code` is the exit status. A
+/// missing path also carries `"kind": "not_found"` ([`CliError::not_found`]).
+///
+/// Built with its constructors: the kind is private, so only
+/// [`CliError::not_found`] can set it and no driver spells it itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     pub message: String,
     pub code: u8,
+    kind: Option<ErrorKind>,
+}
+
+/// The fixed `kind` a script matches instead of an error's wording, the
+/// same for every driver. Only a missing path has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorKind {
+    NotFound,
+}
+
+impl ErrorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ErrorKind::NotFound => "not_found",
+        }
+    }
 }
 
 impl CliError {
@@ -356,6 +376,20 @@ impl CliError {
         CliError {
             message: message.into(),
             code: EXIT_FAILED,
+            kind: None,
+        }
+    }
+
+    /// The path the verb was given does not exist (exit 1): the JSON error
+    /// carries `"kind": "not_found"`, which a script matches across drivers
+    /// whatever each one's message says. A verb whose table row gives a
+    /// missing path another status sets it with [`CliError::with_code`],
+    /// and the kind stays.
+    pub fn not_found(message: impl Into<String>) -> CliError {
+        CliError {
+            message: message.into(),
+            code: EXIT_FAILED,
+            kind: Some(ErrorKind::NotFound),
         }
     }
 
@@ -364,6 +398,7 @@ impl CliError {
         CliError {
             message: message.into(),
             code: EXIT_USAGE,
+            kind: None,
         }
     }
 
@@ -373,6 +408,7 @@ impl CliError {
         CliError {
             message: format!("not implemented: {}", what.into()),
             code: EXIT_UNSUPPORTED,
+            kind: None,
         }
     }
 
@@ -381,6 +417,7 @@ impl CliError {
         CliError {
             message: message.into(),
             code: EXIT_UNSUPPORTED,
+            kind: None,
         }
     }
 
@@ -389,6 +426,7 @@ impl CliError {
         CliError {
             message: message.into(),
             code: EXIT_REFUSED,
+            kind: None,
         }
     }
 
@@ -398,12 +436,22 @@ impl CliError {
         self
     }
 
-    /// The JSON form.
+    /// The error's fixed kind, `"not_found"` for a missing path; `None`
+    /// for every other error.
+    pub fn kind(&self) -> Option<&'static str> {
+        self.kind.map(ErrorKind::as_str)
+    }
+
+    /// The JSON form: `kind` follows `error` and `code` only when set.
     pub fn to_json(&self) -> Json {
-        Json::object([
+        let mut fields = vec![
             ("error", Json::from(self.message.as_str())),
             ("code", Json::from(u64::from(self.code))),
-        ])
+        ];
+        if let Some(kind) = self.kind() {
+            fields.push(("kind", Json::from(kind)));
+        }
+        Json::object(fields)
     }
 }
 
@@ -492,6 +540,40 @@ mod tests {
         assert_eq!(text.code, EXIT_REFUSED);
         assert!(text.stdout.is_empty());
         assert_eq!(text.stderr, "fs.demo: volume is mounted\n");
+    }
+
+    // A missing path carries `"kind": "not_found"` beside the error and the
+    // code, set only by its one constructor, so a script matches the field
+    // rather than each driver's wording; every other error carries no kind.
+    #[test]
+    fn a_missing_path_is_marked_not_found_and_no_other_error_is() {
+        let error = CliError::not_found("/no/such/file: not found");
+        assert_eq!(error.code, EXIT_FAILED);
+        assert_eq!(error.kind(), Some("not_found"));
+        let json = render("fs.demo", Format::Json, Err(error.clone()));
+        assert_eq!(json.code, EXIT_FAILED);
+        assert!(json.stdout.is_empty());
+        assert_eq!(
+            json.stderr,
+            "{\"error\": \"/no/such/file: not found\", \"code\": 1, \"kind\": \"not_found\"}\n"
+        );
+        let text = render("fs.demo", Format::Text, Err(error));
+        assert_eq!(text.stderr, "fs.demo: /no/such/file: not found\n");
+        // A verb whose table row gives a missing path another status keeps
+        // the kind.
+        let refused = CliError::not_found("gone").with_code(EXIT_REFUSED);
+        assert_eq!(refused.code, EXIT_REFUSED);
+        assert_eq!(refused.kind(), Some("not_found"));
+        for other in [
+            CliError::failed("x"),
+            CliError::usage("x"),
+            CliError::not_implemented("x"),
+            CliError::refused("x"),
+            CliError::refused_by_state("x"),
+        ] {
+            assert_eq!(other.kind(), None, "{other:?}");
+            assert!(!other.to_json().to_compact().contains("kind"), "{other:?}");
+        }
     }
 
     #[test]
