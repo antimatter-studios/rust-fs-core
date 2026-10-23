@@ -355,8 +355,8 @@ pub struct CliError {
     kind: Option<ErrorKind>,
 }
 
-/// The fixed `kind` a script matches instead of an error's wording
-/// (diskjockey#524). Only a missing path has one.
+/// The fixed `kind` a script matches instead of an error's wording, the
+/// same for every driver. Only a missing path has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorKind {
     NotFound,
@@ -544,8 +544,7 @@ mod tests {
 
     // A missing path carries `"kind": "not_found"` beside the error and the
     // code, set only by its one constructor, so a script matches the field
-    // rather than each driver's wording; every other error carries no kind
-    // (diskjockey#524).
+    // rather than each driver's wording; every other error carries no kind.
     #[test]
     fn a_missing_path_is_marked_not_found_and_no_other_error_is() {
         let error = CliError::not_found("/no/such/file: not found");

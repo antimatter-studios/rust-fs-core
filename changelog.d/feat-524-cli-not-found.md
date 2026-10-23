@@ -1,6 +1,6 @@
 ### Added
 
-- `cli::output::CliError::not_found` reports a path that does not exist: exit 1, and `"kind": "not_found"` beside `error` and `code` in the JSON error, which a script matches across drivers whatever each one's message says (antimatter-studios/diskjockey#524). `CliError::kind()` reads it; every other error has none.
+- `cli::output::CliError::not_found` reports a path that does not exist: exit 1, and `"kind": "not_found"` beside `error` and `code` in the JSON error, which a script matches across drivers whatever each one's message says. `CliError::kind()` reads it; every other error has none.
 
 ### Changed
 
