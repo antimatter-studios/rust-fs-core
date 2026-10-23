@@ -494,6 +494,41 @@ mod tests {
         assert_eq!(text.stderr, "fs.demo: volume is mounted\n");
     }
 
+    // A missing path carries `"kind": "not_found"` beside the error and the
+    // code, set only by its one constructor, so a script matches the field
+    // rather than each driver's wording; every other error carries no kind
+    // (diskjockey#524).
+    #[test]
+    fn a_missing_path_is_marked_not_found_and_no_other_error_is() {
+        let error = CliError::not_found("/no/such/file: not found");
+        assert_eq!(error.code, EXIT_FAILED);
+        assert_eq!(error.kind(), Some("not_found"));
+        let json = render("fs.demo", Format::Json, Err(error.clone()));
+        assert_eq!(json.code, EXIT_FAILED);
+        assert!(json.stdout.is_empty());
+        assert_eq!(
+            json.stderr,
+            "{\"error\": \"/no/such/file: not found\", \"code\": 1, \"kind\": \"not_found\"}\n"
+        );
+        let text = render("fs.demo", Format::Text, Err(error));
+        assert_eq!(text.stderr, "fs.demo: /no/such/file: not found\n");
+        // A verb whose table row gives a missing path another status keeps
+        // the kind.
+        let refused = CliError::not_found("gone").with_code(EXIT_REFUSED);
+        assert_eq!(refused.code, EXIT_REFUSED);
+        assert_eq!(refused.kind(), Some("not_found"));
+        for other in [
+            CliError::failed("x"),
+            CliError::usage("x"),
+            CliError::not_implemented("x"),
+            CliError::refused("x"),
+            CliError::refused_by_state("x"),
+        ] {
+            assert_eq!(other.kind(), None, "{other:?}");
+            assert!(!other.to_json().to_compact().contains("kind"), "{other:?}");
+        }
+    }
+
     #[test]
     fn strings_are_escaped_and_control_characters_survive() {
         let v = Json::from("a\"b\\c\nd\u{1}é");
