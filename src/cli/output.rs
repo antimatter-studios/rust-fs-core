@@ -343,11 +343,31 @@ impl Outcome {
 }
 
 /// A failure: printed as `{"error": message, "code": code}` on stderr (or
-/// `<tool>: <message>` with `--text`), and `code` is the exit status.
+/// `<tool>: <message>` with `--text`), and `code` is the exit status. A
+/// missing path also carries `"kind": "not_found"` ([`CliError::not_found`]).
+///
+/// Built with its constructors: the kind is private, so only
+/// [`CliError::not_found`] can set it and no driver spells it itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     pub message: String,
     pub code: u8,
+    kind: Option<ErrorKind>,
+}
+
+/// The fixed `kind` a script matches instead of an error's wording
+/// (diskjockey#524). Only a missing path has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorKind {
+    NotFound,
+}
+
+impl ErrorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ErrorKind::NotFound => "not_found",
+        }
+    }
 }
 
 impl CliError {
@@ -356,6 +376,20 @@ impl CliError {
         CliError {
             message: message.into(),
             code: EXIT_FAILED,
+            kind: None,
+        }
+    }
+
+    /// The path the verb was given does not exist (exit 1): the JSON error
+    /// carries `"kind": "not_found"`, which a script matches across drivers
+    /// whatever each one's message says. A verb whose table row gives a
+    /// missing path another status sets it with [`CliError::with_code`],
+    /// and the kind stays.
+    pub fn not_found(message: impl Into<String>) -> CliError {
+        CliError {
+            message: message.into(),
+            code: EXIT_FAILED,
+            kind: Some(ErrorKind::NotFound),
         }
     }
 
@@ -364,6 +398,7 @@ impl CliError {
         CliError {
             message: message.into(),
             code: EXIT_USAGE,
+            kind: None,
         }
     }
 
@@ -373,6 +408,7 @@ impl CliError {
         CliError {
             message: format!("not implemented: {}", what.into()),
             code: EXIT_UNSUPPORTED,
+            kind: None,
         }
     }
 
@@ -381,6 +417,7 @@ impl CliError {
         CliError {
             message: message.into(),
             code: EXIT_UNSUPPORTED,
+            kind: None,
         }
     }
 
@@ -389,6 +426,7 @@ impl CliError {
         CliError {
             message: message.into(),
             code: EXIT_REFUSED,
+            kind: None,
         }
     }
 
@@ -398,12 +436,22 @@ impl CliError {
         self
     }
 
-    /// The JSON form.
+    /// The error's fixed kind, `"not_found"` for a missing path; `None`
+    /// for every other error.
+    pub fn kind(&self) -> Option<&'static str> {
+        self.kind.map(ErrorKind::as_str)
+    }
+
+    /// The JSON form: `kind` follows `error` and `code` only when set.
     pub fn to_json(&self) -> Json {
-        Json::object([
+        let mut fields = vec![
             ("error", Json::from(self.message.as_str())),
             ("code", Json::from(u64::from(self.code))),
-        ])
+        ];
+        if let Some(kind) = self.kind() {
+            fields.push(("kind", Json::from(kind)));
+        }
+        Json::object(fields)
     }
 }
 
