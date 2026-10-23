@@ -12,6 +12,83 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-23
+
+### Added
+
+- `cli::output::CliError::not_found` reports a path that does not exist: exit 1, and `"kind": "not_found"` beside `error` and `code` in the JSON error, which a script matches across drivers whatever each one's message says. `CliError::kind()` reads it; every other error has none.
+
+- Command and recursive transfer entry points accept sparse preservation alongside link and time policies, with logical progress and format-specific per-file refusal before staging on unsupported tree sinks.
+
+- Opt-in file and tree export adapters record driver-supplied image identities and published host metadata only after read-back verification and publication, sync each entry before continuing, and report torn-tail recovery.
+
+- `Manifest::open_for_export` rejects backing-image aliases, destination aliases and paths inside export trees before creating or recovering a ledger, including host hard links and symbolic links.
+
+- Recursive export resume skips regular files only when locked manifest evidence, fresh source digests and revalidated endpoint identities still agree, retaining the original verification times in text and JSON reports.
+
+- Opt-in export manifest and resume argument builders preserve tree metadata options, require a manifest for resume, and reject stdout destinations; transfer execution remains the responsibility of the driver's manifest adapter.
+
+- Single-file exports with `--manifest FILE --resume` skip a file only when fresh source and destination identities, a complete source digest and a post-digest revalidation all match the latest record, reporting `skipped: verified earlier` with the original completion time; any other evidence restarts the copy at byte zero.
+
+- An opt-in single-file import adapter records the opened local source identity, the driver-supplied destination identity captured under the image lock and the verified SHA-256 only after read-back verification and publication, syncs the entry before returning, and reports torn-tail recovery.
+
+- Import adapters can open manifests with image and local source alias checks before creation or recovery, reusing the export safety checks for single files and source trees.
+
+- Recursive imports with `--manifest FILE --resume` apply the single-file resume decision to each file under the one image lock: unchanged verified files are reported `skipped: verified earlier` with their original completion time and do not fail the run, and every other file is staged again from byte zero.
+
+- Opt-in import manifest and resume argument builders keep the tree and verify options, require a manifest for resume, and refuse a stdin source; transfer execution remains the responsibility of the driver's manifest adapter.
+
+- Single-file imports with `--manifest FILE --resume` skip a file only when fresh source and driver destination identities, a complete source digest and a post-digest revalidation all match the latest record, reporting `skipped: verified earlier` with the original completion time; any other evidence stages the file again from byte zero.
+
+- **Imports of a known size refuse a staged copy that cannot fit.** The additive `FileSink::space` reports free space and the staged file's data-plus-metadata need; before the first write, an import refuses with exit 1, leaving the old file intact and no staged name, when a replacement cannot fit beside the file it replaces. The message states the needed and free bytes. Sinks keep the default, which skips the check.
+
+- **Imports of an unknown size check free space as the staged copy grows.** A stdin import asks `FileSink::space` before each written chunk at the staged copy's new length, and refuses with exit 1, leaving the old file intact and no staged name, once the copy would not fit beside the file it replaces. The message states the needed and free bytes. Running out of space between checks still aborts cleanly through ENOSPC.
+
+- An opt-in recursive import adapter records, for each verified and published file, the opened local source identity, the driver-supplied destination identity and the verified SHA-256, syncing each entry before traversal continues; unverified tree imports record nothing, and a manifest capture or append error stops the traversal.
+
+- macOS transfers inspect host mount state for image files and disk devices, using attached disk images, their slices and synthesized APFS containers. Imports refuse mounted targets before taking the lock or consuming input; exports warn on read-write mounts. Failed hdiutil, diskutil or mount probes fail closed.
+
+- `--preserve=xattrs` tree imports carry host named streams to an optional `TreeSink::named_stream_sink` capability, which reuses the existing `NamedStreamSink` trait. On macOS a regular file's resource fork is read through its `..namedfork/rsrc` path and passed as the stream `rsrc`, no longer also as the `com.apple.ResourceFork` attribute. A sink without the capability reports the item as `refused`, naming the stream, after its contents are published. Hosts without named streams pass none, and ordinary files named like stream side files stay ordinary files.
+
+- **Imports can verify the persisted staged file before publication.** The
+  additive `ImportOptions`, `import_args_with_verify` and
+  `import_with_options` APIs enable `--verify`: after persistence the staged
+  file is read back through the sink in bounded chunks and must match the
+  sent byte count and SHA-256 before it is published. A mismatch aborts the
+  staged file, preserves an existing destination and reports both digests.
+  Import reports now carry `verified`, true only after a successful
+  read-back. Existing import APIs and request fields remain compatible.
+
+- Tree imports preserve host extended attributes through an optional `TreeSink::set_extended_attribute` capability. `import_args_with_xattrs` accepts `--preserve=xattrs` alongside the existing import policies, and `import_tree_with_xattrs` reads each item's attributes without following symbolic links and passes opaque names and values to the sink. A sink without the capability reports each attributed item as `refused`, naming the attribute, after its contents are published; siblings and a refused directory's children continue.
+
+- Optional named-stream source and sink capabilities under `--preserve=xattrs`, with explicit named refusals when the destination cannot represent streams.
+
+- Windows transfers inspect host mount state for image files, physical drives and volumes, using each mounted volume's disk extents, read-only flag and the virtual disks it depends on, matched to the image by file identity. Imports refuse mounted targets before taking the lock or consuming input; exports warn on read-write mounts. Any failed volume or virtual-disk query fails closed with exit code 1, naming the query.
+
+### Changed
+
+- **agent-core v8: a red run stays on its own pull request.** A pull request
+  opens with only its failing test and a title that starts `red:`, and its
+  own CI run of that commit is the red evidence. The fix goes onto the same
+  branch, squashed to one commit, and `red:` comes off the title. No `red/*`
+  branch is pushed and nothing is dispatched. `agents-core-check` expects v8.
+
+- **Breaking:** `CliError` has a private field, so it is built with its constructors (`failed`, `usage`, `not_implemented`, `refused`, `refused_by_state`, `not_found`), not as a struct literal. `message` and `code` stay public. The crate is 0.4.0.
+
+- Linux transfers resolve Btrfs multi-device membership from sysfs, so imports into any member are refused and unrelated block targets stay usable while Btrfs is mounted. ZFS mounts still fail closed (#375).
+
+- Linux transfers resolve ZFS pool membership from `zpool status -P`, so imports into any vdev of an imported pool are refused and unrelated block targets stay usable while ZFS datasets are mounted. A missing or failing `zpool` fails closed (#376).
+
+- Tree exports refuse named streams without creating side files; host stream import remains separate work under #354.
+
+### Fixed
+
+- An unrelated loop device with an inaccessible backing file no longer blocks image transfer mount checks.
+
+- Stack base selection accepts connected native stack segments only after verifying one unambiguous branch dependency chain, and continues to reject unsafe layouts.
+
+- **Writable Windows mounts are reported before image export.** Exports now check the host mount state before opening a mounted image, warning for writable mounts and proceeding without a cooperative image lock.
+
 ## [0.3.17] — 2026-10-19
 
 ### Added
@@ -1087,7 +1164,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.17...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.17...v0.4.0
 [0.3.17]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.16...v0.3.17
 [0.3.16]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.15...v0.3.16
 [0.3.15]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.14...v0.3.15

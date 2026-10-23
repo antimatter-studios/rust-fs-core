@@ -1,2 +1,0 @@
-### Added
-- Tree imports preserve host extended attributes through an optional `TreeSink::set_extended_attribute` capability. `import_args_with_xattrs` accepts `--preserve=xattrs` alongside the existing import policies, and `import_tree_with_xattrs` reads each item's attributes without following symbolic links and passes opaque names and values to the sink. A sink without the capability reports each attributed item as `refused`, naming the attribute, after its contents are published; siblings and a refused directory's children continue.
