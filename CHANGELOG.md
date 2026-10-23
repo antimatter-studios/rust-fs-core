@@ -12,6 +12,12 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-10-23
+
+### Fixed
+
+- **0.4.1 is the 0.4.0 release, published.** The `v0.4.0` tag's release run stopped before crates.io: its test job lacked the Linux mount oracles the transfer tests need (`zpool`). The release workflow now installs them, as CI does, and 0.4.1 carries everything 0.4.0 lists.
+
 ## [0.4.0] — 2026-10-23
 
 ### Added
@@ -1164,7 +1170,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.17...v0.4.0
 [0.3.17]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.16...v0.3.17
 [0.3.16]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.15...v0.3.16

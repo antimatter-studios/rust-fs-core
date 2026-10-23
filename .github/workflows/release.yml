@@ -29,6 +29,13 @@ jobs:
           toolchain: 1.95.0
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # THE SAME LINUX MOUNT ORACLES AS ci.yml's `test` job. The mounted-
+      # transfer tests attach, format and mount real loop devices, a ZFS
+      # pool among them (tests/transfer_exclusive.rs, #389), and fail
+      # rather than skip without the tools: v0.4.0's run stopped on
+      # "sudo: zpool: command not found" (run 40031105492).
+      - name: Linux mounted-transfer oracle prerequisites
+        run: sudo apt-get update && sudo apt-get install -y util-linux e2fsprogs fdisk udev btrfs-progs zfsutils-linux && sudo modprobe zfs
       - name: verify packaged output-budget script
         shell: bash
         run: |
