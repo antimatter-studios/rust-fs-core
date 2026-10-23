@@ -1,2 +1,0 @@
-### Added
-- `--preserve=xattrs` tree imports carry host named streams to an optional `TreeSink::named_stream_sink` capability, which reuses the existing `NamedStreamSink` trait. On macOS a regular file's resource fork is read through its `..namedfork/rsrc` path and passed as the stream `rsrc`, no longer also as the `com.apple.ResourceFork` attribute. A sink without the capability reports the item as `refused`, naming the stream, after its contents are published. Hosts without named streams pass none, and ordinary files named like stream side files stay ordinary files.
