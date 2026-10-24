@@ -17,8 +17,8 @@
 # a person remembering to bump the version. In one week two crates had breaks
 # sitting on main under a version already published: a new `Error` variant in
 # antimatter-studios/rust-fs-xfs#292, caught only by a hand bump in the release
-# PR, and two Rust-API breaks in christhomas/rust-fs-ntfs#399. rust-fs-ext4 met
-# the shape first (christhomas/rust-fs-ext4#120).
+# PR, and two Rust-API breaks in antimatter-studios/rust-fs-ntfs#399. rust-fs-ext4 met
+# the shape first (antimatter-studios/rust-fs-ext4#120).
 #
 # THE BASELINE IS THE REGISTRY because that is what a consumer has. A tag can
 # exist for a version that never published, and a version can publish from a
