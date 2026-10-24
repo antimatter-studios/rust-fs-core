@@ -12,6 +12,12 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-10-24
+
+### Fixed
+
+- **The crate builds on Rust 1.89, its declared minimum, again (#401).** From 0.4.0, two transfer-manifest modules imported `self` through a path ending in `super`, which 1.89 refuses (E0432), so every crate on 0.4.x failed its own MSRV check. They import by the module's own path. CI's msrv job checks with `cargo +1.89.0` now: the repository's `rust-toolchain.toml` had been overriding the 1.89 it installed with 1.95.
+
 ## [0.4.1] — 2026-10-23
 
 ### Fixed
@@ -1170,7 +1176,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.17...v0.4.0
 [0.3.17]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.16...v0.3.17
