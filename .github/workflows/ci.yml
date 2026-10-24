@@ -259,7 +259,10 @@ jobs:
         with:
           toolchain: 1.89.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked --all-features
+      # `+1.89.0`, not the default: rust-toolchain.toml pins the development
+      # toolchain, and a toolchain file overrides rustup's default, so a bare
+      # `cargo` here checked with 1.95 and never with 1.89 (#401).
+      - run: cargo +1.89.0 check --locked --all-features
 
   semver:
     # `chore check:semver`, spelled out because CI here does not install
