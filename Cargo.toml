@@ -1,6 +1,6 @@
 [package]
 name = "rust-fs-core"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 # The oldest toolchain the crate builds on with every feature on: the `cli`
 # feature's transfer locks use `File::try_lock`, stable since 1.89.0 (#379).

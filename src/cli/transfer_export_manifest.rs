@@ -1,7 +1,9 @@
 //! Export adapters capture identities around verified publication.
 use super::super::super::output::{Json, Outcome};
-use super::super::{self as transfer, ExportOptions, ExportRequest, Output, TreeOptions};
+// By the module's own path: Rust 1.89 cannot import `self` of a path that
+// ends in `super` (#401).
 use super::*;
+use crate::cli::transfer::{self as transfer, ExportOptions, ExportRequest, Output, TreeOptions};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 impl Timestamp {
