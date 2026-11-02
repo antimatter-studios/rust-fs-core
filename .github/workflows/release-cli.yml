@@ -143,8 +143,13 @@ jobs:
         with:
           toolchain: ${{ inputs.toolchain }}
 
+      # Statically on Windows: GitHub's runners have the Visual C++ runtime, and
+      # a clean Windows install does not, so a binary that imports it passes
+      # here and does not start there (#411).
       - name: build the multi-call binary
         shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release --locked --features cli --bin "${GITHUB_REPOSITORY##*/}"
 
       # package-cli.sh prints the asset's name on stdout and checks the

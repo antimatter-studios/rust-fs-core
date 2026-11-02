@@ -679,3 +679,26 @@ jobs:
         "jobs use actions/attest-build-provenance@<sha>, not one",
     );
 }
+
+/// A Windows leg links the C runtime into the binary, or the binary does not
+/// start on a Windows install without the Visual C++ runtime (#411).
+#[test]
+fn a_windows_leg_links_the_c_runtime_statically() {
+    let workflow = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release-cli.yml"),
+    )
+    .unwrap();
+    let build = workflow
+        .split("- name: build the multi-call binary")
+        .nth(1)
+        .expect("the workflow has a build step")
+        .split("- name:")
+        .next()
+        .unwrap();
+    assert!(
+        build.contains(
+            "RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}"
+        ),
+        "the build step does not link the C runtime statically on Windows:\n{build}"
+    );
+}

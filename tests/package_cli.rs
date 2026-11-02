@@ -523,6 +523,24 @@ fn a_windows_build_is_a_zip_of_copies_not_symlinks() {
     all_ok(results);
 }
 
+/// A Windows binary that imports the Visual C++ runtime does not start on a
+/// Windows install without it, and GitHub's runners have it, so only a clean
+/// install finds this (#411).
+#[test]
+fn a_windows_binary_that_needs_the_visual_cpp_runtime_is_refused() {
+    let caller = Caller::new("windows-vcruntime");
+    let exe = format!("{REPO}.exe");
+    let built = caller
+        .build("target/release", &exe, &Stub::default())
+        .join(&exe);
+    let mut bytes = std::fs::read(&built).unwrap();
+    bytes.extend_from_slice(b"\n# VCRUNTIME140.dll\n");
+    std::fs::write(&built, bytes).unwrap();
+    let run = caller.package(&["9.9.9", "windows-arm64"], "", &[]);
+    run.refused("a binary importing VCRUNTIME140.dll", "VCRUNTIME140.dll")
+        .unwrap();
+}
+
 /// Python on Windows ends every line it prints with CRLF. What the script
 /// reads back from it -- the crate, the repository, each name -- must not
 /// keep the CR: on a real windows-latest runner it looked for
