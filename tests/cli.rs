@@ -732,6 +732,22 @@ mod on_path {
     }
 
     #[test]
+    fn a_slow_answer_on_a_loaded_host_is_still_read() {
+        // A small script on a host with several builds running can take this
+        // long to answer.
+        let dir = scratch("slow");
+        script(
+            &dir.join("fs.demo"),
+            "sleep 10\necho 'fs.demo (am-fs-demo) 0.0.1'",
+        );
+        let f = finding(
+            &doctor::diagnose_path(&FAMILY, &path_of(&[&dir])),
+            "fs.demo",
+        );
+        assert_eq!(f.status, doctor::Status::Stale, "{f:?}");
+    }
+
+    #[test]
     fn our_program_at_another_version_is_stale() {
         let old = scratch("stale");
         answering(&old.join("fs.demo"), "fs.demo (am-fs-demo) 0.0.1");
@@ -853,7 +869,9 @@ mod on_path {
     #[test]
     fn a_program_that_never_answers_is_given_up_on_and_is_foreign() {
         let dir = scratch("silent");
-        script(&dir.join("fs.demo"), "exec sleep 30");
+        // Far past the budget, which sleeps run over on a loaded host: this
+        // has to be killed, not to exit by itself.
+        script(&dir.join("fs.demo"), "exec sleep 600");
         let f = finding(
             &doctor::diagnose_path(&FAMILY, &path_of(&[&dir])),
             "fs.demo",
