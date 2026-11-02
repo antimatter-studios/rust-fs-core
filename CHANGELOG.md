@@ -12,6 +12,38 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-11-02
+
+### Added
+
+- **The recursive listing's bounds are shared (#406).** `cli::listing` holds
+  `recursive_args`, the `MAX_DEPTH` and `LIMIT` defaults, `ListBounds` and
+  `bound_reached`, so every driver's `ls --recursive` can show the same
+  arguments and defaults.
+
+- **A tree import can keep holes and attributes together (#404).**
+  `import_tree_with_preserve` takes both `SparseOptions` and `XattrOptions`, so
+  a driver can offer `import --recursive --preserve=sparse,xattrs`.
+
+### Changed
+
+- **A partial tree transfer exits 5 (#361).** A recursive export or import that
+  ran to its end, published what it could and reported the rest as refused or
+  failed now exits with `EXIT_PARTIAL` instead of 1. A run that published
+  nothing still exits 1. A script that checks for exactly 1 needs updating.
+
+### Fixed
+
+- **`doctor` waits longer for a slow program (#405).** A program of ours that
+  took more than five seconds to answer `--version` on a loaded host was
+  reported as `foreign` with no version. It now has twenty seconds.
+
+- **Windows release binaries start without the Visual C++ runtime (#411).**
+  `release-cli.yml` links the C runtime statically on its Windows legs, and
+  `package-cli.sh` refuses a Windows binary that imports `VCRUNTIME140.dll`. A
+  caller that builds for `package-cli.sh` itself needs
+  `RUSTFLAGS='-C target-feature=+crt-static'` on Windows.
+
 ## [0.4.2] — 2026-10-24
 
 ### Fixed
@@ -1176,7 +1208,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.3.17...v0.4.0
