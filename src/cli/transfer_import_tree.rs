@@ -448,7 +448,7 @@ pub(super) fn import_tree_recorded(
     .with_code(if cancel_code != 0 {
         cancel_code
     } else {
-        u8::from(counts[1] > verified_skips || counts[2..].iter().any(|n| *n != 0))
+        super::tree::tree_exit_code(&counts, verified_skips)
     }))
 }
 

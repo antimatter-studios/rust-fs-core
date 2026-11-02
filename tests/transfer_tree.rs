@@ -169,7 +169,7 @@ fn unsafe_names_and_failed_files_leave_completed_siblings_and_a_nonzero_report()
         malicious: true,
     };
     let result = transfer::export_tree(&request(&dest, false), &mut host, options()).unwrap();
-    assert_eq!(result.code, 1);
+    assert_eq!(result.code, 5);
     let report = result.report.unwrap();
     assert_eq!(count(&report, "completed"), 2);
     assert_eq!(count(&report, "refused"), if cfg!(windows) { 9 } else { 6 });
@@ -199,7 +199,7 @@ fn existing_directories_merge_but_files_require_replace() {
     fs::write(dest.join("sub/file"), b"old").unwrap();
     fs::write(dest.join("keep"), b"keep").unwrap();
     let refused = run(&src, &dest, false);
-    assert_eq!(refused.code, 1);
+    assert_eq!(refused.code, 5);
     assert_eq!(count(refused.report.as_ref().unwrap(), "refused"), 1);
     assert_eq!(fs::read(dest.join("sub/file")).unwrap(), b"old");
     let replaced = run(&src, &dest, true);
@@ -228,7 +228,7 @@ fn directories_need_recursive_and_depth_is_bounded() {
         ..options()
     };
     let result = transfer::export_tree(&request(&dest, false), &mut host, bounded).unwrap();
-    assert_eq!(result.code, 1);
+    assert_eq!(result.code, 5);
     assert_eq!(count(result.report.as_ref().unwrap(), "failed"), 1);
     assert!(!dest.join("sub/file").exists());
     fs::remove_dir_all(root).unwrap();
@@ -264,7 +264,7 @@ fn an_existing_destination_symlink_cannot_redirect_the_tree() {
     fs::write(src.join("sub/file"), b"x").unwrap();
     std::os::unix::fs::symlink(&outside, dest.join("sub")).unwrap();
     let result = run(&src, &dest, true);
-    assert_eq!(result.code, 1);
+    assert_eq!(result.code, 5);
     assert!(!outside.join("file").exists());
     fs::remove_dir_all(root).unwrap();
 }
@@ -353,7 +353,12 @@ fn check_case_pair(dest: &Path, folding: bool, replace: bool) {
     let mut tree = NamedTree::new(&[("README", TreeKind::File), ("readme", TreeKind::File)]);
     let out = tree.export(dest, replace);
     let report = out.report.unwrap();
-    assert_eq!(out.code, u8::from(folding), "{}", report.to_compact());
+    assert_eq!(
+        out.code,
+        if folding { 5 } else { 0 },
+        "{}",
+        report.to_compact()
+    );
     assert_eq!(count(&report, "refused"), u64::from(folding));
     assert_eq!(count(&report, "failed"), 0);
     assert_eq!(fs::read(dest.join("README")).unwrap(), b"README");
@@ -440,7 +445,7 @@ fn duplicate_source_names_are_refused_even_on_case_sensitive_destinations() {
     let mut tree = NamedTree::new(&[("same", TreeKind::File), ("same", TreeKind::File)]);
     let out = tree.export(&dest, true);
     let report = out.report.unwrap();
-    assert_eq!(out.code, 1);
+    assert_eq!(out.code, 5);
     assert_eq!(count(&report, "refused"), 1);
     assert!(report.to_compact().contains("collides with same"));
     assert_eq!(tree.reads, [PathBuf::from("same")]);
@@ -802,7 +807,7 @@ fn a_revisited_directory_is_reported_as_loop_without_another_listing() {
             transfer::LinkOptions { preserve_links },
         )
         .unwrap();
-        assert_eq!(out.code, 1);
+        assert_eq!(out.code, 5);
         let report = out.report.unwrap();
         assert_eq!(count(&report, "refused"), 1);
         assert!(report.to_compact().contains("loop"));
@@ -916,7 +921,7 @@ mod links {
         symlink("a", src.join("symbolic")).unwrap();
         let mut host = source(&src);
         let out = transfer::export_tree(&request(&dest, false), &mut host, options()).unwrap();
-        assert_eq!(out.code, 1);
+        assert_eq!(out.code, 5);
         let report = out.report.unwrap();
         assert_eq!(count(&report, "refused"), 1);
         assert!(report
@@ -1012,7 +1017,7 @@ mod links {
         fs::hard_link(src.join("broken"), src.join("last")).unwrap();
         let mut host = source(&src);
         let out = export(&mut host, &dest, false);
-        assert_eq!(out.code, 1);
+        assert_eq!(out.code, 5);
         assert_eq!(count(out.report.as_ref().unwrap(), "failed"), 1);
         assert_eq!(host.reads, 2);
         assert!(!dest.join("broken").exists());

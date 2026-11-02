@@ -957,6 +957,42 @@ pub(super) fn export_tree_recorded(
     .with_code(if cancel_code != 0 {
         cancel_code
     } else {
-        u8::from(counts[1] > verified_skips || counts[2..].iter().any(|n| *n != 0))
+        tree_exit_code(&counts, verified_skips)
     }))
+}
+
+/// The exit status of a tree transfer that ran to its end, from its counts of
+/// completed, skipped, refused and failed items. 0 when every item is there;
+/// [`EXIT_PARTIAL`] when some are not but the report's others are usable; and
+/// [`EXIT_FAILED`] when nothing was published to use.
+///
+/// [`EXIT_PARTIAL`]: super::super::output::EXIT_PARTIAL
+/// [`EXIT_FAILED`]: super::super::output::EXIT_FAILED
+pub(super) fn tree_exit_code(counts: &[u64], verified_skips: u64) -> u8 {
+    use super::super::output::{EXIT_FAILED, EXIT_PARTIAL};
+    if counts[1] <= verified_skips && counts[2..].iter().all(|n| *n == 0) {
+        0
+    } else if counts[0] != 0 || verified_skips != 0 {
+        EXIT_PARTIAL
+    } else {
+        EXIT_FAILED
+    }
+}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::super::super::output::{EXIT_FAILED, EXIT_PARTIAL};
+    use super::tree_exit_code;
+
+    #[test]
+    fn a_tree_exits_by_what_it_published() {
+        // Completed, skipped, refused, failed, cancelled.
+        assert_eq!(tree_exit_code(&[3, 0, 0, 0, 0], 0), 0);
+        assert_eq!(tree_exit_code(&[0, 2, 0, 0, 0], 2), 0);
+        assert_eq!(tree_exit_code(&[3, 0, 0, 1, 0], 0), EXIT_PARTIAL);
+        assert_eq!(tree_exit_code(&[3, 0, 1, 0, 0], 0), EXIT_PARTIAL);
+        assert_eq!(tree_exit_code(&[3, 1, 0, 0, 0], 0), EXIT_PARTIAL);
+        assert_eq!(tree_exit_code(&[0, 2, 0, 1, 0], 2), EXIT_PARTIAL);
+        assert_eq!(tree_exit_code(&[0, 0, 1, 1, 0], 0), EXIT_FAILED);
+    }
 }
