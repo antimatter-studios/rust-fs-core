@@ -536,6 +536,105 @@ fn import(root: &Path, sink: &mut dyn transfer::TreeSink, preserve: bool) -> Out
     )
     .unwrap()
 }
+/// A sink that takes both sparse files and attributes, recording what reached
+/// it: the bytes written and the file's length.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Default)]
+struct SparseAttributeSink {
+    written: Vec<u8>,
+    length: Option<u64>,
+    attributes: Vec<(PathBuf, ExtendedAttribute)>,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl transfer::FileSink for SparseAttributeSink {
+    fn supports_sparse(&self) -> bool {
+        true
+    }
+    fn set_sparse_len(&mut self, len: u64) -> Result<(), CliError> {
+        self.length = Some(len);
+        Ok(())
+    }
+    fn stage(&mut self, _: &Path, _: bool) -> Result<(), CliError> {
+        Ok(())
+    }
+    fn write_at(&mut self, _: u64, bytes: &[u8]) -> Result<(), CliError> {
+        self.written.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn persist(&mut self) -> Result<(), CliError> {
+        Ok(())
+    }
+    fn read_at(&mut self, _: u64, _: &mut [u8]) -> Result<usize, CliError> {
+        unreachable!()
+    }
+    fn publish(&mut self, _: bool) -> Result<bool, CliError> {
+        Ok(false)
+    }
+    fn abort(&mut self) -> Result<(), CliError> {
+        Ok(())
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl transfer::TreeSink for SparseAttributeSink {
+    fn validate_name(&mut self, _: &Path, name: &OsStr) -> Result<OsString, CliError> {
+        Ok(name.into())
+    }
+    fn create_dir(&mut self, _: &Path) -> Result<bool, CliError> {
+        Ok(false)
+    }
+    fn set_extended_attribute(
+        &mut self,
+        path: &Path,
+        attribute: &ExtendedAttribute,
+    ) -> Result<(), CliError> {
+        self.attributes.push((path.into(), attribute.clone()));
+        Ok(())
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_tree_import_preserves_holes_and_attributes_together() {
+    let root = destination("import-both");
+    std::fs::create_dir(&root).unwrap();
+    let file = root.join("file");
+    let length: u64 = 8 << 20;
+    std::fs::write(&file, vec![0u8; length as usize]).unwrap();
+    set_host_attribute(&file, "user.core-both", b"kept");
+    let mut sink = SparseAttributeSink::default();
+    let result = transfer::import_tree_with_preserve(
+        &ImportRequest {
+            input: Input::File(root.clone()),
+            path: "/dest".into(),
+            replace: false,
+        },
+        Some(&mut sink),
+        ImportTreeOptions {
+            recursive: true,
+            ..ImportTreeOptions::default()
+        },
+        transfer::SparseOptions {
+            preserve_sparse: true,
+        },
+        XattrOptions {
+            preserve_xattrs: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(count(&result, "refused"), 0, "{:?}", result.report);
+    assert_eq!(sink.length, Some(length), "the file's holes were not kept");
+    assert!(sink.written.is_empty(), "an all-zero file wrote its zeros");
+    assert!(
+        sink.attributes
+            .iter()
+            .any(|(path, a)| path == Path::new("/dest/file")
+                && a.name.to_string_lossy() == "user.core-both"
+                && a.value == b"kept"),
+        "the attribute did not arrive: {:?}",
+        sink.attributes
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn item<'a>(result: &'a Outcome, destination: &str) -> &'a Json {
     let Some(Json::Arr(items)) = result.report.as_ref().unwrap().get("items") else {
