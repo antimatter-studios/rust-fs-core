@@ -576,6 +576,48 @@ fn a_share_directory_that_is_not_utf8_is_not_a_usage_error() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn the_recursive_listing_defaults_are_the_same_for_every_driver() {
+    use fs_core::cli::listing::{recursive_args, ListBounds, LIMIT, MAX_DEPTH};
+    // Fixed here so that changing one is a deliberate, reviewed change.
+    assert_eq!((MAX_DEPTH, LIMIT), (64, 100_000));
+    let parse = |args: &[&str]| {
+        Command::new("ls")
+            .no_binary_name(true)
+            .args(recursive_args())
+            .try_get_matches_from(args)
+    };
+    let bounds = |args: &[&str]| ListBounds::from_matches(&parse(args).unwrap());
+    let defaults = ListBounds {
+        max_depth: MAX_DEPTH,
+        limit: LIMIT,
+    };
+    assert_eq!(bounds(&["-R"]), defaults);
+    assert_eq!(bounds(&["--recursive"]), defaults);
+    assert_eq!(
+        bounds(&["-R", "--max-depth", "8", "--limit", "0"]),
+        ListBounds {
+            max_depth: 8,
+            limit: 0
+        }
+    );
+    // A bound means nothing without the walk it bounds.
+    assert!(parse(&["--max-depth", "8"]).is_err());
+    assert!(parse(&["--limit", "8"]).is_err());
+    let help = Command::new("ls")
+        .args(recursive_args())
+        .render_help()
+        .to_string();
+    assert!(help.contains("default: 64"), "{help}");
+    assert!(help.contains("default: 100000"), "{help}");
+}
+
+#[test]
+fn a_reached_bound_names_itself_and_where_it_stopped() {
+    let error = fs_core::cli::listing::bound_reached("--limit", 10, "/a/b");
+    assert_eq!(error.message, "--limit 10 reached at /a/b");
+}
+
 // ---------------------------------------------------------------------------
 // doctor
 // ---------------------------------------------------------------------------
