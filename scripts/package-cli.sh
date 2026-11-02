@@ -265,6 +265,14 @@ work="$(mktemp -d)" || die "could not make a working directory"
 built="$target_dir/$repo$x"
 [ -f "$built" ] && [ -x "$built" ] \
     || die "no built $repo$x at $built (cargo build --release --locked --features cli --bin $repo)"
+# A Windows binary that imports the Visual C++ runtime does not start on an
+# install without it, and CI's runners have it (#411).
+if [ -n "$x" ] && python3 -c '
+import sys
+sys.exit(0 if b"vcruntime140" in open(sys.argv[1], "rb").read().lower() else 1)
+' "$built"; then
+    die "$built imports VCRUNTIME140.dll, and does not start without the Visual C++ runtime: build with RUSTFLAGS='-C target-feature=+crt-static'"
+fi
 
 stage="$work/stage"
 mkdir -p "$stage/bin" "$stage/share/$repo"
