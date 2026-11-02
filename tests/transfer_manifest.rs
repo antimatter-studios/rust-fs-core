@@ -1761,7 +1761,7 @@ fn recursive_resume_skips_without_replace_but_refuses_unproven_existing_files() 
     let (ledger, dest, mut source) = resumable_tree("tree-resume-replace");
     source.files[1].1 = b"rewritten data".to_vec();
     let outcome = tree_resume_export(&ledger, &dest, &mut source, true, false);
-    assert_eq!(outcome.code, 1);
+    assert_eq!(outcome.code, 5);
     let report = outcome.report.unwrap();
     assert_eq!(report.get("skipped"), Some(&Json::UInt(4)));
     assert_eq!(report.get("refused"), Some(&Json::UInt(1)));

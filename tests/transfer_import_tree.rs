@@ -189,7 +189,7 @@ fn reserved_names_and_existing_case_collisions_refuse_while_siblings_complete() 
     let mut sink = Sink::default();
     sink.files.insert("/dest/taken".into(), b"old".to_vec());
     let out = local.run(&mut sink, 64);
-    assert_eq!(out.code, 1);
+    assert_eq!(out.code, 5);
     assert_eq!(count(&out, "refused"), 2);
     assert_eq!(count(&out, "completed"), 2);
     assert_eq!(sink.files[Path::new("/dest/taken")], b"old");
@@ -207,7 +207,7 @@ fn failed_files_abort_staging_and_leave_a_partial_report() {
         ..Sink::default()
     };
     let out = local.run(&mut sink, 64);
-    assert_eq!(out.code, 1);
+    assert_eq!(out.code, 5);
     assert_eq!(count(&out, "failed"), 1);
     assert_eq!(count(&out, "completed"), 2);
     assert!(sink.staged.is_none());
@@ -219,7 +219,7 @@ fn depth_limits_fail_without_creating_deeper_destinations() {
     fs::create_dir(local.0.join("deep")).unwrap();
     let mut sink = Sink::default();
     let out = local.run(&mut sink, 0);
-    assert_eq!(out.code, 1);
+    assert_eq!(out.code, 5);
     assert_eq!(count(&out, "failed"), 1);
     assert_eq!(sink.dirs.len(), 1);
 }
@@ -272,7 +272,7 @@ fn symlinks_are_refused_without_following_their_targets() {
     std::os::unix::fs::symlink("missing", local.0.join("dangling")).unwrap();
     let mut sink = Sink::default();
     let out = local.run(&mut sink, 64);
-    assert_eq!(out.code, 1);
+    assert_eq!(out.code, 5);
     assert_eq!(count(&out, "refused"), 2);
     assert_eq!(sink.dirs.len(), 1);
     assert!(sink.files.is_empty());
@@ -303,7 +303,7 @@ fn distinct_source_spellings_share_the_sinks_case_key() {
     fs::write(local.0.join("name"), b"second").unwrap();
     let mut sink = Sink::default();
     let out = local.run(&mut sink, 64);
-    assert_eq!(out.code, 1);
+    assert_eq!(out.code, 5);
     assert_eq!(count(&out, "refused"), 1);
     assert_eq!(count(&out, "completed"), 2);
     assert_eq!(sink.files.len(), 1);
