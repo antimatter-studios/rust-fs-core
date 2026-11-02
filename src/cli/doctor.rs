@@ -206,17 +206,18 @@ fn fix_for(
 }
 
 /// How long `--version` may take, as a number of polls this far apart:
-/// five seconds.
+/// at least twenty seconds, because a program of ours on a host with several builds
+/// running has taken more than five to answer (#405).
 const PROBE_POLL: Duration = Duration::from_millis(10);
-const PROBE_POLLS: u32 = 500;
+const PROBE_POLLS: u32 = 2000;
 
 /// How much of a `--version` answer is kept: the identity is its first
 /// line. The rest is read and dropped, so a long answer cannot fill the
 /// pipe and stall the program.
 const PROBE_KEEP: usize = 64 * 1024;
 
-/// Run `program --version` with no input, and give up after a few
-/// seconds: a program that is not ours may wait for a terminal.
+/// Run `program --version` with no input, and give up after the budget
+/// above: a program that is not ours may wait for a terminal.
 ///
 /// Its stdout is READ WHILE IT RUNS, on a thread. Read only after it
 /// exits, a program answering more than a pipe holds blocks on the full
@@ -268,7 +269,7 @@ fn ask_version(program: &Path) -> Option<String> {
 /// (ETXTBSY): an install still copying the binary into place, or any
 /// program that forked while it had the file open. That is momentary, and
 /// the program is whatever it is the moment the writer lets go, so a busy
-/// file is asked again, for up to five seconds, rather than
+/// file is asked again, for up to twenty seconds, rather than
 /// taken for somebody else's.
 fn spawn_version(program: &Path) -> Option<std::process::Child> {
     let mut polls_left = PROBE_POLLS;
