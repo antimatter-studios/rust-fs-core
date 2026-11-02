@@ -96,7 +96,8 @@ pub use import::{
 #[path = "transfer_import_tree.rs"]
 mod import_tree;
 pub use import_tree::{
-    import_args_with_tree, import_tree, import_tree_with_sparse, ImportTreeOptions, TreeSink,
+    import_args_with_tree, import_tree, import_tree_with_preserve, import_tree_with_sparse,
+    ImportTreeOptions, TreeSink,
 };
 
 #[path = "transfer_tree.rs"]

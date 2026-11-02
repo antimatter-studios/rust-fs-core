@@ -165,6 +165,29 @@ pub fn import_tree_with_sparse(
     )
 }
 
+/// Import a tree with sparse regular files and host extended attributes
+/// together, each behaving as [`import_tree_with_sparse`] and
+/// `import_tree_with_xattrs` do alone.
+pub fn import_tree_with_preserve(
+    request: &ImportRequest,
+    sink: Option<&mut dyn TreeSink>,
+    options: ImportTreeOptions,
+    sparse: SparseOptions,
+    xattrs: super::XattrOptions,
+) -> Result<Outcome, CliError> {
+    import_tree_recorded(
+        request,
+        sink,
+        options,
+        CopyOptions {
+            sparse,
+            xattrs,
+            ..CopyOptions::default()
+        },
+        None,
+    )
+}
+
 pub(super) fn import_tree_recorded(
     request: &ImportRequest,
     sink: Option<&mut dyn TreeSink>,
