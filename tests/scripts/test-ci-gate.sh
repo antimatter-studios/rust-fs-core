@@ -22,6 +22,15 @@
 #   bash tests/scripts/test-ci-gate.sh
 set -uo pipefail
 
+# Bash 3.2, macOS's /bin/bash, keeps the double quotes around a quoted
+# replacement inside a double-quoted ${var/pat/rep}, and they land in the
+# fixture. compat42 asks a newer Bash for that same behaviour, so the ubuntu job
+# running this file holds its fixtures to what /bin/bash would build. Bash 3.2
+# has no such option and needs none.
+if [ "${BASH_VERSINFO[0]}" -gt 3 ]; then
+    shopt -s compat42 || { echo "FAIL  this Bash has no compat42 option" >&2; exit 1; }
+fi
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 fails=0
@@ -292,7 +301,9 @@ else
     fail "a path-gated job was refused (status $status):"$'\n'"$said"
 fi
 Q="'"
-braces="${GATED/"if: needs.changes.outputs.code == ${Q}true${Q}"/"if: \${{ needs.changes.outputs.code == ${Q}true${Q} }}"}"
+# These assignments stay unquoted: an assignment does not split words, and
+# outer double quotes would keep the replacement's quotes under Bash 3.2.
+braces=${GATED/"if: needs.changes.outputs.code == ${Q}true${Q}"/"if: \${{ needs.changes.outputs.code == ${Q}true${Q} }}"}
 dir="$(caller gated-braces "$ONE" <<<"$braces")"
 gate "$dir"
 if [ "$status" -eq 0 ]; then
@@ -300,7 +311,7 @@ if [ "$status" -eq 0 ]; then
 else
     fail "a path gate inside \${{ }} was refused (status $status):"$'\n'"$said"
 fi
-other="${GATED/"needs.changes.outputs.code == ${Q}true${Q}"/"github.event_name == ${Q}push${Q}"}"
+other=${GATED/"needs.changes.outputs.code == ${Q}true${Q}"/"github.event_name == ${Q}push${Q}"}
 dir="$(caller gated-other "$ONE" <<<"$other")"
 gate "$dir"
 if [ "$status" -eq 1 ] && grep -qF '`heavy` carries a job-level' <<<"$said"; then
@@ -317,7 +328,7 @@ if [ "$status" -eq 1 ] && grep -qF 'needs.changes.outputs.code' <<<"$said"; then
 else
     fail "an aggregate that never reads the code output was accepted (status $status):"$'\n'"$said"
 fi
-noneed="${GATED/"needs: [changes, lint, heavy, after]"/"needs: [lint, heavy, after]"}"
+noneed=${GATED/"needs: [changes, lint, heavy, after]"/"needs: [lint, heavy, after]"}
 dir="$(caller gated-noneed "$ONE" <<<"$noneed")"
 gate "$dir"
 if [ "$status" -eq 1 ] && grep -qF '`ci-ok` does not need `changes`' <<<"$said"; then
@@ -329,7 +340,7 @@ fi
 # --- 11. Workflow declarations mean the same thing locally and in CI. ----
 # These are full-profile jobs, not advisory jobs: the aggregate still reads
 # every result and delegates the permitted skips to its profile verdict.
-profiled="${GATED/"needs.changes.outputs.code == ${Q}true${Q}"/"needs.changes.outputs.profile == ${Q}full${Q}"}"
+profiled=${GATED/"needs.changes.outputs.code == ${Q}true${Q}"/"needs.changes.outputs.profile == ${Q}full${Q}"}
 declaration=$'env:\n  CI_GATE_NON_GATING: heavy\n'
 dir="$(caller profile-local "$ONE" <<<"$declaration$profiled")"
 gate "$dir"
