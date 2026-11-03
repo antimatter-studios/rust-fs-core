@@ -140,6 +140,12 @@ pub fn import_args_with_xattrs() -> [Arg; 6] {
 /// its contents are published; siblings and a refused directory's children
 /// continue. Hard-linked names share the first name's attributes.
 ///
+/// Every listed host attribute is offered before sink errors are returned
+/// together in the item's reason, retaining the first error's classification.
+/// Host names, including macOS's `com.apple.provenance`, remain opaque rather
+/// than being filtered as bookkeeping. Published contents and accepted
+/// attributes remain in place when other attributes are refused.
+///
 /// Host named streams follow the attributes: on macOS a regular file's
 /// resource fork becomes the stream `rsrc` (and is not also passed as the
 /// `com.apple.ResourceFork` attribute), handed to
@@ -184,13 +190,21 @@ pub(super) fn import_attributes(
         }
     };
     let attributes = host_attributes(local).map_err(|e| unreadable("extended attributes", e))?;
+    let mut first_error: Option<CliError> = None;
     for attribute in attributes {
-        sink.set_extended_attribute(dest, &attribute)
-            .map_err(|mut error| {
-                error.message =
-                    format!("extended attribute {:?}: {}", attribute.name, error.message);
-                error
-            })?;
+        if let Err(mut error) = sink.set_extended_attribute(dest, &attribute) {
+            error.message = format!("extended attribute {:?}: {}", attribute.name, error.message);
+            match &mut first_error {
+                Some(previous) => {
+                    previous.message.push_str("; ");
+                    previous.message.push_str(&error.message);
+                }
+                None => first_error = Some(error),
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     let streams = host_named_streams(local).map_err(|e| unreadable("named streams", e))?;
     for stream in streams {
