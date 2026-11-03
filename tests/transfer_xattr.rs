@@ -768,6 +768,180 @@ fn a_sink_without_the_capability_refuses_each_attributed_item() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct AttributeErrors {
+    sink: AttributeSink,
+    destination: PathBuf,
+    errors: Vec<(OsString, CliError)>,
+    attempted: Vec<ExtendedAttribute>,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl transfer::FileSink for AttributeErrors {
+    fn stage(&mut self, path: &Path, replace: bool) -> Result<(), CliError> {
+        transfer::FileSink::stage(&mut self.sink, path, replace)
+    }
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), CliError> {
+        transfer::FileSink::write_at(&mut self.sink, offset, bytes)
+    }
+    fn persist(&mut self) -> Result<(), CliError> {
+        transfer::FileSink::persist(&mut self.sink)
+    }
+    fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<usize, CliError> {
+        transfer::FileSink::read_at(&mut self.sink, offset, bytes)
+    }
+    fn publish(&mut self, replace: bool) -> Result<bool, CliError> {
+        transfer::FileSink::publish(&mut self.sink, replace)
+    }
+    fn abort(&mut self) -> Result<(), CliError> {
+        transfer::FileSink::abort(&mut self.sink)
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl transfer::TreeSink for AttributeErrors {
+    fn validate_name(&mut self, parent: &Path, name: &OsStr) -> Result<OsString, CliError> {
+        transfer::TreeSink::validate_name(&mut self.sink, parent, name)
+    }
+    fn create_dir(&mut self, path: &Path) -> Result<bool, CliError> {
+        transfer::TreeSink::create_dir(&mut self.sink, path)
+    }
+    fn set_extended_attribute(
+        &mut self,
+        path: &Path,
+        attribute: &ExtendedAttribute,
+    ) -> Result<(), CliError> {
+        if path == self.destination {
+            self.attempted.push(attribute.clone());
+            if let Some((_, error)) = self.errors.iter().find(|(name, _)| *name == attribute.name) {
+                return Err(error.clone());
+            }
+        }
+        transfer::TreeSink::set_extended_attribute(&mut self.sink, path, attribute)
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn import_attribute_errors(tag: &str, target: &str, errors: &[CliError]) {
+    let root = import_root(tag);
+    std::fs::write(root.join("dir/child"), b"child").unwrap();
+    let local = root.join(target);
+    for (name, value) in [
+        ("user.core-one", b"one".as_slice()),
+        ("user.core-two", &[0, 255, 10]),
+        ("user.core-three", &[]),
+    ] {
+        set_host_attribute(&local, name, value);
+    }
+    let names: Vec<_> = xattr::list(&local).unwrap().collect();
+    assert!(names.len() > errors.len());
+    let mut sink = AttributeErrors {
+        sink: AttributeSink::default(),
+        destination: Path::new("/dest").join(target),
+        errors: names.iter().cloned().zip(errors.iter().cloned()).collect(),
+        attempted: Vec::new(),
+    };
+    let result = import(&root, &mut sink, true);
+    let mut attempted: Vec<_> = sink
+        .attempted
+        .iter()
+        .map(|attr| attr.name.clone())
+        .collect();
+    let mut expected = names.clone();
+    attempted.sort();
+    expected.sort();
+    assert_eq!(attempted, expected, "every host attribute must be offered");
+    let target_item = item(&result, sink.destination.to_str().unwrap());
+    let status = if errors[0].code == CliError::refused("").code {
+        "refused"
+    } else {
+        "failed"
+    };
+    assert_eq!(field(target_item, "status"), status, "{target_item:?}");
+    let reason = field(target_item, "reason");
+    for (name, error) in &sink.errors {
+        assert!(
+            reason.contains(&format!("extended attribute {name:?}: {}", error.message)),
+            "{reason}"
+        );
+    }
+    for attribute in &sink.attempted {
+        if !sink.errors.iter().any(|(name, _)| *name == attribute.name) {
+            assert!(sink
+                .sink
+                .attributes
+                .contains(&(sink.destination.clone(), attribute.clone())));
+            assert_eq!(
+                attribute.value,
+                host_attribute(&local, attribute.name.to_str().unwrap())
+            );
+        }
+    }
+    assert_eq!(result.code, 5);
+    assert_eq!(count(&result, status), 1, "{:?}", result.report);
+    assert_eq!(count(&result, "completed"), 3, "{:?}", result.report);
+    for sibling in ["/dest", "/dest/file", "/dest/dir", "/dest/dir/child"] {
+        if Path::new(sibling) != sink.destination {
+            assert_eq!(field(item(&result, sibling), "status"), "completed");
+        }
+    }
+    sink.sink.files.sort();
+    assert_eq!(
+        sink.sink.files,
+        [
+            PathBuf::from("/dest/dir/child"),
+            PathBuf::from("/dest/file")
+        ]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_refused_import_attribute_does_not_hide_later_attributes() {
+    import_attribute_errors("refused-one", "file", &[CliError::refused("name refused")]);
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn every_refused_import_attribute_is_named_in_the_item_reason() {
+    import_attribute_errors(
+        "refused-many",
+        "file",
+        &[
+            CliError::refused("first refused"),
+            CliError::refused("second refused"),
+        ],
+    );
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn refused_directory_attributes_do_not_hide_attributes_or_children() {
+    import_attribute_errors(
+        "refused-directory",
+        "dir",
+        &[
+            CliError::refused("first refused"),
+            CliError::refused("second refused"),
+        ],
+    );
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn accumulated_attribute_errors_keep_the_first_error_classification() {
+    import_attribute_errors(
+        "failed-then-refused",
+        "file",
+        &[
+            CliError::failed("write failed"),
+            CliError::refused("name refused"),
+        ],
+    );
+    import_attribute_errors(
+        "refused-then-failed",
+        "file",
+        &[
+            CliError::refused("name refused"),
+            CliError::failed("write failed"),
+        ],
+    );
+}
+
 // Imports hand host named streams to the optional stream capability only.
 import_sink!(StreamImportSink);
 impl transfer::TreeSink for StreamImportSink {
