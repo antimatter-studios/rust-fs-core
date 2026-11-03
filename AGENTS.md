@@ -409,10 +409,14 @@ runs it against the calling repository:
   and `tests/scripts/test-guest-rust-run.sh` drive both (#195).
 
 - `scripts/stack-base.sh`, run in place from the branch a pull request is
-  made from, prints the branch to base it on: `main`, or the newest older
-  open pull request it would conflict with (a trial merge) or is already
-  built on (agent-core v6). `tests/scripts/test-stack-base.sh` drives it on
-  a scratch repository, so it needs neither GitHub nor a network.
+  made from, prints the branch to base it on. It reads the open pull requests
+  and answers from the ones it keeps and their `stack` field. A pull request
+  already in the stack gets the nearest open layer below it, or `main` at the
+  bottom; one not yet in the stack gets the top. With no stack, the answer is
+  the newest older one it keeps, or `main` when there is none. If the ones it
+  keeps are in more than one stack, it refuses unless their base and head
+  branches prove one chain from `main`. `tests/scripts/test-stack-base.sh`
+  drives it on a scratch repository, so it needs neither GitHub nor a network.
 - `scripts/changelog-check.sh` (every caller's `chore lint` and CI) and
   `scripts/changelog-gather.sh VERSION` (the release commit) keep the
   unreleased changelog as `changelog.d/` fragments: the first refuses a
