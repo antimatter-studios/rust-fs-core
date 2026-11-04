@@ -160,6 +160,69 @@ else
 fi
 
 
+# A fork's branch exists only on the fork, so no pull request here can be based
+# on it and `git rebase` has nothing to resolve it to. A row names its head and
+# base repositories; one that differs is left out before any rule is applied.
+expect main "with no stack, a fork's pull request is no one's base" "" "605 feat/fork - - main someone/repo acme/repo"
+expect main "with no stack, a pull request older than this one from a fork is no one's base" "610" "605 feat/fork - - main someone/repo acme/repo"
+expect feat/ours "with no stack, an older same-repository pull request beats a newer fork's" "" "600 feat/ours - - main acme/repo acme/repo
+605 feat/fork - - main someone/repo acme/repo"
+expect feat/ours "the same, asked by an existing pull request above both" "610" "600 feat/ours - - main acme/repo acme/repo
+605 feat/fork - - main someone/repo acme/repo"
+expect main "a head repository that was deleted is not this repository" "" "605 feat/gone - - main - acme/repo"
+expect main "a head repository with no base repository to compare is ignored" "" "605 feat/half - - main acme/repo"
+expect feat/bottom "a fork's pull request is never the top of a stack" "" "20 feat/bottom 7 1 main acme/repo acme/repo
+21 feat/fork 7 2 feat/bottom someone/repo acme/repo"
+expect feat/bottom "a fork's pull request in another stack does not make two stacks" "" "20 feat/bottom 7 1 main acme/repo acme/repo
+21 feat/fork 9 1 main someone/repo acme/repo"
+expect feat/old "a fork's branch of this branch's name is not this branch's pull request" unset "12 feat/old - - main acme/repo acme/repo
+9 mine - - main someone/repo acme/repo"
+
+# The rule has to hold on what GitHub sends, so this stub applies the script's
+# own --jq filter to a response of GitHub's shape instead of returning rows.
+command -v jq >/dev/null 2>&1 ||
+    { echo "FAIL  jq is required to run this test: install jq" >&2; exit 1; }
+mkdir -p "$work/api"
+cat > "$work/api/gh" <<'GH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --jq ]; then
+        exec jq -r "$2" "$STACK_TEST_RESPONSE"
+    fi
+    shift
+done
+echo 'no --jq filter was passed to gh' >&2
+exit 91
+GH
+chmod +x "$work/api/gh"
+
+# api_pr NUMBER BRANCH HEAD-REPO: one element of GitHub's pull request list.
+# HEAD-REPO is a quoted JSON value, because GitHub sends null for a deleted fork.
+api_pr() {
+    printf '{"number":%s,"head":{"ref":"%s","repo":%s},"base":{"ref":"main","repo":{"full_name":"acme/repo"}}}' \
+        "$1" "$2" "$3"
+}
+OURS='{"full_name":"acme/repo"}'
+FORK='{"full_name":"someone/repo"}'
+
+# expect_api WANT DESCRIPTION RESPONSE: the answer through the default listing.
+expect_api() {
+    local want="$1" what="$2" got status
+    printf '%s\n' "$3" >"$work/response.json"
+    got="$(PATH="$work/api:$PATH" STACK_TEST_RESPONSE="$work/response.json" STACK_BASE_MAIN=main STACK_BASE_SELF='' bash "$SCRIPT" 2>&1)"
+    status=$?
+    if [ "$status" -eq 0 ] && [ "$got" = "$want" ]; then
+        ok "the default listing: $what: $want"
+    else
+        fail "the default listing: $what: wanted '$want' with status 0, got status $status and '$got'"
+    fi
+}
+
+expect_api main "a fork's pull request is no one's base" "[$(api_pr 605 feat/fork "$FORK")]"
+expect_api main "a deleted fork's pull request is no one's base" "[$(api_pr 605 feat/gone null)]"
+expect_api feat/ours "an older same-repository pull request beats a newer fork's" \
+    "[$(api_pr 605 feat/fork "$FORK"),$(api_pr 600 feat/ours "$OURS")]"
+
 g checkout -q --detach mine
 got="$(STACK_BASE_SELF='' STACK_BASE_PRS='' bash "$SCRIPT" 2>&1)"
 status=$?

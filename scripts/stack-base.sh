@@ -33,15 +33,22 @@
 # A pull request taken out of the stack because its fix cannot come soon is
 # open but in no stack; it is never anyone's base.
 #
+# A pull request from a fork is never anyone's base either, nor this branch's
+# own: its head branch exists only on the fork, so nothing here can be based on
+# it. Each row names its head and base repositories, and a row whose two differ
+# is left out before any of the rules above is applied.
+#
 # Usage: stack-base.sh
 # Run from inside the branch's work tree.
 #
 # Inputs, each with a default that asks git or GitHub (tests set them):
-#   STACK_BASE_PRS   "NUMBER BRANCH STACK POSITION BASE" lines, the repository's
-#                    open pull requests, with "-" for STACK and POSITION
-#                    when a pull request is in no stack (default: the
-#                    GitHub API, through gh). Legacy four-column inputs
-#                    still work for a single stack; joining segments needs BASE.
+#   STACK_BASE_PRS   "NUMBER BRANCH STACK POSITION BASE HEAD_REPO BASE_REPO"
+#                    lines, the repository's open pull requests, with "-" for
+#                    STACK and POSITION when a pull request is in no stack, and
+#                    for HEAD_REPO when its repository was deleted (default:
+#                    the GitHub API, through gh). Legacy four- and five-column
+#                    inputs still work and count as this repository's own, a
+#                    single stack needing no BASE; joining segments needs BASE.
 #   STACK_BASE_SELF  this branch's pull request number, empty when it has
 #                    none yet (default: the open pull request whose head is
 #                    this branch)
@@ -60,15 +67,17 @@ if [ -n "${STACK_BASE_PRS+set}" ]; then
 else
     command -v gh >/dev/null 2>&1 || die "gh is not installed: it lists the open pull requests"
     prs="$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=open&per_page=100' \
-        --jq '.[] | "\(.number) \(.head.ref) \(.stack.number // "-") \(.stack.position // "-") \(.base.ref)"')" ||
+        --jq '.[] | "\(.number) \(.head.ref) \(.stack.number // "-") \(.stack.position // "-") \(.base.ref) \(.head.repo.full_name // "-") \(.base.repo.full_name)"')" ||
         die "listing the open pull requests failed"
 fi
 
 # Well-formed lines only: a number, a branch, and a stack and position that
-# are both numbers or both "-".
+# are both numbers or both "-". A line naming a head repository has to name the
+# same base repository, or its branch is not in this one.
 rows="$(printf '%s\n' "$prs" | awk '
     NF >= 4 && $1 ~ /^[0-9]+$/ &&
-    (($3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/) || ($3 == "-" && $4 == "-")) {
+    (($3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/) || ($3 == "-" && $4 == "-")) &&
+    (NF < 6 || $6 == $7) {
         print $1, $2, $3, $4, ($5 == "" ? "-" : $5)
     }')"
 
