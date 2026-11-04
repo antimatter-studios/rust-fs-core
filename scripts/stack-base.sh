@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Print the branch this branch's pull request should be based on: the head
-# branch of the top of the repository's one stack, or `main` when no pull
-# request is open.
+# branch of the top of the repository's one stack, or `main` when no eligible
+# pull request is open.
 #
 # Every repository lands its pull requests as one stack (agent-core v7),
 # whether or not they touch the same files. A new pull request goes on the
@@ -24,14 +24,17 @@
 #   * A pull request not yet in it goes on the top: the layer with the
 #     highest position.
 #   * With no stack yet, a new pull request stacks on the newest older open
-#     pull request, and so starts the stack; with none open, on `main`.
+#     same-repository pull request that is not a draft and whose title does
+#     not start `red:`; with none eligible, on `main`. Draft and title metadata
+#     do not change the existing-stack rules above.
 #   * Multiple native stack segments are accepted only when their base/head
 #     branches prove one complete chain from main, in each segment's native
 #     order. Positions restart in each segment, so they cannot order the
 #     segments themselves. Missing links, forks and cycles are refused.
 #
 # A pull request taken out of the stack because its fix cannot come soon is
-# open but in no stack; it is never anyone's base.
+# open but in no stack; while a stack exists, it is never anyone's base. With
+# no stack, it is eligible again only when ready and not titled `red:`.
 #
 # A pull request from a fork is never anyone's base either, nor this branch's
 # own: its head branch exists only on the fork, so nothing here can be based on
@@ -42,13 +45,15 @@
 # Run from inside the branch's work tree.
 #
 # Inputs, each with a default that asks git or GitHub (tests set them):
-#   STACK_BASE_PRS   "NUMBER BRANCH STACK POSITION BASE HEAD_REPO BASE_REPO"
+#   STACK_BASE_PRS   "NUMBER BRANCH STACK POSITION BASE HEAD_REPO BASE_REPO DRAFT TITLE"
 #                    lines, the repository's open pull requests, with "-" for
 #                    STACK and POSITION when a pull request is in no stack, and
 #                    for HEAD_REPO when its repository was deleted (default:
 #                    the GitHub API, through gh). Legacy four- and five-column
 #                    inputs still work and count as this repository's own, a
 #                    single stack needing no BASE; joining segments needs BASE.
+#                    Legacy seven-column inputs also work. Missing DRAFT and
+#                    TITLE mean ready and not red; TITLE is the rest of the line.
 #   STACK_BASE_SELF  this branch's pull request number, empty when it has
 #                    none yet (default: the open pull request whose head is
 #                    this branch)
@@ -67,7 +72,7 @@ if [ -n "${STACK_BASE_PRS+set}" ]; then
 else
     command -v gh >/dev/null 2>&1 || die "gh is not installed: it lists the open pull requests"
     prs="$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=open&per_page=100' \
-        --jq '.[] | "\(.number) \(.head.ref) \(.stack.number // "-") \(.stack.position // "-") \(.base.ref) \(.head.repo.full_name // "-") \(.base.repo.full_name)"')" ||
+        --jq '.[] | "\(.number) \(.head.ref) \(.stack.number // "-") \(.stack.position // "-") \(.base.ref) \(.head.repo.full_name // "-") \(.base.repo.full_name) \(.draft // false) \(.title // "" | gsub("[\r\n\t]"; " "))"')" ||
         die "listing the open pull requests failed"
 fi
 
@@ -78,7 +83,7 @@ rows="$(printf '%s\n' "$prs" | awk '
     NF >= 4 && $1 ~ /^[0-9]+$/ &&
     (($3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/) || ($3 == "-" && $4 == "-")) &&
     (NF < 6 || $6 == $7) {
-        print $1, $2, $3, $4, ($5 == "" ? "-" : $5)
+        print $1, $2, $3, $4, ($5 == "" ? "-" : $5), ($8 == "" ? "false" : $8), ($9 ~ /^red:/ ? "true" : "false")
     }')"
 
 if [ -n "${STACK_BASE_SELF+set}" ]; then
@@ -176,8 +181,9 @@ if [ -n "$stacks" ]; then
     exit 0
 fi
 
-# No stack yet: the newest older open pull request starts it.
+# No stack yet: the newest older ready, non-red pull request starts it.
 top="$(printf '%s\n' "$rows" | awk -v s="$self" -v b="$current" -v m="$main" '
+    $6 != "true" && $7 != "true" &&
     $2 != b && $2 != m && (s == "" || ($1 != s && $1 + 0 < s + 0)) { print $1, $2 }' |
     sort -k1,1nr | awk 'NR == 1 { print $2 }')"
 echo "${top:-$main}"

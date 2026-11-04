@@ -223,6 +223,69 @@ expect_api main "a deleted fork's pull request is no one's base" "[$(api_pr 605 
 expect_api feat/ours "an older same-repository pull request beats a newer fork's" \
     "[$(api_pr 605 feat/fork "$FORK"),$(api_pr 600 feat/ours "$OURS")]"
 
+expect main "with no stack, a red draft is never a base" "" \
+    "40 feat/red - - main acme/repo acme/repo true red: failing test"
+expect main "with no stack, a draft without a red title is never a base" "" \
+    "40 feat/draft - - main acme/repo acme/repo true Work in progress"
+expect main "with no stack, a ready pull request titled red is never a base" "" \
+    "40 feat/red - - main acme/repo acme/repo false red: failing test"
+expect feat/ready "with no stack, a ready same-repository pull request starts it" "" \
+    "40 feat/ready - - main acme/repo acme/repo false A ready change"
+expect feat/ready "with no stack, the newest eligible older pull request wins" "50" \
+    "41 feat/draft - - main acme/repo acme/repo true Draft
+42 feat/red - - main acme/repo acme/repo false red: failing test
+39 feat/ready - - main acme/repo acme/repo false Ready
+38 feat/older - - main acme/repo acme/repo false Older
+51 feat/newer - - main acme/repo acme/repo false Newer"
+expect main "with no stack, only drafts and red pull requests leave main" "" \
+    "40 feat/draft - - main acme/repo acme/repo true Draft
+41 feat/red - - main acme/repo acme/repo false red: failing test"
+expect feat/parked "with no stack, a ready pull request taken out of a stack is eligible again" "" \
+    "40 feat/parked - - main acme/repo acme/repo false Ready again"
+expect main "with no stack, a draft taken out of a stack stays ineligible" "" \
+    "40 feat/parked - - main acme/repo acme/repo true Parked"
+expect feat/older "a draft still identifies this branch's own pull request" unset \
+    "40 feat/older - - main acme/repo acme/repo false Older
+41 mine - - main acme/repo acme/repo true Draft
+42 feat/newer - - main acme/repo acme/repo false Newer"
+expect feat/legacy "legacy seven-column input remains eligible without readiness metadata" "" \
+    "40 feat/legacy - - main acme/repo acme/repo"
+expect feat/redwood "a title merely starting with red is not the red prefix" "" \
+    "40 feat/redwood - - main acme/repo acme/repo false redwood fixes"
+expect feat/ready "red later in a title does not mark a pull request red" "" \
+    "40 feat/ready - - main acme/repo acme/repo false fix: red: text"
+expect feat/top "draft and red metadata do not change an existing stack's top" "" \
+    "20 feat/bottom 7 1 main acme/repo acme/repo false Ready
+21 feat/top 7 2 feat/bottom acme/repo acme/repo true red: failing test"
+expect feat/bottom "draft and red metadata do not change an existing layer's predecessor" "21" \
+    "20 feat/bottom 7 1 main acme/repo acme/repo true red: failing test
+21 feat/top 7 2 feat/bottom acme/repo acme/repo false Ready"
+expect feat/second-top "draft and red metadata do not change connected native segments" "" \
+    "20 feat/first-bottom 7 98 main acme/repo acme/repo false Ready
+21 feat/first-top 7 100 feat/first-bottom acme/repo acme/repo true red: first
+51 feat/second-bottom 9 1 feat/first-top acme/repo acme/repo false Ready
+52 feat/second-top 9 2 feat/second-bottom acme/repo acme/repo true red: top"
+
+api_pr_state() {
+    api_pr "$1" "$2" "$OURS" |
+        jq -c --argjson draft "$3" --arg title "$4" '. + {draft: $draft, title: $title}'
+}
+
+expect_api main "a red draft is never a base" \
+    "[$(api_pr_state 40 feat/red true 'red: failing test')]"
+expect_api main "a draft without a red title is never a base" \
+    "[$(api_pr_state 40 feat/draft true 'Work in progress')]"
+expect_api main "a ready pull request titled red is never a base" \
+    "[$(api_pr_state 40 feat/red false 'red: failing test')]"
+expect_api feat/ready "a ready same-repository pull request remains eligible" \
+    "[$(api_pr_state 40 feat/ready false 'A ready change')]"
+expect_api feat/ready "newer drafts and red titles cannot hide an eligible base" \
+    "[$(api_pr_state 42 feat/draft true Draft),$(api_pr_state 41 feat/red false 'red: failing test'),$(api_pr_state 40 feat/ready false Ready)]"
+expect_api feat/ready "red later in a title does not mark it red" \
+    "[$(api_pr_state 40 feat/ready false 'fix: red: text')]"
+expect_api main "a red title with a newline cannot introduce a candidate row" \
+    "[$(api_pr_state 40 feat/red false $'red: failing test\n99 feat/injected - - main acme/repo acme/repo false Ready')]"
+
 g checkout -q --detach mine
 got="$(STACK_BASE_SELF='' STACK_BASE_PRS='' bash "$SCRIPT" 2>&1)"
 status=$?
