@@ -413,9 +413,15 @@ runs it against the calling repository:
   and answers from the ones it keeps and their `stack` field. A pull request
   already in the stack gets the nearest open layer below it, or `main` at the
   bottom; one not yet in the stack gets the top. With no stack, the answer is
-  the newest older one it keeps, or `main` when there is none. If the ones it
-  keeps are in more than one stack, it refuses unless their base and head
-  branches prove one chain from `main`. `tests/scripts/test-stack-base.sh`
+  the newest older same-repository pull request that is not a draft and whose
+  title does not start `red:`, or `main` when there is none. A pull request
+  taken out of a stack is eligible again under that rule only when no stack
+  exists; while a stack exists, unstacked pull requests are not bases. Draft
+  and title metadata do not change the existing-stack rules. The default
+  listing requests both fields; legacy inputs without them count as ready
+  and not red. If the ones it keeps are in more than one stack, it refuses
+  unless their base and head branches prove one chain from `main`.
+  `tests/scripts/test-stack-base.sh`
   drives it on a scratch repository, so it needs neither GitHub nor a network.
 - `scripts/changelog-check.sh` (every caller's `chore lint` and CI) and
   `scripts/changelog-gather.sh VERSION` (the release commit) keep the
