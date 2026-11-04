@@ -1,6 +1,7 @@
 //! Local tree exports. Names and existing directory components are checked
 //! before joining paths; callers must exclude concurrent destination mutation.
 use super::*;
+use crate::cli::listing::MAX_DEPTH;
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
@@ -94,7 +95,7 @@ impl Default for TreeOptions {
     fn default() -> Self {
         Self {
             recursive: false,
-            max_depth: 64,
+            max_depth: MAX_DEPTH as usize,
             verify: false,
         }
     }
@@ -116,7 +117,7 @@ pub fn export_args_with_tree() -> [Arg; 6] {
     let [path, dest, replace, verify] = export_args_with_verify();
     [path, dest, replace.help("Replace existing files; existing directories are merged into, preserving unrelated entries"), verify,
         Arg::new("recursive").long("recursive").action(ArgAction::SetTrue).help("Copy a directory tree; existing destination directories are merged into"),
-        Arg::new("max-depth").long("max-depth").default_value("64").value_parser(clap::value_parser!(usize)).help("Maximum entry depth below the source root (root is zero)")]
+        Arg::new("max-depth").long("max-depth").default_value(MAX_DEPTH.to_string()).value_parser(clap::value_parser!(usize)).help("Maximum entry depth below the source root (root is zero)")]
 }
 /// A symbolic link's opaque target and Windows link type; never resolve it.
 #[derive(Clone, Debug, PartialEq, Eq)]

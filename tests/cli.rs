@@ -613,6 +613,39 @@ fn the_recursive_listing_defaults_are_the_same_for_every_driver() {
 }
 
 #[test]
+fn a_tree_transfer_goes_as_deep_as_a_recursive_listing_by_default() {
+    use fs_core::cli::listing::MAX_DEPTH;
+    use fs_core::cli::transfer::{
+        export_args_with_tree, import_args_with_tree, ImportTreeOptions, TreeOptions,
+    };
+    let want = MAX_DEPTH as usize;
+    assert_eq!(TreeOptions::default().max_depth, want);
+    assert_eq!(ImportTreeOptions::default().max_depth, want);
+    let export = Command::new("export")
+        .no_binary_name(true)
+        .args(export_args_with_tree())
+        .try_get_matches_from(["/source", "/destination"])
+        .unwrap();
+    assert_eq!(TreeOptions::from_matches(&export).unwrap().max_depth, want);
+    let import = Command::new("import")
+        .no_binary_name(true)
+        .args(import_args_with_tree())
+        .try_get_matches_from(["/source", "/destination"])
+        .unwrap();
+    assert_eq!(
+        ImportTreeOptions::from_matches(&import).unwrap().max_depth,
+        want
+    );
+    for mut command in [
+        Command::new("export").args(export_args_with_tree()),
+        Command::new("import").args(import_args_with_tree()),
+    ] {
+        let help = command.render_help().to_string();
+        assert!(help.contains("[default: 64]"), "{help}");
+    }
+}
+
+#[test]
 fn a_reached_bound_names_itself_and_where_it_stopped() {
     let error = fs_core::cli::listing::bound_reached("--limit", 10, "/a/b");
     assert_eq!(error.message, "--limit 10 reached at /a/b");
