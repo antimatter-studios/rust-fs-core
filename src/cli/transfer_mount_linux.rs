@@ -1,7 +1,8 @@
 //! Linux mountinfo identifies devices by major:minor, not mount-source names.
 //! sysfs exposes loop backing files; compare inode identity, not path spelling.
 //! Btrfs reports a synthetic ID per subvolume; /sys/fs/btrfs lists members.
-//! ZFS names datasets by pool; `zpool status -P` lists each pool's vdevs.
+//! ZFS names datasets by pool; `zpool status -P` lists each pool's vdevs, and
+//! /proc/spl/kstat/zfs shows every user whether any pool is imported at all.
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -63,19 +64,25 @@ fn probe(image: &Path) -> io::Result<MountState> {
     };
     // An imported pool writes its vdevs with no dataset mounted, so ask
     // whenever the module is loaded, not only when a dataset is visible.
-    let pools = if mountinfo.contains(" - zfs ") || Path::new("/sys/module/zfs").try_exists()? {
-        zfs_pools(&zpool_status()?, &|vdev| {
-            let vdev = fs::metadata(vdev)?;
-            if vdev.file_type().is_block_device() {
-                Ok(devices.contains(&dev_id(vdev.rdev())))
-            } else if vdev.is_file() {
-                Ok(metadata.is_file()
-                    && metadata.dev() == vdev.dev()
-                    && metadata.ino() == vdev.ino())
-            } else {
-                Err(invalid("zfs vdev is neither a block device nor a file"))
-            }
-        })?
+    let dataset_visible = mountinfo.contains(" - zfs ");
+    let pools = if dataset_visible || Path::new("/sys/module/zfs").try_exists()? {
+        pool_membership(
+            zpool_status(),
+            Path::new("/proc/spl/kstat/zfs"),
+            dataset_visible,
+            &|vdev| {
+                let vdev = fs::metadata(vdev)?;
+                if vdev.file_type().is_block_device() {
+                    Ok(devices.contains(&dev_id(vdev.rdev())))
+                } else if vdev.is_file() {
+                    Ok(metadata.is_file()
+                        && metadata.dev() == vdev.dev()
+                        && metadata.ino() == vdev.ino())
+                } else {
+                    Err(invalid("zfs vdev is neither a block device nor a file"))
+                }
+            },
+        )?
     } else {
         HashSet::new()
     };
@@ -202,6 +209,57 @@ fn zpool_status() -> io::Result<String> {
         )));
     }
     String::from_utf8(output.stdout).map_err(|_| invalid("zpool status -P is not UTF-8"))
+}
+
+/// The pools holding a vdev for which `ours` holds, from `zpool status -P`.
+/// `zpool` needs `/dev/zfs`, which is open to root alone unless a udev rule
+/// has widened it. Without that vdev list only one answer can still be given:
+/// with no pool imported, nothing can be a vdev. Any pool at all is a refusal,
+/// because nothing else shows which images are outside it.
+fn pool_membership(
+    status: io::Result<String>,
+    kstat: &Path,
+    dataset_visible: bool,
+    ours: &dyn Fn(&Path) -> io::Result<bool>,
+) -> io::Result<HashSet<String>> {
+    let refusal = match status {
+        Ok(status) => return zfs_pools(&status, ours),
+        Err(refusal) => refusal,
+    };
+    let imported = kernel_pools(kstat)
+        .map_err(|err| invalid(format!("{refusal}; cannot list imported pools: {err}")))?;
+    if imported.is_empty() && !dataset_visible {
+        return Ok(HashSet::new());
+    }
+    let imported = if imported.is_empty() {
+        "a mounted dataset".to_owned()
+    } else {
+        imported.join(", ")
+    };
+    Err(invalid(format!(
+        "{refusal}; zfs pools are imported ({imported}) and an imported pool writes to its vdevs \
+         with no dataset mounted, so showing this image is not one of them needs root, or a \
+         /dev/zfs this user can open"
+    )))
+}
+
+/// The pools the kernel holds, which it lists to every user: each has a
+/// directory of statistics here from before its vdevs open until they close,
+/// and a transient `$import` during a pool scan counts too. `arcstats` shows
+/// this is the module's own listing, not an empty stand-in masking it.
+fn kernel_pools(kstat: &Path) -> io::Result<Vec<String>> {
+    if !kstat.join("arcstats").try_exists()? {
+        return Err(invalid(format!("{} has no arcstats", kstat.display())));
+    }
+    let mut pools = Vec::new();
+    for entry in fs::read_dir(kstat)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            pools.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    pools.sort();
+    Ok(pools)
 }
 
 /// Every imported pool with a vdev for which `ours` holds; each `pool:`
@@ -618,6 +676,88 @@ mod tests {
             &source
         )
         .is_err());
+    }
+
+    fn refused() -> io::Result<String> {
+        Err(invalid(
+            "cannot resolve zfs pool membership: zpool status -P: Permission denied the ZFS utilities must be run as root.",
+        ))
+    }
+
+    fn no_vdev_is_read(vdev: &Path) -> io::Result<bool> {
+        panic!("{} was read with no vdev list", vdev.display())
+    }
+
+    /// The module's listing, as a kernel with these pools imported shows it.
+    fn kstat_with_pools(tree: &TestTree, pools: &[&str]) -> PathBuf {
+        let kstat = tree.0.join("kstat");
+        fs::create_dir(&kstat).unwrap();
+        fs::write(kstat.join("arcstats"), b"").unwrap();
+        fs::write(kstat.join("dbgmsg"), b"").unwrap();
+        for pool in pools {
+            fs::create_dir(kstat.join(pool)).unwrap();
+        }
+        kstat
+    }
+
+    #[test]
+    fn a_refusing_zpool_with_no_pool_imported_leaves_nothing_to_be_a_vdev_of() {
+        let tree = TestTree::new();
+        let kstat = kstat_with_pools(&tree, &[]);
+        let pools = pool_membership(refused(), &kstat, false, &no_vdev_is_read).unwrap();
+        assert!(pools.is_empty());
+    }
+
+    #[test]
+    fn a_refusing_zpool_with_a_pool_imported_refuses_and_says_why_root_is_needed() {
+        let tree = TestTree::new();
+        let kstat = kstat_with_pools(&tree, &["tank", "other"]);
+        let message = pool_membership(refused(), &kstat, false, &no_vdev_is_read)
+            .unwrap_err()
+            .to_string();
+        for needle in [
+            "must be run as root",
+            "(other, tank)",
+            "writes to its vdevs with no dataset mounted",
+            "needs root",
+            "/dev/zfs",
+        ] {
+            assert!(message.contains(needle), "{needle}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_refusing_zpool_with_a_visible_dataset_refuses_though_no_pool_is_listed() {
+        let tree = TestTree::new();
+        let kstat = kstat_with_pools(&tree, &[]);
+        let message = pool_membership(refused(), &kstat, true, &no_vdev_is_read)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("(a mounted dataset)"), "{message}");
+    }
+
+    #[test]
+    fn a_refusing_zpool_refuses_when_the_kernel_listing_cannot_show_no_pool() {
+        let tree = TestTree::new();
+        // Absent, then present but with no sign of being the module's own.
+        let kstat = tree.0.join("kstat");
+        for _ in 0..2 {
+            let message = pool_membership(refused(), &kstat, false, &no_vdev_is_read)
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains("must be run as root"), "{message}");
+            assert!(message.contains("cannot list imported pools"), "{message}");
+            fs::create_dir_all(&kstat).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_working_zpool_is_believed_without_consulting_the_kernel_listing() {
+        let tree = TestTree::new();
+        let status = "  pool: tank\n\t/dev/loop0 ONLINE\n".to_owned();
+        let pools =
+            pool_membership(Ok(status), &tree.0.join("absent"), false, &|_| Ok(true)).unwrap();
+        assert_eq!(pools, HashSet::from(["tank".to_owned()]));
     }
 
     #[test]

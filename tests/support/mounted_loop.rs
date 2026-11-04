@@ -224,16 +224,47 @@ impl Drop for Btrfs {
     }
 }
 
+const ZFS_CONTROL: &str = "/dev/zfs";
+
+/// Loads the ZFS module, and fails by name if the host already has a pool:
+/// what the caller goes on to assert is what a host with no pool does.
+pub fn zfs_module_with_no_pool() {
+    run("modprobe", &["zfs".as_ref()]);
+    run("udevadm", &["settle".as_ref()]);
+    let pools = run(
+        "zpool",
+        &[
+            "list".as_ref(),
+            "-H".as_ref(),
+            "-o".as_ref(),
+            "name".as_ref(),
+        ],
+    );
+    assert!(
+        pools.stdout.is_empty(),
+        "this Linux mount oracle requires a host with no imported ZFS pool: {pools:?}"
+    );
+}
+
 /// One ZFS pool striped over a loop device per image, its root dataset
 /// mounted; the kernel reports the dataset by pool name, not by any member.
 pub struct Zfs {
     pub devices: Vec<PathBuf>,
     modes: Vec<u32>,
+    control_mode: u32,
     pool: String,
     imported: bool,
 }
 impl Zfs {
     pub fn new(root: &Path, images: &[PathBuf]) -> Self {
+        // These cases read the vdev list as this user, which takes the 0666
+        // that udev's rule gives /dev/zfs and a kernel's own 0600 does not.
+        // A package installed moments ago can leave the rule unapplied, so
+        // the mode is set here, and what a refused list does has its own case.
+        run("modprobe", &["zfs".as_ref()]);
+        run("udevadm", &["settle".as_ref()]);
+        let control_mode = fs::metadata(ZFS_CONTROL).unwrap().permissions().mode();
+        run("chmod", &["0666".as_ref(), ZFS_CONTROL.as_ref()]);
         // Sparse; above zpool's 64 MiB per-vdev minimum.
         let (devices, modes): (Vec<_>, Vec<_>) = images
             .iter()
@@ -254,9 +285,13 @@ impl Zfs {
         Self {
             devices,
             modes,
+            control_mode,
             pool,
             imported: true,
         }
+    }
+    pub fn name(&self) -> &str {
+        &self.pool
     }
     pub fn set_readonly(&mut self, readonly: bool) {
         let property = format!("readonly={}", if readonly { "on" } else { "off" });
@@ -282,5 +317,12 @@ impl Drop for Zfs {
         for (device, mode) in self.devices.iter().zip(&self.modes) {
             detach(device, *mode);
         }
+        run(
+            "chmod",
+            &[
+                format!("{:o}", self.control_mode & 0o7777).as_ref(),
+                ZFS_CONTROL.as_ref(),
+            ],
+        );
     }
 }
