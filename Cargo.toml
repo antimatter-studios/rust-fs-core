@@ -45,8 +45,8 @@ cli = ["dep:clap", "dep:clap_complete", "dep:clap_mangen", "dep:sha2", "dep:same
 # API keeps each tool's command a function the man pages and completions
 # can be made from, and the feature set is the one every tool in the family
 # was already built with, so moving the plumbing here changes no tool's
-# --help.
-clap = { version = "4.5", optional = true, default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
+# --help. `string` lets a default come from a constant rather than a literal.
+clap = { version = "4.5", optional = true, default-features = false, features = ["std", "help", "usage", "error-context", "suggestions", "string"] }
 clap_complete = { version = "4.5", optional = true }
 clap_mangen = { version = "0.2", optional = true }
 # The digest every transfer reports. The same release line the drivers

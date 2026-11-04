@@ -1,5 +1,6 @@
 //! Local tree imports; the driver owns name equivalence and directory creation.
 use super::*;
+use crate::cli::listing::MAX_DEPTH;
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
@@ -78,7 +79,7 @@ impl Default for ImportTreeOptions {
     fn default() -> Self {
         Self {
             recursive: false,
-            max_depth: 64,
+            max_depth: MAX_DEPTH as usize,
             preserve_links: false,
             preserve_times: false,
         }
@@ -108,7 +109,7 @@ pub fn import_args_with_tree() -> [Arg; 6] {
             .help("Import a local directory tree; merge existing directories"),
         Arg::new("max-depth")
             .long("max-depth")
-            .default_value("64")
+            .default_value(MAX_DEPTH.to_string())
             .value_parser(clap::value_parser!(usize))
             .help("Maximum entry depth below SOURCE (root is zero)"),
         Arg::new("preserve")

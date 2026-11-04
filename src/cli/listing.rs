@@ -8,7 +8,8 @@
 use super::CliError;
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
 
-/// How deep `--recursive` goes by default; a directory's entries are depth 1.
+/// How deep `ls --recursive` and a tree transfer go by default; a directory's
+/// entries are depth 1.
 pub const MAX_DEPTH: u64 = 64;
 /// How many entries `--recursive` lists by default.
 pub const LIMIT: u64 = 100_000;
