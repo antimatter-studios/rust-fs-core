@@ -493,6 +493,105 @@ fn zfs_pool_members_refuse_import_and_unrelated_devices_stay_usable() {
     }
 }
 
+/// A `PATH` whose `zpool` answers as the real one does when `/dev/zfs` is not
+/// open to this user. Everything else the probe reads is the real kernel's.
+#[cfg(target_os = "linux")]
+fn path_with_refusing_zpool(root: &Path) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let zpool = bin.join("zpool");
+    fs::write(
+        &zpool,
+        "#!/bin/sh\necho 'Permission denied the ZFS utilities must be run as root.' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&zpool, fs::Permissions::from_mode(0o755)).unwrap();
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited))).unwrap()
+}
+
+#[cfg(target_os = "linux")]
+const KSTAT_ZFS: &str = "/proc/spl/kstat/zfs";
+
+#[cfg(target_os = "linux")]
+fn kstat_directories() -> Vec<std::ffi::OsString> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(KSTAT_ZFS).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            found.push(entry.file_name());
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refusing_zpool_does_not_refuse_a_transfer_when_no_pool_is_imported() {
+    if let Some(image) = std::env::var_os("TRANSFER_LOCK_CHILD_IMAGE") {
+        drop(ImageLock::for_import(Path::new(&image)).unwrap());
+        return;
+    }
+    let dir = Scratch::new("zpool-refused-no-pool");
+    mounted_loop::zfs_module_with_no_pool();
+    let output = child(
+        "a_refusing_zpool_does_not_refuse_a_transfer_when_no_pool_is_imported",
+        &dir.image(),
+    )
+    .env("PATH", path_with_refusing_zpool(&dir.root))
+    .output()
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refusing_zpool_still_refuses_every_transfer_while_a_pool_is_imported() {
+    let dir = Scratch::new("zpool-refused-imported");
+    mounted_loop::zfs_module_with_no_pool();
+    let images = [dir.root.join("vdev0"), dir.root.join("vdev1")];
+    let mut pool = mounted_loop::Zfs::new(&dir.root, &images);
+    let unrelated_image = dir.root.join("unrelated");
+    let unrelated = mounted_loop::Loop::new(&unrelated_image);
+    let path = path_with_refusing_zpool(&dir.root);
+    // Without the vdev list, nothing shows which images are outside the pool.
+    for image in images
+        .iter()
+        .chain(&pool.devices)
+        .chain([&unrelated_image, &unrelated.device])
+    {
+        let input_path = dir.root.join("input");
+        fs::write(&input_path, b"producer bytes still unread").unwrap();
+        let mut input = File::open(input_path).unwrap();
+        let output = child(
+            "host_mounted_images_and_devices_refuse_import_with_input_unread",
+            image,
+        )
+        .env("PATH", &path)
+        .stdin(Stdio::from(input.try_clone().unwrap()))
+        .output()
+        .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot determine host mount state"),
+            "{stderr}"
+        );
+        assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
+    }
+    // What this process can read, as the user it runs as, is what tells an
+    // imported pool from none: a kernel fact, with no ZFS tool involved.
+    assert!(Path::new(KSTAT_ZFS).join("arcstats").is_file());
+    assert_eq!(
+        kstat_directories(),
+        vec![std::ffi::OsString::from(pool.name())]
+    );
+    pool.export();
+    assert!(Path::new(KSTAT_ZFS).join("arcstats").is_file());
+    assert_eq!(kstat_directories(), Vec::<std::ffi::OsString>::new());
+}
+
 #[cfg(target_os = "macos")]
 #[path = "support/mounted_hdiutil.rs"]
 mod mounted_hdiutil;
