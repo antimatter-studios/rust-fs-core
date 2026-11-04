@@ -100,14 +100,35 @@ fn loop_devices(
     image_metadata: &fs::Metadata,
     metadata_for_backing: &dyn Fn(&Path) -> io::Result<fs::Metadata>,
 ) -> io::Result<Vec<PathBuf>> {
+    loop_devices_with_reader(
+        class_block,
+        image,
+        image_metadata,
+        metadata_for_backing,
+        &|path| fs::read(path),
+    )
+}
+
+fn loop_devices_with_reader(
+    class_block: &Path,
+    image: &Path,
+    image_metadata: &fs::Metadata,
+    metadata_for_backing: &dyn Fn(&Path) -> io::Result<fs::Metadata>,
+    read_backing: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+) -> io::Result<Vec<PathBuf>> {
     let mut matches = Vec::new();
     for entry in fs::read_dir(class_block)? {
         let device = entry?.path();
         let backing = device.join("loop/backing_file");
-        if !backing.try_exists()? {
-            continue;
-        }
-        let bytes = fs::read(backing)?;
+        let bytes = match read_backing(&backing) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(19) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         // sysfs appends one newline; preserve spaces and non-UTF-8 names.
         let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
         if bytes.is_empty() {
@@ -372,6 +393,149 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    fn matching_mount_survives_unrelated_backing_error(errno: i32) {
+        let tree = TestTree::new();
+        let image = tree.0.join("image.raw");
+        fs::write(&image, b"image").unwrap();
+        let matching = tree.add_loop("loop-match", &image);
+        fs::write(matching.join("dev"), b"7:9\n").unwrap();
+        fs::create_dir(matching.join("holders")).unwrap();
+        let unrelated = tree.add_loop("loop-detached", Path::new("/unrelated.raw"));
+        let image_metadata = fs::metadata(&image).unwrap();
+
+        let found = loop_devices_with_reader(
+            &tree.class_block(),
+            &image,
+            &image_metadata,
+            &|path| fs::metadata(path),
+            &|path| {
+                if path.starts_with(&unrelated) {
+                    Err(io::Error::from_raw_os_error(errno))
+                } else {
+                    fs::read(path)
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(found, vec![matching]);
+        let mut devices = HashSet::new();
+        for device in found {
+            collect(&device, &mut devices).unwrap();
+        }
+        let state = mounts(
+            "31 1 7:9 / /mounted rw - ext4 /dev/loop9 rw\n",
+            &devices,
+            &HashSet::new(),
+            &HashSet::new(),
+            &unresolved,
+        )
+        .unwrap();
+        assert_eq!(
+            state,
+            MountState {
+                mounted: true,
+                read_write: true
+            }
+        );
+    }
+
+    #[test]
+    fn enodev_from_an_unrelated_backing_attribute_preserves_matching_mounts() {
+        matching_mount_survives_unrelated_backing_error(19);
+    }
+
+    #[test]
+    fn enoent_from_an_unrelated_backing_attribute_preserves_matching_mounts() {
+        matching_mount_survives_unrelated_backing_error(2);
+    }
+
+    #[test]
+    fn other_backing_attribute_read_errors_still_fail_closed() {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::InvalidData] {
+            let tree = TestTree::new();
+            let image = tree.0.join("image.raw");
+            fs::write(&image, b"image").unwrap();
+            tree.add_loop("loop-unreadable", Path::new("/unknown.raw"));
+            let error = loop_devices_with_reader(
+                &tree.class_block(),
+                &image,
+                &fs::metadata(&image).unwrap(),
+                &|path| fs::metadata(path),
+                &|_| Err(io::Error::new(kind, "unreadable backing attribute")),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), kind);
+        }
+    }
+
+    #[test]
+    fn disappearing_backing_metadata_for_the_image_still_fails_closed() {
+        for errno in [2, 19] {
+            let tree = TestTree::new();
+            let image = tree.0.join("image.raw");
+            fs::write(&image, b"image").unwrap();
+            tree.add_loop("loop-match", &image);
+            let error = loop_devices(
+                &tree.class_block(),
+                &image,
+                &fs::metadata(&image).unwrap(),
+                &|_| Err(io::Error::from_raw_os_error(errno)),
+            )
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(errno));
+        }
+    }
+
+    #[test]
+    fn disappearing_matching_device_partitions_and_holders_still_fail_closed() {
+        for missing in ["dev", "holders", "partition", "holder"] {
+            let tree = TestTree::new();
+            let image = tree.0.join("image.raw");
+            fs::write(&image, b"image").unwrap();
+            let matching = tree.add_loop("loop-match", &image);
+            if missing != "dev" {
+                fs::write(matching.join("dev"), b"7:9\n").unwrap();
+            }
+            if missing != "holders" {
+                fs::create_dir(matching.join("holders")).unwrap();
+            }
+            if missing == "partition" {
+                let partition = matching.join("loop-matchp1");
+                fs::create_dir(&partition).unwrap();
+                fs::write(partition.join("partition"), b"1\n").unwrap();
+            }
+            if missing == "holder" {
+                fs::create_dir(matching.join("holders/dm-0")).unwrap();
+            }
+            let found = loop_devices(
+                &tree.class_block(),
+                &image,
+                &fs::metadata(&image).unwrap(),
+                &|path| fs::metadata(path),
+            )
+            .unwrap();
+            assert_eq!(found, vec![matching]);
+            let error = collect(&found[0], &mut HashSet::new()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "missing {missing}");
+        }
+    }
+
+    #[test]
+    fn missing_block_device_listing_still_fails_closed() {
+        let tree = TestTree::new();
+        let image = tree.0.join("image.raw");
+        fs::write(&image, b"image").unwrap();
+        let error = loop_devices(
+            &tree.0.join("missing-block"),
+            &image,
+            &fs::metadata(&image).unwrap(),
+            &|path| fs::metadata(path),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
