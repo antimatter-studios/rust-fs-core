@@ -16,7 +16,7 @@ with every repository in this family**. Do not edit it here: change the
 canonical copy and propagate it, or `chore lint` will fail. Everything after
 the END marker is specific to this repository.
 
-<!-- BEGIN SHARED BLOCK: agent-core v8 sha256:1f9d7d85f68196088ee36428968ea4c365c6f99d41b908fd8d2e848a97e5b570 -->
+<!-- BEGIN SHARED BLOCK: agent-core v9 sha256:296624d9e43a3f29dab9ba81b8652e5d625b0adb5de99e09d760536d7869d674 -->
 ## Claiming work
 
 Several agents work these repositories at the same time. Before you start on
@@ -100,25 +100,25 @@ Each repository names any further skills of its own below.
 
 ## A bug fix starts with a red
 
-**Prove it is broken first** — a failing check or test — *then* fix it, *then*
-prove that same check is green, *then* confirm the full baseline still passes.
-Never write the fix before you have a red. A fix with no failing test to its
-name is a claim, not a result.
+**Prove it is broken first** — a failing test — *then* fix it, *then* prove
+that same test is green, *then* confirm the full baseline still passes. Never
+write the fix before you have a red. A fix with no failing test to its name is
+a claim, not a result. The test stays, and guards against the bug returning.
 
-**Red and green happen in one pull request, on one branch.** Push the commit
-that adds the failing test on its own and open the pull request with a title
-that starts `red:`. CI runs it on that pull request, and the run of a `red:`
-pull request is never cancelled, so its failure stays on record. Then put the
-fix on the **same branch**, with the test untouched: squash the branch to one
-commit, take `red:` off the title, and push. The same pull request goes green.
+**The pattern never changes. Only where you prove it does.** Prove the red and
+the green in CI, or in the test harness on a local machine when your
+instructions allow it. It is the same test harness and the same tests. Running
+them locally saves pipeline runs when the machine has more power than the CI
+runners. Without such an instruction, use CI.
 
-- Never put a fix in a second pull request, stacked or not, and never push the
-  test to a `red/*` branch of its own: the red evidence is the pull request's
-  own run.
-- Never push the test and the fix together. The red has to be visible in CI,
-  not claimed in the description.
-- A `red:` pull request holds a failing test, so it can never merge: nothing
-  is built on it and nothing queues it until it has lost `red:`.
+- Red and green in the harness: push the test and the fix as one commit, and
+  quote the failing output in the pull request, naming the commit it ran on.
+- Red and green in CI: push the test alone, let that run finish, then push the
+  fix to the same branch with the test untouched, and link the run in the pull
+  request.
+- Either way, red and green belong to one pull request on one branch. Never
+  put a fix in a second pull request, stacked or not.
+- A red that fails for another reason proves nothing. Read it.
 
 ## Nothing skips
 
@@ -242,7 +242,7 @@ a fragment until it ships and a line of `CHANGELOG.md` after, never both.
   copying it is not.
 - **Each of these is a standalone project.** Never mention a consuming
   application in the README, the source, or CLI help.
-<!-- END SHARED BLOCK: agent-core v8 -->
+<!-- END SHARED BLOCK: agent-core v9 -->
 
 ## Skills specific to this repository
 
