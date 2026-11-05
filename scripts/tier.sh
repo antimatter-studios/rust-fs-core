@@ -67,6 +67,17 @@ esac
 
 LOG="$CALLER/tmp/logs/$LOG_NAME.log"
 mkdir -p "$(dirname "$LOG")"
+
+# WHAT tier-progress.sh READS, beside the log and never in it: a tier prints and
+# logs what it did before. Neither write may fail a tier that is otherwise fine.
+META="$CALLER/tmp/logs/$LOG_NAME.meta"
+{ printf 'started=%s\nmax_lines=%s\npid=%s\n' "$(date +%s)" "$MAX_LINES" "$$" > "$META"; } 2>/dev/null || true
+# shellcheck disable=SC2329  # called by the trap below
+tier_ended() {
+    { printf 'ended=%s\nstatus=%s\n' "$(date +%s)" "$1" >> "$META"; } 2>/dev/null || true
+}
+trap 'tier_ended "$?"' EXIT
+
 set +e
 bash "$HERE/output-budget.sh" \
     --log "$LOG" \
