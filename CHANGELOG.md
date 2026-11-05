@@ -12,6 +12,25 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-11-05
+
+### Changed
+
+- **agent-core v9: a bug fix may prove its red and green in the test harness.** The red-first rule stays, and a test still comes first. The red and the green can be proved in CI, or in the test harness on a local machine when an agent's instructions allow it; without such an instruction, CI is the place. Each route says what the pull request must carry as evidence. `agents-core-check` expects v9, so every repository carrying the block moves to v9 with its rust-fs-core pin.
+
+### Fixed
+
+- Tree imports with `--preserve=xattrs` offer every listed host attribute even when a sink refuses an earlier one, and name every attribute write error in the item's existing reason. Accepted attributes and published contents remain intact; the first error's classification, report schema, and partial-transfer exit status are unchanged.
+- macOS `com.apple.provenance` remains an opaque attribute offered to the sink, not silently filtered as host bookkeeping. The existing `com.apple.ResourceFork` named-stream handling is unchanged.
+
+- Linux transfer mount checks no longer abort when an unrelated loop device's backing attribute disappears during the sysfs walk. Checks for the image's backing metadata, devices, partitions and holders still fail closed.
+
+- **`stack-base.sh` leaves a fork's pull request out of its answer.** A fork's head branch exists only on the fork, so naming it gave an answer no pull request could be based on and `git rebase` could not resolve. The script now answers with the newest older same-repository pull request, or `main`.
+
+- With no stack, `scripts/stack-base.sh` excludes drafts and pull requests titled `red:` when selecting the newest older same-repository base, while preserving existing stack ordering and legacy input support.
+
+- Linux transfers no longer refuse every image when the ZFS module is loaded and `zpool status -P` fails, provided the kernel lists no imported pool. With a pool imported the refusal stays, and it now says why root is needed: an imported pool writes to its vdevs with no dataset mounted.
+
 ## [0.4.3] — 2026-11-02
 
 ### Added
@@ -1208,7 +1227,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.0...v0.4.1
