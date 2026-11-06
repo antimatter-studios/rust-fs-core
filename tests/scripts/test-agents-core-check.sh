@@ -22,12 +22,12 @@ expect() {
 }
 
 cp "$REPO/AGENTS.md" "$SANDBOX/AGENTS.md" || exit 1
-expect "the canonical guide passes" 0 "carries agent-core v9, unmodified"
+expect "the canonical guide passes" 0 "carries agent-core v10, unmodified"
 
 sed 's/^## Claiming work$/## Claiming work /' "$REPO/AGENTS.md" > "$SANDBOX/AGENTS.md"
 expect "modified shared content is refused" 1 "the agent-core block does not match the canonical copy"
 
-sed 's/agent-core v9/agent-core v8/g' "$REPO/AGENTS.md" > "$SANDBOX/AGENTS.md"
+sed 's/agent-core v10/agent-core v9/g' "$REPO/AGENTS.md" > "$SANDBOX/AGENTS.md"
 expect "stale markers are refused" 1 "AGENTS.md has no agent-core BEGIN marker"
 
 sed '/BEGIN SHARED BLOCK/d' "$REPO/AGENTS.md" > "$SANDBOX/AGENTS.md"

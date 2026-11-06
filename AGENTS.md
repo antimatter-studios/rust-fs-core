@@ -16,7 +16,7 @@ with every repository in this family**. Do not edit it here: change the
 canonical copy and propagate it, or `chore lint` will fail. Everything after
 the END marker is specific to this repository.
 
-<!-- BEGIN SHARED BLOCK: agent-core v9 sha256:296624d9e43a3f29dab9ba81b8652e5d625b0adb5de99e09d760536d7869d674 -->
+<!-- BEGIN SHARED BLOCK: agent-core v10 sha256:8defd170502f598507b5d7174acef1243c442fc67134a03812a2a1e81bc7e63e -->
 ## Claiming work
 
 Several agents work these repositories at the same time. Before you start on
@@ -141,6 +141,35 @@ an **independent oracle** — the platform's own tools, a real kernel, or a thir
 implementation — before it is considered done. Each repository names its
 oracles below.
 
+## Checks that guard data are never weakened
+
+These drivers read and write real disks, and an application mounts them on
+people's machines. A checker that wrongly calls a damaged volume clean, or a
+test loosened until it passes, hides a defect that can destroy data nobody can
+get back. So, for every agent and every contributor:
+
+- **Never skip, disable, relax, quiet or retarget a test, gate, checker,
+  floor, budget or pass/fail rule to make a run go green.** That includes
+  turning a failure into a warning, narrowing what a gate accepts, dropping a
+  case, lowering an executed-case floor, and raising a budget to hide a
+  regression. A budget may be raised only for a run that passed everything,
+  with the measurement written beside the row.
+- **Never add a baseline line, expected-failure entry or ignore to make a
+  disagreement disappear** unless there is an issue for it *and* evidence of
+  which side is correct. "Probably harmless" is not evidence.
+- **When the driver and an independent oracle disagree,** work out from the
+  on-disk format and the oracle's own behaviour which side is right. If the
+  driver is wrong, fix the driver: the failing test first, then the fix, the
+  test untouched. If the oracle is wrong or the difference is correct, say why
+  with evidence in the issue.
+- **If you cannot tell which side is right, stop and report it as blocked**
+  with what you tried. A blocked item is a good result; a convenient guess is
+  not.
+- **Changing what a gate accepts is the owner's decision,** never an
+  agent's. Propose it in an issue with the numbers and leave it open.
+- A change that touches a gate, a floor, a budget or a baseline says so
+  plainly in its pull request, and names which of these it is.
+
 ## Output is budgeted
 
 Test tiers run through `scripts/tier.sh`, which runs the suite **quietly**: the
@@ -242,7 +271,7 @@ a fragment until it ships and a line of `CHANGELOG.md` after, never both.
   copying it is not.
 - **Each of these is a standalone project.** Never mention a consuming
   application in the README, the source, or CLI help.
-<!-- END SHARED BLOCK: agent-core v9 -->
+<!-- END SHARED BLOCK: agent-core v10 -->
 
 ## Skills specific to this repository
 
