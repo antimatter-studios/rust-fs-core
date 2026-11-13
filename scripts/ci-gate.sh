@@ -8,7 +8,8 @@
 # Two halves, and both must hold or the aggregate is decoration:
 #
 #   1. ci.yml    — the aggregate job `needs:` every other gating job, carries
-#                  `if: always()`, names no job that does not exist, and its
+#                  `if: always()` (or the one superseded-run condition below),
+#                  names no job that does not exist, and its
 #                  steps read every result it needs: `toJSON(needs)` or
 #                  `needs.*.result` as a whole, or each `needs.<job>.result`.
 #                  What a script handed `toJSON(needs)` does with it is that
@@ -38,6 +39,27 @@
 # not providing. YAML 1.2 semantics matter too: GitHub's `on:` key must stay the
 # string `on` rather than folding into a boolean, since that is the key telling
 # a gating workflow from a release one.
+#
+# THE ONE ALTERNATIVE TO `if: always()`. A workflow that cancels a pull
+# request's superseded run (concurrency with cancel-in-progress) leaves the
+# aggregate of that run waiting for a runner under `always()`, and the group's
+# next run -- the new head's -- cannot start until the old run completes. So
+# the gate accepts exactly one other condition, SUPERSEDED_PR below, and no
+# respelling of it:
+#
+#   !(cancelled() && github.event_name == 'pull_request'
+#     && !startsWith(github.event.pull_request.title, 'red:'))
+#
+# It is false only in a cancelled run of an ordinary pull request. GitHub
+# re-evaluates job conditions when it cancels a run and cancels every job whose
+# condition is then false, so the aggregate concludes `cancelled` -- which a
+# required check never counts as passing -- without taking a runner. It is
+# never `skipped` (a skipped required check counts as passing): `cancelled()`
+# is false until the run is cancelled, so before that the condition is true
+# whatever the needed jobs did. A `red:` pull request (whose failing run is
+# its evidence; GitHub's startsWith ignores case), a push, a merge-queue run
+# and a manual dispatch keep `always()`'s behaviour: their aggregate runs, and
+# fails, when they are cancelled.
 #
 # THE GUARD IS READ THE WAY github-guard READS IT: `git config --file GUARD
 # --no-includes --get-all checks.required`, one check per `required =` line,
@@ -127,9 +149,13 @@ else:
     if isinstance(needs, str):
         needs = [needs]
 
+    # `always()`, or the one superseded-run condition (see the header),
+    # character for character: a respelling is refused rather than judged.
+    SUPERSEDED_PR = ("!(cancelled() && github.event_name == 'pull_request' && "
+                     "!startsWith(github.event.pull_request.title, 'red:'))")
     cond = str(body.get("if", "")).strip()
     norm = cond.replace("${{", "").replace("}}", "").strip()
-    if norm != "always()":
+    if norm not in ("always()", SUPERSEDED_PR):
         if not cond:
             fails.append(
                 f"`{agg}` does not carry `if: always()`, so a cancelled or skipped job "
@@ -137,7 +163,8 @@ else:
                 f"A job that was skipped is not a job that passed.")
         else:
             fails.append(
-                f"`{agg}` carries `if: {cond}` rather than `if: always()`. Any condition "
+                f"`{agg}` carries `if: {cond}` rather than `if: always()` or, exactly, "
+                f"`if: ${{{{ {SUPERSEDED_PR} }}}}`. Any other condition "
                 f"that can be false is a condition under which the one required check "
                 f"does not report, and a required check that does not report reads as "
                 f"permanently pending.")

@@ -131,8 +131,10 @@ The one required check is `ci-ok`, and it stands for every job — see
 `.github-guard`, which argues why at length. What holds that true is
 **`scripts/core.sh ci-gate`**, run by the `fmt` job: the gate workflow must run on
 `pull_request`, `ci-ok` must `needs:` every gating job and nothing that does
-not exist, it must carry `if: always()` rather than a narrowing of it, and
-`.github-guard` must require `ci-ok` alone.
+not exist, it must carry `if: always()` rather than a narrowing of it (or,
+exactly, the one condition that cancels it only in a superseded ordinary pull
+request run; `scripts/ci-gate.sh` says why), and `.github-guard` must require
+`ci-ok` alone.
 
 Those rules were `tests/ci_aggregate_gate.rs` here, and in ten sibling
 repositories as ten variants of the same 161–173 lines; then briefly a

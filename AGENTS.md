@@ -370,7 +370,14 @@ runs it against the calling repository:
   guard, read with `git config` as github-guard reads it, names `ci-ok` alone. It needs
   python3 with PyYAML, and git. A repository with no `Cargo.toml` (a Go one)
   has no cargo to find core through, so its CI checks out rust-fs-core
-  beside it or sets `FS_CORE_ROOT`.
+  beside it or sets `FS_CORE_ROOT`. `ci-ok` carries `if: always()`, or
+  exactly `if: ${{ !(cancelled() && github.event_name == 'pull_request' &&
+  !startsWith(github.event.pull_request.title, 'red:')) }}` (on one line):
+  false only in a cancelled ordinary pull request run, so a run its
+  concurrency group superseded completes without waiting for a runner, and
+  its `ci-ok` concludes `cancelled`, never `skipped`. A `red:` pull request,
+  a push, a merge-queue run and a dispatch still run `ci-ok` when cancelled,
+  and it fails. Any other condition is refused.
 - **Documentation-only pull requests skip the heavy jobs.** A `changes` job
   pipes the pull request's paths to `scripts/code-changed.sh` (run in place
   from the rust-fs-core sibling), which prints `true` unless every path is
