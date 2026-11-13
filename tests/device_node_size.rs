@@ -91,6 +91,7 @@ fn a_device_whose_size_cannot_be_measured_refuses_to_open() {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use fs_core::BlockDevice;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -191,6 +192,21 @@ mod macos {
             "{raw} reported {} bytes rather than its real length",
             dev.size_bytes()
         );
+    }
+
+    #[test]
+    fn a_writable_character_device_flushes_its_writes() {
+        let attached = attach_with_block_size(Some(4096));
+        let raw = attached.dev.replace("/dev/disk", "/dev/rdisk");
+        let device = FileDevice::open_rw(&raw).expect("open the character device read-write");
+        let expected = [0x5Au8; 4096];
+        device.write_at(0, &expected).expect("write the raw device");
+        device.flush().expect("flush the raw character device");
+        let mut actual = [0u8; 4096];
+        device.read_at(0, &mut actual).expect("read the raw device");
+        assert_eq!(actual, expected);
+        let backing = std::fs::read(attached.dir.join("raw.img")).expect("read the backing image");
+        assert_eq!(&backing[..expected.len()], &expected);
     }
 
     /// The block size is READ from the device, not assumed to be 512.
