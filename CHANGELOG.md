@@ -12,6 +12,20 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-11-13
+
+### Added
+
+- **`scripts/tier-progress.sh` says how far a running tier has got.** One line per tier in the caller's `tmp/logs`: lines against the budget, failed tests, elapsed time, an ETA, and whether its process is running. `tier.sh` leaves a `tmp/logs/<log>.meta` beside the log for it, and prints and logs what it did before. The percentage reads low, because a budget has margin.
+
+### Changed
+
+- agent-core v10: checks that guard data are never weakened. The shared block now says that no test, gate, checker, floor, budget or pass/fail rule may be skipped, relaxed, quieted or retargeted to make a run go green, that a baseline or expected-failure line needs an issue and evidence of which side is correct, that a driver and an independent oracle that disagree are settled by working out which side is right (fix the driver with the failing test first, or report the item as blocked), and that changing what a gate accepts is the owner's decision. Every repository that carries the block moves to v10 with the new digest.
+
+### Fixed
+
+- `FileDevice::flush` on macOS falls back to `fsync` when `F_FULLFSYNC` returns `ENOTTY`, allowing raw character devices to flush while preserving all other synchronization errors.
+
 ## [0.4.4] — 2026-11-05
 
 ### Changed
@@ -1227,7 +1241,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.1...v0.4.2
