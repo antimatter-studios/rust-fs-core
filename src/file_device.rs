@@ -270,6 +270,14 @@ unsafe extern "C" {
     fn ioctl(fd: std::os::raw::c_int, request: std::os::raw::c_ulong, ...) -> std::os::raw::c_int;
 }
 
+#[cfg(target_os = "macos")]
+const ENOTTY: i32 = 25;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn fsync(fd: std::os::raw::c_int) -> std::os::raw::c_int;
+}
+
 /// macOS: `<sys/disk.h>` gives the block size and the block count
 /// separately, and neither alone is the answer.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -593,6 +601,17 @@ impl BlockDevice for FileDevice {
         let _guard = self.exclusive_guard();
         let mut f = &self.file;
         f.flush()?;
+        #[cfg(target_os = "macos")]
+        match self.file.sync_data() {
+            Err(error) if error.raw_os_error() == Some(ENOTTY) => {
+                use std::os::fd::AsRawFd;
+                if unsafe { fsync(self.file.as_raw_fd()) } != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+            result => result?,
+        }
+        #[cfg(not(target_os = "macos"))]
         self.file.sync_data()?;
         Ok(())
     }
@@ -747,6 +766,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn flush_preserves_sync_errors_other_than_enotty() {
+        let path = temp_path("flush_sync_error");
+        let _cleanup = Cleanup(path.clone());
+        std::fs::write(&path, [0u8; 512]).expect("create the image");
+        let mut device = FileDevice::open_rw(&path).expect("open the image");
+        device.file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .expect("open the non-disk character device");
+        let expected = device
+            .file
+            .sync_data()
+            .expect_err("a non-disk device must reject data synchronization")
+            .raw_os_error();
+        assert_ne!(expected, Some(25), "this must exercise a non-ENOTTY error");
+        let Err(Error::Io(actual)) = device.flush() else {
+            panic!("flush must preserve the synchronization error");
+        };
+        assert_eq!(actual.raw_os_error(), expected);
+    }
 
     /// Concurrent readers do not serialise, and none of them sees
     /// another's offset.
