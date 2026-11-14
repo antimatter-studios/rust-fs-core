@@ -391,6 +391,52 @@ for value in '[heavy]' '${{ vars.CONDITIONAL_JOBS }}'; do
     fi
 done
 
+# --- 12. The one alternative to always(): a superseded pull request run. --
+# A workflow that cancels a pull request's superseded run may give ci-ok the
+# one declared condition that is false only in a cancelled ordinary
+# pull_request run, so that run completes without waiting for a runner. Only
+# that condition, character for character, inside ${{ }} or not: every
+# mutation that would also take ci-ok off a cancelled red:, push,
+# merge-queue or dispatch run, or off a run that was never cancelled, fails.
+# The condition is spliced in rather than substituted: Bash 5.2's
+# patsub_replacement reads the `&` of `&&` in a replacement as the match.
+SUPERSEDED="!(cancelled() && github.event_name == ${Q}pull_request${Q} && !startsWith(github.event.pull_request.title, ${Q}red:${Q}))"
+with_if() { printf '%s' "${WORKFLOW%%if: always()*}if: $1${WORKFLOW#*if: always()}"; }
+for form in "\${{ $SUPERSEDED }}" "\"$SUPERSEDED\""; do
+    dir="$(caller "superseded-${#form}" "$ONE" <<<"$(with_if "$form")")"
+    gate "$dir"
+    if [ "$status" -eq 0 ]; then
+        ok "ci-ok may carry the superseded-run condition ($form)"
+    else
+        fail "the declared superseded-run condition was refused (status $status):"$'\n'"$said"
+    fi
+done
+n=0
+for mutant in \
+    "!(cancelled() && github.event_name == ${Q}pull_request${Q})" \
+    "!(cancelled() && !startsWith(github.event.pull_request.title, ${Q}red:${Q}))" \
+    "!(cancelled() && github.event_name == ${Q}pull_request${Q} && startsWith(github.event.pull_request.title, ${Q}red:${Q}))" \
+    "!(cancelled() && github.event_name == ${Q}merge_group${Q} && !startsWith(github.event.pull_request.title, ${Q}red:${Q}))" \
+    "!(cancelled() && github.event_name != ${Q}push${Q} && !startsWith(github.event.pull_request.title, ${Q}red:${Q}))" \
+    "!(cancelled() && github.event_name == ${Q}pull_request_target${Q} && !startsWith(github.event.pull_request.title, ${Q}red:${Q}))" \
+    "!(cancelled() && github.event_name == ${Q}pull_request${Q} && !startsWith(github.event.pull_request.title, ${Q}red${Q}))" \
+    "!(failure() && github.event_name == ${Q}pull_request${Q} && !startsWith(github.event.pull_request.title, ${Q}red:${Q}))" \
+    "!(cancelled() || github.event_name == ${Q}pull_request${Q} && !startsWith(github.event.pull_request.title, ${Q}red:${Q}))" \
+    "$SUPERSEDED && success()" \
+    "$SUPERSEDED && github.event_name != ${Q}workflow_dispatch${Q}" \
+    "!cancelled()" \
+    "${SUPERSEDED#!}"; do
+    n=$((n + 1))
+    dir="$(caller "superseded-mutant-$n" "$ONE" <<<"$(with_if "\${{ $mutant }}")")"
+    gate "$dir"
+    if [ "$status" -eq 1 ] && grep -qF "\`ci-ok\` carries \`if: \${{ $mutant }}\`" <<<"$said" &&
+        grep -qF "or, exactly, \`if: \${{ $SUPERSEDED }}\`" <<<"$said"; then
+        ok "a respelled superseded-run condition is refused: $mutant"
+    else
+        fail "a mutated ci-ok condition was accepted or not explained (status $status): $mutant"$'\n'"$said"
+    fi
+done
+
 # Force the interpreter used by the gate to lack third-party modules,
 # regardless of what the runner happens to have installed.
 REAL_PYTHON="$(command -v python3)"
