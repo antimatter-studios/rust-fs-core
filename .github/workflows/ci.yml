@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.c.outputs.code }}
+      runners: ${{ steps.runners.outputs.runners || '{}' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,6 +75,38 @@ jobs:
           fi
           echo "code=$code ($EVENT${range:+ $range})"
           echo "code=$code" >> "$GITHUB_OUTPUT"
+      - name: Pick runners
+        id: runners
+        env:
+          ORG: ${{ github.repository_owner }}
+          ACTOR: ${{ github.triggering_actor }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          SENDER: ${{ github.event.sender.login }}
+          GH_ACTOR: ${{ github.actor }}
+          CODE: ${{ steps.c.outputs.code }}
+          JOBS: fmt msrv semver
+        run: |
+          set -euo pipefail
+          # test-ubuntu and coverage run only when the code changed; an unused
+          # pick holds a runner slot for 2 minutes.
+          [ "$CODE" != true ] || JOBS="$JOBS test-ubuntu coverage"
+          ours=true
+          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
+            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
+          done
+          pick() {
+            $ours || { echo ubuntu-latest; return; }
+            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
+                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
+                  --data-urlencode fallback=ubuntu-latest --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
+                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
+                  --data-urlencode "job=$1") || r=ubuntu-latest
+            case "$r" in antimatter-vps-linux-x64|ubuntu-latest) echo "$r" ;; *) echo ubuntu-latest ;; esac
+          }
+          runners='{}'
+          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
+          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "runners=$runners" >> "$GITHUB_OUTPUT"
 
   test:
     name: test / ${{ matrix.os }}
@@ -83,9 +116,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && (fromJSON(needs.changes.outputs.runners)['test-ubuntu'] || 'ubuntu-latest') || matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -179,13 +215,18 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
   fmt:
     name: fmt
-    runs-on: ubuntu-latest
+    needs: changes
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['fmt'] || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
           components: rustfmt
+      - name: PyYAML for the gate scripts (absent on the self-hosted image)
+        run: python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
       - run: cargo fmt --check
       - name: the one required check stands for every job
         run: bash scripts/core.sh ci-gate
@@ -210,9 +251,11 @@ jobs:
     name: coverage
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['coverage'] || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -252,9 +295,12 @@ jobs:
     # production feature surface (including `cli`) at the oldest supported
     # compiler, independently of the pinned development toolchain above.
     name: msrv (Rust 1.89)
-    runs-on: ubuntu-latest
+    needs: changes
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['msrv'] || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.89.0
@@ -270,8 +316,9 @@ jobs:
     # refusing a break the version in Cargo.toml does not declare. Why, and
     # what it cannot see, is at the top of scripts/semver-check.sh.
     name: semver (public API against crates.io)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['semver'] || 'ubuntu-latest' }}
     timeout-minutes: 30
+    needs: changes
     env:
       # The version scripts/semver-check.sh expects. A prebuilt binary,
       # checksum-verified by the action, rather than a ten-minute build.
@@ -281,6 +328,8 @@ jobs:
       OUTPUT_BUDGET_FAIL_TAIL: "200"
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
