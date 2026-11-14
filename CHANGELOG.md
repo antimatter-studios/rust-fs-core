@@ -12,6 +12,19 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-11-14
+
+### Changed
+
+- **ci-gate accepts one condition besides `if: always()` for `ci-ok`.**
+  `!(cancelled() && github.event_name == 'pull_request' &&
+  !startsWith(github.event.pull_request.title, 'red:'))`, written exactly, is
+  false only in a cancelled ordinary pull request run, so a run that a newer
+  head superseded completes without waiting for a runner and no longer holds
+  the pull request's concurrency group. Its `ci-ok` concludes `cancelled`,
+  never `skipped`; a cancelled `red:`, push, merge-queue or dispatch run still
+  runs `ci-ok`, and it fails. Every other condition is still refused.
+
 ## [0.4.5] — 2026-11-13
 
 ### Added
@@ -1241,7 +1254,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.2...v0.4.3
