@@ -95,13 +95,13 @@ jobs:
             [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
           done
           pick() {
-            $ours || { echo ubuntu-latest; return; }
+            $ours || { echo ubuntu-24.04; return; }
             r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
                   --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
-                  --data-urlencode fallback=ubuntu-latest --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
+                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
                   --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
-                  --data-urlencode "job=$1") || r=ubuntu-latest
-            case "$r" in antimatter-vps-linux-x64|ubuntu-latest) echo "$r" ;; *) echo ubuntu-latest ;; esac
+                  --data-urlencode "job=$1") || r=ubuntu-24.04
+            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
           }
           runners='{}'
           for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
@@ -116,7 +116,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && (fromJSON(needs.changes.outputs.runners)['test-ubuntu'] || 'ubuntu-latest') || matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && (fromJSON(needs.changes.outputs.runners)['test-ubuntu'] || 'ubuntu-24.04') || matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
@@ -216,7 +216,7 @@ jobs:
   fmt:
     name: fmt
     needs: changes
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['fmt'] || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['fmt'] || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
@@ -251,7 +251,7 @@ jobs:
     name: coverage
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['coverage'] || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['coverage'] || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
@@ -296,7 +296,7 @@ jobs:
     # compiler, independently of the pinned development toolchain above.
     name: msrv (Rust 1.89)
     needs: changes
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['msrv'] || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['msrv'] || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
@@ -316,7 +316,7 @@ jobs:
     # refusing a break the version in Cargo.toml does not declare. Why, and
     # what it cannot see, is at the top of scripts/semver-check.sh.
     name: semver (public API against crates.io)
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['semver'] || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['semver'] || 'ubuntu-24.04' }}
     timeout-minutes: 30
     needs: changes
     env:
