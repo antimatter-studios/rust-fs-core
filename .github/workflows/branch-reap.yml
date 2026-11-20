@@ -43,9 +43,20 @@ permissions:
   contents: read
 
 jobs:
-  reap:
+  reap-gate:
     if: github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
+  reap:
+    needs: reap-gate
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ needs.reap-gate.outputs.runner }}
     timeout-minutes: 5
     permissions:
       contents: write

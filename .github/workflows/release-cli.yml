@@ -17,7 +17,7 @@ name: release-cli
 #     with:
 #       core-ref: vX.Y.Z
 #       toolchain: 1.95.0
-#       windows: true    # optional, off by default: see the package job
+#       windows: true    # optional, off by default: see the package jobs
 #
 # Everything about WHAT is shipped is the caller's, in its Cargo.toml
 # (`[package.metadata.package-cli]`, read by scripts/package-cli.sh); this
@@ -66,34 +66,144 @@ permissions:
   contents: read
 
 jobs:
-  # Native builds, one runner per platform: cross-compiling needs a cross
-  # toolchain or an emulator, and GitHub provides every platform natively.
-  # Read-only. A leg hands its asset on as an artifact; `attach` publishes
-  # them together once every leg has passed, so a release never carries one
-  # platform without the others.
-  #
-  # THE WINDOWS LEGS RUN ONLY FOR A CALLER THAT SETS `windows`. A repository
-  # whose tools have never been built for Windows would otherwise find its
-  # next release failing on a leg it never asked for (#232). The two lists
-  # are JSON, one per answer, because a matrix cannot add an entry on a
-  # condition; tests/release_cli_workflow.rs reads both.
-  package:
-    name: package the tools (${{ matrix.label }})
+  # One job per platform, each with its own gate, so each platform picks its
+  # own runner. The two Windows jobs, and their gates, run only for a caller
+  # that sets `windows`.
+  package-darwin-arm64-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick macos-arm64
+
+  package-darwin-arm64:
+    name: package the tools (darwin-arm64)
+    needs: [package-darwin-arm64-gate]
     permissions:
       contents: read
-    strategy:
-      # One platform failing should not hide whether the other built.
-      fail-fast: false
-      matrix:
-        include: >-
-          ${{ fromJSON(inputs.windows
-          && '[{"runner":"macos-latest","label":"darwin-arm64"},{"runner":"ubuntu-latest","label":"linux-x86_64"},{"runner":"windows-latest","label":"windows-x86_64"},{"runner":"windows-11-arm","label":"windows-arm64"}]'
-          || '[{"runner":"macos-latest","label":"darwin-arm64"},{"runner":"ubuntu-latest","label":"linux-x86_64"}]') }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ needs.package-darwin-arm64-gate.outputs.runner }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+
+      - name: C toolchain for the gated runner
+        if: runner.os == 'Linux' && runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      # A tarball named for a branch would be a release nobody tagged.
+      - name: refuse anything but a version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::release-cli packages a version tag, not $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
+      # The path dependency, at the tag the caller pins. Through env: a
+      # caller's input is text, and spliced into a script it would be code.
+      - name: clone the rust-fs-core sibling
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.core-ref }}
+        run: git clone --depth 1 --branch "$CORE_REF" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+
+      # THE NOTES BEFORE ANYTHING IS BUILT. A release's body is its CHANGELOG
+      # section, written by github-guard's changelog extraction through
+      # agent-skills' changelog-notes action: the same code the git-changelog
+      # pre-push guard checks the tag with, so the two cannot disagree. A tag
+      # the CHANGELOG does not describe stops here, before a tarball exists.
+      # One leg writes the file the attach job uses: that job checks nothing
+      # out, so the notes travel as an artifact. Not on a Windows leg: the
+      # guard is a bash script run by its #! line, and the unix legs have
+      # already refused the tag, so `attach`, which needs every leg, never
+      # runs for it.
+      - name: the CHANGELOG describes this version
+        if: runner.os != 'Windows'
+        uses: antimatter-studios/agent-skills/.github/actions/changelog-notes@ed0b96812c5908478dcd84543debf4d5f8bf87e3
+        with:
+          tag: ${{ github.ref_name }}
+          output-file: notes/release-notes.md
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
+        with:
+          toolchain: ${{ inputs.toolchain }}
+
+      # Statically on Windows: GitHub's runners have the Visual C++ runtime, and
+      # a clean Windows install does not, so a binary that imports it passes
+      # here and does not start there (#411).
+      - name: build the multi-call binary
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --release --locked --features cli --bin "${GITHUB_REPOSITORY##*/}"
+
+      # package-cli.sh prints the asset's name on stdout and checks the
+      # asset it built: exactly the contracted members, every dotted name
+      # a relative symlink (a copy of bin/<repo>.exe in a Windows leg's
+      # .zip), and every name answering --help and --version.
+      - name: package and check the tarball
+        id: pack
+        shell: bash
+        env:
+          LABEL: darwin-arm64
+        run: |
+          set -euo pipefail
+          bash ../rust-fs-core/scripts/package-cli.sh "${GITHUB_REF_NAME#v}" "$LABEL" > "$RUNNER_TEMP/tarball"
+          tarball="$(tail -n 1 "$RUNNER_TEMP/tarball")"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          # A formula needs this to verify the download; in the job summary,
+          # updating one is a copy, not a re-download.
+          {
+            echo "### $tarball"
+            echo ""
+            echo '```'
+            # sha256sum where there is one (Linux, Git Bash on Windows),
+            # shasum on macOS, which has no sha256sum.
+            if command -v sha256sum >/dev/null 2>&1; then
+              echo "sha256 $(sha256sum "$tarball" | cut -d' ' -f1)"
+            else
+              echo "sha256 $(shasum -a 256 "$tarball" | cut -d' ' -f1)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # AN ARTIFACT, NOT THE RELEASE: a leg that published its own asset
+      # would do so whether or not the other leg later failed.
+      - name: keep the tarball for the attach job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-darwin-arm64
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
+  package-linux-x86_64-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
+  package-linux-x86_64:
+    name: package the tools (linux-x86_64)
+    needs: [package-linux-x86_64-gate]
+    permissions:
+      contents: read
+    runs-on: ${{ needs.package-linux-x86_64-gate.outputs.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: C toolchain for the gated runner
+        if: runner.os == 'Linux' && runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
 
       # A tarball named for a branch would be a release nobody tagged.
       - name: refuse anything but a version tag
@@ -131,7 +241,6 @@ jobs:
           output-file: notes/release-notes.md
 
       - name: keep the notes for the attach job
-        if: matrix.label == 'linux-x86_64'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-notes
@@ -160,7 +269,7 @@ jobs:
         id: pack
         shell: bash
         env:
-          LABEL: ${{ matrix.label }}
+          LABEL: linux-x86_64
         run: |
           set -euo pipefail
           bash ../rust-fs-core/scripts/package-cli.sh "${GITHUB_REF_NAME#v}" "$LABEL" > "$RUNNER_TEMP/tarball"
@@ -187,18 +296,261 @@ jobs:
       - name: keep the tarball for the attach job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: cli-${{ matrix.label }}
+          name: cli-linux-x86_64
           path: ${{ steps.pack.outputs.tarball }}
           if-no-files-found: error
           retention-days: 7
+
+  package-windows-x86_64-gate:
+    if: inputs.windows
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
+  package-windows-x86_64:
+    name: package the tools (windows-x86_64)
+    needs: [package-windows-x86_64-gate]
+    if: inputs.windows
+    permissions:
+      contents: read
+    runs-on: ${{ needs.package-windows-x86_64-gate.outputs.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: C toolchain for the gated runner
+        if: runner.os == 'Linux' && runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      # A tarball named for a branch would be a release nobody tagged.
+      - name: refuse anything but a version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::release-cli packages a version tag, not $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
+      # The path dependency, at the tag the caller pins. Through env: a
+      # caller's input is text, and spliced into a script it would be code.
+      - name: clone the rust-fs-core sibling
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.core-ref }}
+        run: git clone --depth 1 --branch "$CORE_REF" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+
+      # THE NOTES BEFORE ANYTHING IS BUILT. A release's body is its CHANGELOG
+      # section, written by github-guard's changelog extraction through
+      # agent-skills' changelog-notes action: the same code the git-changelog
+      # pre-push guard checks the tag with, so the two cannot disagree. A tag
+      # the CHANGELOG does not describe stops here, before a tarball exists.
+      # One leg writes the file the attach job uses: that job checks nothing
+      # out, so the notes travel as an artifact. Not on a Windows leg: the
+      # guard is a bash script run by its #! line, and the unix legs have
+      # already refused the tag, so `attach`, which needs every leg, never
+      # runs for it.
+      - name: the CHANGELOG describes this version
+        if: runner.os != 'Windows'
+        uses: antimatter-studios/agent-skills/.github/actions/changelog-notes@ed0b96812c5908478dcd84543debf4d5f8bf87e3
+        with:
+          tag: ${{ github.ref_name }}
+          output-file: notes/release-notes.md
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
+        with:
+          toolchain: ${{ inputs.toolchain }}
+
+      # Statically on Windows: GitHub's runners have the Visual C++ runtime, and
+      # a clean Windows install does not, so a binary that imports it passes
+      # here and does not start there (#411).
+      - name: build the multi-call binary
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --release --locked --features cli --bin "${GITHUB_REPOSITORY##*/}"
+
+      # package-cli.sh prints the asset's name on stdout and checks the
+      # asset it built: exactly the contracted members, every dotted name
+      # a relative symlink (a copy of bin/<repo>.exe in a Windows leg's
+      # .zip), and every name answering --help and --version.
+      - name: package and check the tarball
+        id: pack
+        shell: bash
+        env:
+          LABEL: windows-x86_64
+        run: |
+          set -euo pipefail
+          bash ../rust-fs-core/scripts/package-cli.sh "${GITHUB_REF_NAME#v}" "$LABEL" > "$RUNNER_TEMP/tarball"
+          tarball="$(tail -n 1 "$RUNNER_TEMP/tarball")"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          # A formula needs this to verify the download; in the job summary,
+          # updating one is a copy, not a re-download.
+          {
+            echo "### $tarball"
+            echo ""
+            echo '```'
+            # sha256sum where there is one (Linux, Git Bash on Windows),
+            # shasum on macOS, which has no sha256sum.
+            if command -v sha256sum >/dev/null 2>&1; then
+              echo "sha256 $(sha256sum "$tarball" | cut -d' ' -f1)"
+            else
+              echo "sha256 $(shasum -a 256 "$tarball" | cut -d' ' -f1)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # AN ARTIFACT, NOT THE RELEASE: a leg that published its own asset
+      # would do so whether or not the other leg later failed.
+      - name: keep the tarball for the attach job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-windows-x86_64
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
+  package-windows-arm64-gate:
+    if: inputs.windows
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-arm64
+
+  package-windows-arm64:
+    name: package the tools (windows-arm64)
+    needs: [package-windows-arm64-gate]
+    if: inputs.windows
+    permissions:
+      contents: read
+    runs-on: ${{ needs.package-windows-arm64-gate.outputs.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: C toolchain for the gated runner
+        if: runner.os == 'Linux' && runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      # A tarball named for a branch would be a release nobody tagged.
+      - name: refuse anything but a version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::release-cli packages a version tag, not $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
+      # The path dependency, at the tag the caller pins. Through env: a
+      # caller's input is text, and spliced into a script it would be code.
+      - name: clone the rust-fs-core sibling
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.core-ref }}
+        run: git clone --depth 1 --branch "$CORE_REF" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+
+      # THE NOTES BEFORE ANYTHING IS BUILT. A release's body is its CHANGELOG
+      # section, written by github-guard's changelog extraction through
+      # agent-skills' changelog-notes action: the same code the git-changelog
+      # pre-push guard checks the tag with, so the two cannot disagree. A tag
+      # the CHANGELOG does not describe stops here, before a tarball exists.
+      # One leg writes the file the attach job uses: that job checks nothing
+      # out, so the notes travel as an artifact. Not on a Windows leg: the
+      # guard is a bash script run by its #! line, and the unix legs have
+      # already refused the tag, so `attach`, which needs every leg, never
+      # runs for it.
+      - name: the CHANGELOG describes this version
+        if: runner.os != 'Windows'
+        uses: antimatter-studios/agent-skills/.github/actions/changelog-notes@ed0b96812c5908478dcd84543debf4d5f8bf87e3
+        with:
+          tag: ${{ github.ref_name }}
+          output-file: notes/release-notes.md
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
+        with:
+          toolchain: ${{ inputs.toolchain }}
+
+      # Statically on Windows: GitHub's runners have the Visual C++ runtime, and
+      # a clean Windows install does not, so a binary that imports it passes
+      # here and does not start there (#411).
+      - name: build the multi-call binary
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --release --locked --features cli --bin "${GITHUB_REPOSITORY##*/}"
+
+      # package-cli.sh prints the asset's name on stdout and checks the
+      # asset it built: exactly the contracted members, every dotted name
+      # a relative symlink (a copy of bin/<repo>.exe in a Windows leg's
+      # .zip), and every name answering --help and --version.
+      - name: package and check the tarball
+        id: pack
+        shell: bash
+        env:
+          LABEL: windows-arm64
+        run: |
+          set -euo pipefail
+          bash ../rust-fs-core/scripts/package-cli.sh "${GITHUB_REF_NAME#v}" "$LABEL" > "$RUNNER_TEMP/tarball"
+          tarball="$(tail -n 1 "$RUNNER_TEMP/tarball")"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          # A formula needs this to verify the download; in the job summary,
+          # updating one is a copy, not a re-download.
+          {
+            echo "### $tarball"
+            echo ""
+            echo '```'
+            # sha256sum where there is one (Linux, Git Bash on Windows),
+            # shasum on macOS, which has no sha256sum.
+            if command -v sha256sum >/dev/null 2>&1; then
+              echo "sha256 $(sha256sum "$tarball" | cut -d' ' -f1)"
+            else
+              echo "sha256 $(shasum -a 256 "$tarball" | cut -d' ' -f1)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # AN ARTIFACT, NOT THE RELEASE: a leg that published its own asset
+      # would do so whether or not the other leg later failed.
+      - name: keep the tarball for the attach job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-windows-arm64
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
+  attach-gate:
+    needs: [package-darwin-arm64, package-linux-x86_64, package-windows-x86_64, package-windows-arm64]
+    # The Windows jobs are skipped for a caller that leaves `windows` off.
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
 
   # The only job with a write grant, and it checks nothing out and builds
   # nothing: it downloads the legs' tarballs, attests their provenance, and
   # hands them to `gh`.
   attach:
     name: attest and attach the tools
-    needs: package
-    runs-on: ubuntu-latest
+    needs: [package-darwin-arm64, package-linux-x86_64, package-windows-x86_64, package-windows-arm64, attach-gate]
+    # The Windows jobs are skipped for a caller that leaves `windows` off; a
+    # skipped job must not stop the attach, a failed or cancelled one must.
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ${{ needs.attach-gate.outputs.runner }}
     permissions:
       contents: write
       id-token: write
