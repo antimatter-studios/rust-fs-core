@@ -931,8 +931,12 @@ impl<D: Driver> Run<'_, D> {
                 walk.extents
             )
         });
+        // Encoded runs are never merged: two units decode apart, even when
+        // they sit back to back on the source (rust-fs-core#463).
         let unmerged = walk.extents.windows(2).any(|pair| {
-            pair[0].end() == Some(pair[1].offset)
+            pair[0].encoded.is_none()
+                && pair[1].encoded.is_none()
+                && pair[0].end() == Some(pair[1].offset)
                 && pair[0].source.end() == Some(pair[1].source.offset)
                 && pair[0].uninitialized == pair[1].uninitialized
         });
@@ -942,9 +946,12 @@ impl<D: Driver> Run<'_, D> {
                 walk.extents
             )
         });
-        let mapped = walk.extents.iter().try_fold(0u64, |total, extent| {
-            total.checked_add(extent.source.length)
-        });
+        // In file bytes: an encoded unit can store more than it decodes to
+        // (rust-fs-core#462).
+        let mapped = walk
+            .extents
+            .iter()
+            .try_fold(0u64, |total, extent| total.checked_add(extent.length()));
         let fits = mapped.is_some_and(|mapped| mapped <= walk.claimed)
             && walk
                 .extents
@@ -952,7 +959,7 @@ impl<D: Driver> Run<'_, D> {
                 .all(|extent| extent.end().is_some_and(|end| end <= walk.claimed));
         self.check(Rule::Consistency, case, fits, || {
             format!(
-                "the walk of the candidate at byte {at} maps {mapped:?} of {} claimed bytes, or runs past them, and ends {:?}",
+                "the walk of the candidate at byte {at} covers {mapped:?} of {} claimed file bytes, or runs past them, and ends {:?}",
                 walk.claimed, walk.end
             )
         });
@@ -1792,7 +1799,7 @@ mod tests {
     //! Records: 64-byte slots after it, each naming a data extent.
 
     use super::*;
-    use crate::layers::salvage::{CandidateKind, ParentClaim, TreeNode};
+    use crate::layers::salvage::{CandidateKind, Encoding, ParentClaim, TreeNode, WalkExtent};
     use serde::Deserialize;
 
     const SLOT: u64 = 64;
@@ -1816,6 +1823,10 @@ mod tests {
         KeepsSource,
         /// Supports deleted candidates, but no image holds one.
         NoDeletedRecord,
+        /// Stores files compressed, as Btrfs does: `beta` in two encoded
+        /// units back to back on the source, and `alpha` in one unit stored
+        /// larger than it decodes to (rust-fs-core#462, #463).
+        EncodedUnits,
     }
 
     struct Toy(Quirk);
@@ -2077,6 +2088,33 @@ mod tests {
             let size = source.size_bytes();
             let claimed = candidate.size.unwrap_or(0);
             let start = candidate.detail.0;
+            if self.quirk == Quirk::EncodedUnits && candidate.state != CandidateState::Deleted {
+                // (stored, decoded) per unit, back to back from `start`.
+                let shape: &[(u64, u64)] = match claimed {
+                    5000 => &[(2500, 2500), (2500, 2500)],
+                    100 => &[(104, 100)],
+                    _ => &[],
+                };
+                if !shape.is_empty() {
+                    let (mut file_at, mut source_at) = (0, start);
+                    let mut extents = Vec::new();
+                    for &(stored, decoded) in shape {
+                        extents.push(WalkExtent {
+                            offset: file_at,
+                            source: Extent::new(source_at, stored),
+                            uninitialized: false,
+                            encoded: Some(Encoding::whole("identity", decoded)),
+                        });
+                        file_at += decoded;
+                        source_at += stored;
+                    }
+                    return Ok(ExtentWalk {
+                        extents,
+                        claimed,
+                        end: WalkEnd::Complete,
+                    });
+                }
+            }
             let (extents, end) = match start.checked_add(claimed) {
                 Some(stop) if stop <= size => (
                     (claimed > 0)
@@ -2162,6 +2200,15 @@ mod tests {
             let report = run(&Toy(quirk));
             assert!(report.conforms(), "{quirk:?}: {report}");
         }
+    }
+
+    /// Encoded units placed back to back are separate units, not an
+    /// unmerged extent, and a unit's stored size is not its file bytes
+    /// (rust-fs-core#462, #463).
+    #[test]
+    fn compressed_units_back_to_back_and_larger_than_they_decode_conform() {
+        let report = run(&Toy(Quirk::EncodedUnits));
+        assert!(report.conforms(), "{report}");
     }
 
     #[test]

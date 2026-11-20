@@ -706,9 +706,17 @@ fn check_walks<A: SalvageAdapter>(
         }
         let plan_length = walk.plan().length();
         let complete_covers = walk.end != WalkEnd::Complete || plan_length == Some(walk.claimed);
-        if !inside || !ordered || !within_claim || mapped > walk.claimed || !complete_covers {
+        // File bytes are compared with the claim, and stored bytes only with
+        // the source: an encoded unit can store more than it decodes to
+        // (rust-fs-core#462).
+        let covered = walk
+            .extents
+            .iter()
+            .try_fold(0u64, |total, e| total.checked_add(e.length()));
+        let fits = covered.is_some_and(|covered| covered <= walk.claimed);
+        if !inside || !ordered || !within_claim || !fits || !complete_covers {
             problems.push(format!(
-                "{:?}: mapped {mapped} of {} claimed, end {:?}, inside {inside}, in file order {ordered}, within the claim {within_claim}, plan {plan_length:?}",
+                "{:?}: covers {covered:?} file and maps {mapped} stored of {} claimed byte(s), end {:?}, inside {inside}, in file order {ordered}, within the claim {within_claim}, plan {plan_length:?}",
                 candidate.location, walk.claimed, walk.end
             ));
         }

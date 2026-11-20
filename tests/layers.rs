@@ -47,7 +47,10 @@ fn a_conforming_driver_passes_every_layer() {
         .iter()
         .find(|check| check.name == "cross.salvaged-bytes-match-files")
         .unwrap();
-    assert!(compared.detail.starts_with("6 compared"), "{cross}");
+    // Six plain or single-unit files, plus Btrfs's two shapes -- a unit
+    // stored larger than it decodes to, and two units back to back (#462,
+    // #463) -- and EROFS's tail in a shared fragment block.
+    assert!(compared.detail.starts_with("9 compared"), "{cross}");
 }
 
 #[test]

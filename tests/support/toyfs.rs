@@ -127,12 +127,37 @@ impl Builder {
     /// A file stored encoded: its bytes reversed, decoded by the `reverse`
     /// codec.
     pub fn encoded_file(&mut self, directory: u64, name: &str, contents: &[u8]) {
+        self.encoded_units(directory, name, contents, ONE_UNIT);
+    }
+
+    /// A file stored as the encoded units `kind` lays out ([`units`]), back
+    /// to back on the source. Each unit decodes to its window of the file
+    /// with filler around it, stored reversed, then any padding the unit
+    /// stores beyond what it decodes to.
+    pub fn encoded_units(&mut self, directory: u64, name: &str, contents: &[u8], kind: u8) {
         let first = self.next;
-        self.next += (contents.len() as u64).div_ceil(BLOCK).max(1);
-        let at = (first * BLOCK) as usize;
-        let reversed: Vec<u8> = contents.iter().rev().copied().collect();
-        self.image[at..at + contents.len()].copy_from_slice(&reversed);
-        self.entry(directory, 3, name.as_bytes(), first, contents.len() as u64);
+        let mut at = (first * BLOCK) as usize;
+        let mut taken = 0usize;
+        for unit in units(kind, contents.len() as u64) {
+            let share = &contents[taken..taken + unit.length as usize];
+            let mut decoded = vec![0xA7u8; unit.decoded as usize];
+            decoded[unit.offset as usize..(unit.offset + unit.length) as usize]
+                .copy_from_slice(share);
+            decoded.reverse();
+            self.image[at..at + decoded.len()].copy_from_slice(&decoded);
+            self.image[at + decoded.len()..at + unit.stored as usize].fill(0xEE);
+            at += unit.stored as usize;
+            taken += unit.length as usize;
+        }
+        let used = at as u64 - first * BLOCK;
+        self.next += used.div_ceil(BLOCK).max(1);
+        self.entry(
+            directory,
+            kind,
+            name.as_bytes(),
+            first,
+            contents.len() as u64,
+        );
     }
 
     pub fn deleted_file(&mut self, directory: u64, name: &str, contents: &[u8]) {
@@ -180,6 +205,14 @@ pub fn healthy() -> Vec<u8> {
     builder.file(deep, "leaf", b"leaf bytes");
     builder.deleted_file(2, "gone.txt", b"deleted but here");
     builder.encoded_file(docs, "packed.txt", b"stored reversed, read forwards");
+    // Btrfs's shapes (rust-fs-core#462, #463): a 49-byte file whose encoded
+    // unit is 54 bytes, and a file in two encoded units back to back.
+    builder.encoded_units(docs, "lzo.txt", &[b'z'; 49], PADDED_UNIT);
+    let pair: Vec<u8> = (0..300u32).map(|i| (i % 97) as u8).collect();
+    builder.encoded_units(docs, "zstd-pair.bin", &pair, TWO_UNITS);
+    // EROFS's shape (rust-fs-erofs#323): a 6-byte tail that is a window of
+    // a whole shared fragment block.
+    builder.encoded_units(deep, "tail", b"tail6!", FRAGMENT);
     builder.file_bytes(deep, b"caf\xe9", b"latin-1 name");
     builder.build()
 }
@@ -471,7 +504,8 @@ pub struct Node {
     kind: NodeKind,
     first: u64,
     size: u64,
-    encoded: bool,
+    /// The entry's kind, which says how an encoded file is laid out.
+    kind_byte: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -524,7 +558,7 @@ impl FileAPI for ToyVolume {
             kind: NodeKind::Directory,
             first: self.superblock.root,
             size: BLOCK,
-            encoded: false,
+            kind_byte: 2,
         })
     }
 
@@ -556,7 +590,7 @@ impl FileAPI for ToyVolume {
                         kind,
                         first: entry.first,
                         size: entry.size,
-                        encoded: entry.kind & 0x7f == 3,
+                        kind_byte: entry.kind & 0x7f,
                     },
                 }
             })
@@ -584,15 +618,11 @@ impl FileAPI for ToyVolume {
         if self.has(Bug::ShortFirstRead) && offset == 0 && count > 1 {
             count -= 1;
         }
-        if file.encoded {
-            let read = decode_reversed(
-                &self.source,
-                Extent::new(file.first * BLOCK, file.size),
-                offset,
-                &mut output[..count],
-            )
-            .map_err(|_| ToyError::Corrupt("encoded file"))?;
-            return Ok(read);
+        if !units(file.kind_byte, file.size).is_empty() {
+            let bytes = decode_file(&self.source, file.first, file.kind_byte, file.size)
+                .map_err(|_| ToyError::Corrupt("encoded file"))?;
+            output[..count].copy_from_slice(&bytes[offset as usize..offset as usize + count]);
+            return Ok(count);
         }
         self.source
             .read_at(file.first * BLOCK + offset, &mut output[..count])?;
@@ -602,6 +632,87 @@ impl FileAPI for ToyVolume {
     fn names_match(&self, stored: &str, wanted: &str) -> bool {
         stored.eq_ignore_ascii_case(wanted)
     }
+}
+
+/// One encoded unit holding the whole file.
+pub const ONE_UNIT: u8 = 3;
+/// Two encoded units, back to back on the source, as Btrfs places
+/// consecutive compressed extents.
+pub const TWO_UNITS: u8 = 4;
+/// One encoded unit stored larger than it decodes to, as LZO stores a short
+/// file: five bytes of overhead after the data.
+pub const PADDED_UNIT: u8 = 5;
+
+/// A file's tail in a shared fragment block, as EROFS and SquashFS store
+/// one: the unit decodes to a whole block of other files' tails, and this
+/// file's bytes are a short window of it.
+pub const FRAGMENT: u8 = 6;
+
+/// One encoded unit of a file: `stored` bytes on the source that decode to
+/// `decoded` bytes, of which `offset..offset + length` are the file's.
+#[derive(Clone, Copy, Debug)]
+pub struct Unit {
+    pub stored: u64,
+    pub decoded: u64,
+    pub offset: u64,
+    pub length: u64,
+}
+
+impl Unit {
+    fn whole(stored: u64, decoded: u64) -> Self {
+        Self {
+            stored,
+            decoded,
+            offset: 0,
+            length: decoded,
+        }
+    }
+}
+
+/// The encoded units of a `size`-byte file of this kind, in file order;
+/// empty for a plain file.
+pub fn units(kind: u8, size: u64) -> Vec<Unit> {
+    match kind {
+        ONE_UNIT => vec![Unit::whole(size, size)],
+        TWO_UNITS => {
+            let first = size.div_ceil(2);
+            vec![
+                Unit::whole(first, first),
+                Unit::whole(size - first, size - first),
+            ]
+        }
+        PADDED_UNIT => vec![Unit::whole(size + 5, size)],
+        FRAGMENT => vec![Unit {
+            stored: BLOCK,
+            decoded: BLOCK,
+            offset: 100,
+            length: size,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// An encoded file's bytes: each unit's decoded share, in order.
+fn decode_file(
+    source: &dyn BlockRead,
+    first: u64,
+    kind: u8,
+    size: u64,
+) -> Result<Vec<u8>, SalvageError> {
+    let mut out = Vec::new();
+    let mut at = first * BLOCK;
+    for unit in units(kind, size) {
+        let mut share = vec![0u8; unit.length as usize];
+        decode_reversed(
+            source,
+            Extent::new(at, unit.decoded),
+            unit.offset,
+            &mut share,
+        )?;
+        out.extend(share);
+        at += unit.stored;
+    }
+    Ok(out)
 }
 
 /// The `reverse` codec: the stored bytes, reversed.
@@ -635,8 +746,8 @@ fn decode_reversed(
 pub struct ToyDetail {
     pub first: u64,
     pub directory: u64,
-    /// Stored by the `reverse` codec.
-    pub encoded: bool,
+    /// The entry's kind, which says how an encoded file is laid out.
+    pub kind: u8,
     /// The entry's name as stored, which `name` may hold lossily.
     pub name: Vec<u8>,
 }
@@ -703,7 +814,7 @@ impl SalvageAdapter for ToyAdapter {
                     detail: ToyDetail {
                         first: entry.first,
                         directory: block,
-                        encoded: entry.kind & 0x7f == 3,
+                        kind: entry.kind & 0x7f,
                         name: entry.name.clone(),
                     },
                 };
@@ -735,14 +846,27 @@ impl SalvageAdapter for ToyAdapter {
                 WalkEnd::OutOfRange,
             ));
         }
-        if candidate.detail.encoded && claimed > 0 {
-            return Ok(ExtentWalk {
-                extents: vec![WalkExtent {
-                    offset: 0,
-                    source: Extent::new(start, claimed),
+        let encoded = units(candidate.detail.kind, claimed);
+        if !encoded.is_empty() && claimed > 0 {
+            let mut extents = Vec::new();
+            let (mut file_at, mut source_at) = (0u64, start);
+            for unit in encoded {
+                extents.push(WalkExtent {
+                    offset: file_at,
+                    source: Extent::new(source_at, unit.stored),
                     uninitialized: false,
-                    encoded: Some(Encoding::whole("reverse", claimed)),
-                }],
+                    encoded: Some(Encoding {
+                        codec: "reverse".into(),
+                        decoded: unit.decoded,
+                        offset: unit.offset,
+                        length: unit.length,
+                    }),
+                });
+                file_at += unit.length;
+                source_at += unit.stored;
+            }
+            return Ok(ExtentWalk {
+                extents,
                 claimed,
                 end: WalkEnd::Complete,
             });
@@ -862,9 +986,14 @@ impl SalvageAdapter for ToyAdapter {
         }
         // The run is decoded[encoding.offset ..][.. encoding.length].
         let want = (encoding.length - offset).min(output.len() as u64) as usize;
+        // The decoded bytes are the first `decoded` stored bytes, reversed;
+        // anything stored past them is the unit's overhead.
+        if encoding.decoded > stored.length {
+            return Err(SalvageError::Bounds);
+        }
         decode_reversed(
             source,
-            stored,
+            Extent::new(stored.offset, encoding.decoded),
             encoding.offset + offset,
             &mut output[..want],
         )

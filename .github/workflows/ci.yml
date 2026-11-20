@@ -83,13 +83,13 @@ jobs:
           AUTHOR: ${{ github.event.pull_request.user.login }}
           SENDER: ${{ github.event.sender.login }}
           GH_ACTOR: ${{ github.actor }}
-          CODE: ${{ steps.c.outputs.code }}
           JOBS: fmt msrv semver
         run: |
           set -euo pipefail
-          # test-ubuntu and coverage run only when the code changed; an unused
-          # pick holds a runner slot for 2 minutes.
-          [ "$CODE" != true ] || JOBS="$JOBS test-ubuntu coverage"
+          # test-ubuntu and coverage are never picked: both load the zfs kernel
+          # module (`sudo modprobe zfs`) for the device and transfer oracles,
+          # and a self-hosted runner has no kmod and may not load modules at
+          # all. They always run on GitHub's ubuntu-24.04.
           ours=true
           for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
             [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
@@ -116,7 +116,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && (fromJSON(needs.changes.outputs.runners)['test-ubuntu'] || 'ubuntu-24.04') || matrix.os }}
+    # The Linux leg loads kernel modules, so it is never sent to a gated
+    # self-hosted runner (see "Pick runners").
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
@@ -251,7 +253,9 @@ jobs:
     name: coverage
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['coverage'] || 'ubuntu-24.04' }}
+    # Loads kernel modules, so it is never sent to a gated self-hosted runner
+    # (see "Pick runners").
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
