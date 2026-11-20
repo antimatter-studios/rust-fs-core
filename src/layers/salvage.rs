@@ -274,9 +274,11 @@ pub enum Integrity {
 
 /// A possible object found in raw bytes, never a trusted file.
 ///
-/// `location.offset` identifies the candidate within one source; trees and
-/// callers refer to candidates by it. `detail` holds the format-specific
-/// fields the driver needs to walk the candidate again.
+/// [`SalvageAdapter::candidate_id`] identifies the candidate within one
+/// source, and trees and callers refer to candidates by it. It is
+/// `location.offset` unless the driver's records share source bytes.
+/// `detail` holds the format-specific fields the driver needs to walk the
+/// candidate again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate<D> {
@@ -301,6 +303,10 @@ pub struct ScanReport {
     /// decoded, and no candidate overlapping them was reported.
     pub unreadable: Vec<Extent>,
     /// Set when the sink stopped the scan: the first byte not yet scanned.
+    /// When several candidates share one record and the sink stopped among
+    /// them, this is the record's first byte, and a scan resumed there
+    /// delivers that record's candidates again; a caller drops the ones it
+    /// already has by [`SalvageAdapter::candidate_id`].
     pub stopped_at: Option<u64>,
 }
 
@@ -495,7 +501,7 @@ impl ExtentWalk {
 #[serde(rename_all = "kebab-case")]
 pub enum Parent {
     Root,
-    /// The parent candidate's `location.offset`.
+    /// The parent candidate's [`SalvageAdapter::candidate_id`].
     Candidate(u64),
 }
 
@@ -535,7 +541,7 @@ impl ParentClaim {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TreeNode {
-    /// The candidate's `location.offset`.
+    /// The candidate's [`SalvageAdapter::candidate_id`].
     pub candidate: u64,
     /// Every parent claim found. None makes an orphan. More than one is
     /// either hard links, on a format that has them, or conflicting claims;
@@ -759,6 +765,18 @@ pub trait SalvageAdapter {
 
     /// What this adapter lacks. An empty list means nothing.
     fn capabilities(&self) -> Capabilities;
+
+    /// The candidate's identity within one source, which trees and parent
+    /// claims name: unique among the candidates of a source, and the same in
+    /// every scan of it. Defaults to `location.offset`, the record's first
+    /// byte, which identifies a candidate when every record has source bytes
+    /// of its own. A driver whose records share source bytes overrides it
+    /// with an address of its own. SquashFS inodes, packed into one
+    /// compressed metadata block, use their inode reference: the block's
+    /// offset shifted left 16 bits, plus the offset in the decoded block.
+    fn candidate_id(&self, candidate: &Candidate<Self::Detail>) -> u64 {
+        candidate.location.offset
+    }
 
     /// Streams every candidate whose record starts inside `range`, live,
     /// deleted or damaged, to `sink`. A record may extend past the range end.

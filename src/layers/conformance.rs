@@ -567,9 +567,10 @@ fn check_resume<A: SalvageAdapter>(
     size: u64,
     report: &mut Report,
 ) {
+    let adapter = salvage.adapter();
     let mut first = None;
     let mut stop = |candidate: Candidate<A::Detail>| {
-        first = Some(candidate.location.offset);
+        first = Some(adapter.candidate_id(&candidate));
         ControlFlow::Break(())
     };
     let stopped = salvage.find_candidates(Extent::new(0, size), &mut stop);
@@ -587,11 +588,11 @@ fn check_resume<A: SalvageAdapter>(
     };
     let mut rest = Vec::new();
     let resumed = salvage.find_candidates(Extent::new(at, size - at), &mut rest);
-    let found: HashSet<u64> = rest.iter().map(|c| c.location.offset).collect();
+    let found: HashSet<u64> = rest.iter().map(|c| adapter.candidate_id(c)).collect();
     let lost: Vec<u64> = candidates
         .iter()
-        .map(|c| c.location.offset)
-        .filter(|offset| *offset != first && !found.contains(offset))
+        .map(|c| adapter.candidate_id(c))
+        .filter(|id| *id != first && !found.contains(id))
         .collect();
     report.record(
         "primitive.scan-resume-loses-nothing",
@@ -760,13 +761,14 @@ fn check_tree<A: SalvageAdapter>(
         Ok(tree) => tree,
         Err(error) => return report.record("primitive.tree", false, error.to_string()),
     };
-    let offsets: HashSet<u64> = candidates.iter().map(|c| c.location.offset).collect();
+    let adapter = salvage.adapter();
+    let offsets: HashSet<u64> = candidates.iter().map(|c| adapter.candidate_id(c)).collect();
     let in_order = tree.nodes.len() == candidates.len()
         && tree
             .nodes
             .iter()
             .zip(candidates)
-            .all(|(node, candidate)| node.candidate == candidate.location.offset);
+            .all(|(node, candidate)| node.candidate == adapter.candidate_id(candidate));
     let dangling: Vec<_> = tree
         .nodes
         .iter()

@@ -628,18 +628,18 @@ impl<D: Driver> Run<'_, D> {
         );
         self.scan_evidence(subject, whole, &report, &found);
 
-        let mut offsets: Vec<u64> = found
+        let mut ids: Vec<u64> = found
             .iter()
-            .map(|candidate| candidate.location.offset)
+            .map(|candidate| adapter.candidate_id(candidate))
             .collect();
-        offsets.sort_unstable();
-        let shared: Vec<_> = offsets
+        ids.sort_unstable();
+        let shared: Vec<_> = ids
             .windows(2)
             .filter(|pair| pair[0] == pair[1])
             .map(|pair| pair[0])
             .collect();
         self.check(Rule::Consistency, case, shared.is_empty(), || {
-            format!("candidates share the location offsets that identify them: {shared:?}")
+            format!("candidates share the ids that identify them: {shared:?}")
         });
 
         let deleted = found
@@ -673,7 +673,12 @@ impl<D: Driver> Run<'_, D> {
         );
         for index in sample(found.len()) {
             self.resume(subject, &found, index);
-            self.rescan(subject, &found[index]);
+            let packed = found
+                .iter()
+                .filter(|other| other.location == found[index].location)
+                .count()
+                > 1;
+            self.rescan(subject, &found[index], packed);
         }
         for range in [Extent::new(size, 1), Extent::new(u64::MAX, 2)] {
             let result = adapter.find_candidates(*image, range, &mut Vec::new());
@@ -786,10 +791,19 @@ impl<D: Driver> Run<'_, D> {
         };
         let result = adapter.find_candidates(*image, Extent::new(0, size), &mut take);
         let offset = found[index].location.offset;
+        // A stop among candidates that share a record may resume at the
+        // record, which then delivers its candidates again.
+        let packed = found
+            .iter()
+            .filter(|other| other.location == found[index].location)
+            .count()
+            > 1;
         let resume = match &result {
-            Ok(report) if report.candidates == index as u64 + 1 => report
-                .stopped_at
-                .filter(|resume| *resume > offset && *resume <= size),
+            Ok(report) if report.candidates == index as u64 + 1 => {
+                report.stopped_at.filter(|resume| {
+                    (*resume > offset || (packed && *resume == offset)) && *resume <= size
+                })
+            }
             _ => None,
         };
         let Some(resume) = resume else {
@@ -804,7 +818,15 @@ impl<D: Driver> Run<'_, D> {
         let rest_range = Extent::new(resume, size - resume);
         let mut rest = Vec::new();
         let result = adapter.find_candidates(*image, rest_range, &mut rest);
-        let same = result.is_ok() && rest[..] == found[index + 1..];
+        let delivered: HashSet<u64> = first
+            .iter()
+            .map(|candidate| adapter.candidate_id(candidate))
+            .collect();
+        let again = rest
+            .iter()
+            .take_while(|candidate| delivered.contains(&adapter.candidate_id(candidate)))
+            .count();
+        let same = result.is_ok() && rest[again..] == found[index + 1..];
         self.check(Rule::Consistency, case, same, || {
             format!("resuming at byte {resume} after candidate {index} found other candidates than the whole scan: {result:?}")
         });
@@ -813,13 +835,24 @@ impl<D: Driver> Run<'_, D> {
         }
     }
 
-    /// Scans a candidate's own record, which must find it again first.
-    fn rescan(&mut self, subject: &Subject<'_, D::Adapter>, candidate: &Candidate<Detail<D>>) {
+    /// Scans a candidate's own record, which must find it again first, or,
+    /// when several candidates share the record, among them.
+    fn rescan(
+        &mut self,
+        subject: &Subject<'_, D::Adapter>,
+        candidate: &Candidate<Detail<D>>,
+        packed: bool,
+    ) {
         let mut found = Vec::new();
         let result = subject
             .adapter
             .find_candidates(subject.image, candidate.location, &mut found);
-        let again = result.is_ok() && found.first() == Some(candidate);
+        let again = result.is_ok()
+            && if packed {
+                found.contains(candidate)
+            } else {
+                found.first() == Some(candidate)
+            };
         self.check(Rule::Consistency, subject.case, again, || {
             format!(
                 "a scan of the record at {:?} did not find its candidate again: {result:?}",
@@ -995,7 +1028,7 @@ impl<D: Driver> Run<'_, D> {
                 .nodes
                 .iter()
                 .zip(candidates)
-                .all(|(node, candidate)| node.candidate == candidate.location.offset);
+                .all(|(node, candidate)| node.candidate == adapter.candidate_id(candidate));
         self.check(Rule::Consistency, case, in_order, || {
             format!(
                 "the tree holds {} node(s) for {} candidate(s), not one per candidate in input order",
@@ -1005,7 +1038,7 @@ impl<D: Driver> Run<'_, D> {
         });
         let known: HashSet<u64> = candidates
             .iter()
-            .map(|candidate| candidate.location.offset)
+            .map(|candidate| adapter.candidate_id(candidate))
             .collect();
         let unresolved: Vec<_> = tree
             .nodes
@@ -1827,6 +1860,10 @@ mod tests {
         /// units back to back on the source, and `alpha` in one unit stored
         /// larger than it decodes to (rust-fs-core#462, #463).
         EncodedUnits,
+        /// Packs two candidates into each record, as SquashFS packs inodes
+        /// into one compressed metadata block: both share the record's
+        /// location, and `candidate_id` tells them apart (rust-fs-core#467).
+        PackedRecords,
     }
 
     struct Toy(Quirk);
@@ -2022,6 +2059,15 @@ mod tests {
             Capabilities { missing }
         }
 
+        fn candidate_id(&self, candidate: &Candidate<Start>) -> u64 {
+            match self.quirk {
+                // Two candidates per record: the record's offset, and which
+                // of the pair (its start is the record's, or one past it).
+                Quirk::PackedRecords => candidate.location.offset * 2 + candidate.detail.0 % 2,
+                _ => candidate.location.offset,
+            }
+        }
+
         fn find_candidates(
             &self,
             source: &dyn BlockRead,
@@ -2063,9 +2109,28 @@ mod tests {
                             size: Some(record.length),
                             detail: Start(record.start),
                         };
+                        let twin = (self.quirk == Quirk::PackedRecords).then(|| Candidate {
+                            name: candidate.name.as_ref().map(|name| format!("{name}-twin")),
+                            detail: Start(candidate.detail.0 + 1),
+                            ..candidate.clone()
+                        });
                         if sink.accept(candidate).is_break() {
-                            report.stopped_at = Some(position + SLOT);
+                            // A stop between the record's two candidates
+                            // resumes at the record, which delivers the first
+                            // again.
+                            report.stopped_at = Some(if twin.is_some() {
+                                position
+                            } else {
+                                position + SLOT
+                            });
                             return Ok(report);
+                        }
+                        if let Some(twin) = twin {
+                            report.candidates += 1;
+                            if sink.accept(twin).is_break() {
+                                report.stopped_at = Some(position + SLOT);
+                                return Ok(report);
+                            }
                         }
                     }
                 }
@@ -2137,7 +2202,7 @@ mod tests {
             let nodes = candidates
                 .iter()
                 .map(|candidate| TreeNode {
-                    candidate: candidate.location.offset,
+                    candidate: self.candidate_id(candidate),
                     parents: vec![ParentClaim::live(Parent::Root)],
                 })
                 .collect();
@@ -2208,6 +2273,14 @@ mod tests {
     #[test]
     fn compressed_units_back_to_back_and_larger_than_they_decode_conform() {
         let report = run(&Toy(Quirk::EncodedUnits));
+        assert!(report.conforms(), "{report}");
+    }
+
+    /// Candidates packed into one record share its location and are told
+    /// apart by their ids (rust-fs-core#467).
+    #[test]
+    fn candidates_packed_in_one_record_conform() {
+        let report = run(&Toy(Quirk::PackedRecords));
         assert!(report.conforms(), "{report}");
     }
 
