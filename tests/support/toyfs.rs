@@ -131,19 +131,23 @@ impl Builder {
     }
 
     /// A file stored as the encoded units `kind` lays out ([`units`]), back
-    /// to back on the source: each unit is its share of the file reversed,
-    /// then any padding the unit stores beyond what it decodes to.
+    /// to back on the source. Each unit decodes to its window of the file
+    /// with filler around it, stored reversed, then any padding the unit
+    /// stores beyond what it decodes to.
     pub fn encoded_units(&mut self, directory: u64, name: &str, contents: &[u8], kind: u8) {
         let first = self.next;
         let mut at = (first * BLOCK) as usize;
         let mut taken = 0usize;
-        for (stored, decoded) in units(kind, contents.len() as u64) {
-            let share = &contents[taken..taken + decoded as usize];
-            let reversed: Vec<u8> = share.iter().rev().copied().collect();
-            self.image[at..at + share.len()].copy_from_slice(&reversed);
-            self.image[at + share.len()..at + stored as usize].fill(0xEE);
-            at += stored as usize;
-            taken += decoded as usize;
+        for unit in units(kind, contents.len() as u64) {
+            let share = &contents[taken..taken + unit.length as usize];
+            let mut decoded = vec![0xA7u8; unit.decoded as usize];
+            decoded[unit.offset as usize..(unit.offset + unit.length) as usize]
+                .copy_from_slice(share);
+            decoded.reverse();
+            self.image[at..at + decoded.len()].copy_from_slice(&decoded);
+            self.image[at + decoded.len()..at + unit.stored as usize].fill(0xEE);
+            at += unit.stored as usize;
+            taken += unit.length as usize;
         }
         let used = at as u64 - first * BLOCK;
         self.next += used.div_ceil(BLOCK).max(1);
@@ -206,6 +210,9 @@ pub fn healthy() -> Vec<u8> {
     builder.encoded_units(docs, "lzo.txt", &[b'z'; 49], PADDED_UNIT);
     let pair: Vec<u8> = (0..300u32).map(|i| (i % 97) as u8).collect();
     builder.encoded_units(docs, "zstd-pair.bin", &pair, TWO_UNITS);
+    // EROFS's shape (rust-fs-erofs#323): a 6-byte tail that is a window of
+    // a whole shared fragment block.
+    builder.encoded_units(deep, "tail", b"tail6!", FRAGMENT);
     builder.file_bytes(deep, b"caf\xe9", b"latin-1 name");
     builder.build()
 }
@@ -636,16 +643,51 @@ pub const TWO_UNITS: u8 = 4;
 /// file: five bytes of overhead after the data.
 pub const PADDED_UNIT: u8 = 5;
 
-/// The `(stored, decoded)` sizes of the encoded units of a `size`-byte file
-/// of this kind, in file order; empty for a plain file.
-pub fn units(kind: u8, size: u64) -> Vec<(u64, u64)> {
+/// A file's tail in a shared fragment block, as EROFS and SquashFS store
+/// one: the unit decodes to a whole block of other files' tails, and this
+/// file's bytes are a short window of it.
+pub const FRAGMENT: u8 = 6;
+
+/// One encoded unit of a file: `stored` bytes on the source that decode to
+/// `decoded` bytes, of which `offset..offset + length` are the file's.
+#[derive(Clone, Copy, Debug)]
+pub struct Unit {
+    pub stored: u64,
+    pub decoded: u64,
+    pub offset: u64,
+    pub length: u64,
+}
+
+impl Unit {
+    fn whole(stored: u64, decoded: u64) -> Self {
+        Self {
+            stored,
+            decoded,
+            offset: 0,
+            length: decoded,
+        }
+    }
+}
+
+/// The encoded units of a `size`-byte file of this kind, in file order;
+/// empty for a plain file.
+pub fn units(kind: u8, size: u64) -> Vec<Unit> {
     match kind {
-        ONE_UNIT => vec![(size, size)],
+        ONE_UNIT => vec![Unit::whole(size, size)],
         TWO_UNITS => {
             let first = size.div_ceil(2);
-            vec![(first, first), (size - first, size - first)]
+            vec![
+                Unit::whole(first, first),
+                Unit::whole(size - first, size - first),
+            ]
         }
-        PADDED_UNIT => vec![(size + 5, size)],
+        PADDED_UNIT => vec![Unit::whole(size + 5, size)],
+        FRAGMENT => vec![Unit {
+            stored: BLOCK,
+            decoded: BLOCK,
+            offset: 100,
+            length: size,
+        }],
         _ => Vec::new(),
     }
 }
@@ -659,11 +701,16 @@ fn decode_file(
 ) -> Result<Vec<u8>, SalvageError> {
     let mut out = Vec::new();
     let mut at = first * BLOCK;
-    for (stored, decoded) in units(kind, size) {
-        let mut share = vec![0u8; decoded as usize];
-        decode_reversed(source, Extent::new(at, decoded), 0, &mut share)?;
+    for unit in units(kind, size) {
+        let mut share = vec![0u8; unit.length as usize];
+        decode_reversed(
+            source,
+            Extent::new(at, unit.decoded),
+            unit.offset,
+            &mut share,
+        )?;
         out.extend(share);
-        at += stored;
+        at += unit.stored;
     }
     Ok(out)
 }
@@ -803,20 +850,20 @@ impl SalvageAdapter for ToyAdapter {
         if !encoded.is_empty() && claimed > 0 {
             let mut extents = Vec::new();
             let (mut file_at, mut source_at) = (0u64, start);
-            for (stored, decoded) in encoded {
+            for unit in encoded {
                 extents.push(WalkExtent {
                     offset: file_at,
-                    source: Extent::new(source_at, stored),
+                    source: Extent::new(source_at, unit.stored),
                     uninitialized: false,
                     encoded: Some(Encoding {
                         codec: "reverse".into(),
-                        decoded,
-                        offset: 0,
-                        length: decoded,
+                        decoded: unit.decoded,
+                        offset: unit.offset,
+                        length: unit.length,
                     }),
                 });
-                file_at += decoded;
-                source_at += stored;
+                file_at += unit.length;
+                source_at += unit.stored;
             }
             return Ok(ExtentWalk {
                 extents,
