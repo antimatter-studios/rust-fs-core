@@ -14,13 +14,7 @@
 - **The salvage adapter, its evidence types and plans moved here from
   rust-fs-exfat.** `SalvageAdapter`, `Candidate`, `ExtentWalk`, `Tree`,
   `Damage`, `Plan`, `PlanReader` and the reports are unchanged in shape, and a
-  plan's digest is the value rust-fs-exfat computed. Two changes from
-  rust-fs-exfat's shape, found while fitting ext4: an `ExtentWalk` holds
-  file-ordered `WalkExtent`s with file offsets and an `uninitialized` flag,
-  so holes and unwritten extents survive (`ExtentWalk::plan()` rebuilds the
-  data in place, `ExtentWalk::contiguous` builds a chain-shaped walk); and a
-  tree node's parents are `ParentClaim`s carrying the claiming entry's name
-  and state, so hard links and deleted entries are told apart. `Feature`, `DamageKind`
+  plan's digest is the value rust-fs-exfat computed. `Feature`, `DamageKind`
   and `SalvageError` are now `#[non_exhaustive]`, so later releases can add to
   them.
 - **A conformance helper any driver runs over its own images.**
