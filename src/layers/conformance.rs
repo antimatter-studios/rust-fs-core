@@ -118,6 +118,11 @@ pub struct Limits {
     pub max_depth: usize,
     /// Candidates whose extents are walked.
     pub max_walks: usize,
+    /// Paths resolved through [`FileAPI::lookup_bytes`], spread evenly over
+    /// the tree: each lookup reads every directory on its path, so one per
+    /// entry is quadratic in a large directory. Lossy names are always
+    /// resolved.
+    pub max_lookups: usize,
 }
 
 impl Default for Limits {
@@ -126,6 +131,7 @@ impl Default for Limits {
             max_nodes: 4096,
             max_depth: 32,
             max_walks: 1024,
+            max_lookups: 4096,
         }
     }
 }
@@ -964,7 +970,7 @@ pub fn check_files<V: FileAPI>(volume: &V, expected: &[Expected], limits: &Limit
     );
 
     let walk = walk_tree(volume, root, limits, &mut report);
-    check_walked(volume, &walk, &mut report);
+    check_walked(volume, &walk, limits, &mut report);
     check_refusals(volume, &walk, &mut report);
     check_expected(volume, expected, &mut report);
     report
@@ -1061,12 +1067,19 @@ fn walk_tree<V: FileAPI>(
     walked
 }
 
-fn check_walked<V: FileAPI>(volume: &V, walk: &[Walked<V::Node>], report: &mut Report) {
+fn check_walked<V: FileAPI>(
+    volume: &V,
+    walk: &[Walked<V::Node>],
+    limits: &Limits,
+    report: &mut Report,
+) {
     let mut metadata_problems = Vec::new();
     let mut read_problems = Vec::new();
     let mut lookup_problems = Vec::new();
     let mut files = 0usize;
-    for Walked { path, bytes, entry } in walk {
+    let mut looked_up = 0usize;
+    let stride = walk.len().div_ceil(limits.max_lookups.max(1)).max(1);
+    for (index, Walked { path, bytes, entry }) in walk.iter().enumerate() {
         let metadata = match volume.metadata(&entry.node) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -1082,12 +1095,15 @@ fn check_walked<V: FileAPI>(volume: &V, walk: &[Walked<V::Node>], report: &mut R
                 entry.kind, entry.size, metadata.kind, metadata.size
             ));
         }
-        match volume
-            .lookup_bytes(bytes)
-            .and_then(|node| volume.metadata(&node))
-        {
-            Ok(found) if found == metadata => {}
-            other => lookup_problems.push(format!("{path}: {}", describe(&other))),
+        if index % stride == 0 || entry.lossy {
+            looked_up += 1;
+            match volume
+                .lookup_bytes(bytes)
+                .and_then(|node| volume.metadata(&node))
+            {
+                Ok(found) if found == metadata => {}
+                other => lookup_problems.push(format!("{path}: {}", describe(&other))),
+            }
         }
         if entry.kind == NodeKind::File {
             files += 1;
@@ -1104,7 +1120,10 @@ fn check_walked<V: FileAPI>(volume: &V, walk: &[Walked<V::Node>], report: &mut R
     report.record(
         "file.paths-resolve",
         lookup_problems.is_empty(),
-        format!("{lookup_problems:?}"),
+        format!(
+            "{looked_up} of {} path(s) resolved; {lookup_problems:?}",
+            walk.len()
+        ),
     );
     report.record(
         "file.files-read-back",
@@ -1266,8 +1285,12 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
     // A candidate's names: its own, and those its live parent claims give
     // it, since an inode format keeps names in directory entries.
     let claims = salvage.rebuild_tree(&candidates).ok();
-    let names_of = |index: usize| -> Vec<Vec<u8>> {
-        let own = candidates[index].name.clone().map(String::into_bytes);
+    let mut named: Vec<(Vec<u8>, usize)> = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidate.kind != CandidateKind::File || candidate.state != CandidateState::Live {
+            continue;
+        }
+        let own = candidate.name.clone().map(String::into_bytes);
         let claimed = claims
             .as_ref()
             .and_then(|tree| tree.nodes.get(index))
@@ -1275,8 +1298,14 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
             .flat_map(|node| node.parents.iter())
             .filter(|claim| claim.state == CandidateState::Live)
             .filter_map(|claim| claim.name.clone());
-        own.into_iter().chain(claimed).collect()
-    };
+        for name in own.into_iter().chain(claimed) {
+            named.push((name, index));
+        }
+    }
+    let mut exact: std::collections::HashMap<&[u8], Vec<usize>> = Default::default();
+    for (name, index) in &named {
+        exact.entry(name.as_slice()).or_default().push(*index);
+    }
     let mut missing = Vec::new();
     let mut different = Vec::new();
     let mut compared = 0usize;
@@ -1284,18 +1313,19 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
         .iter()
         .filter(|w| w.entry.kind == NodeKind::File && w.entry.size > 0)
     {
-        let mut matching: Vec<_> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(index, c)| {
-                c.kind == CandidateKind::File
-                    && c.state == CandidateState::Live
-                    && names_of(*index)
-                        .iter()
-                        .any(|name| volume.names_match_bytes(name, &entry.bytes))
-            })
-            .map(|(_, c)| c)
-            .collect();
+        // Exact bytes first; the driver's own matching, such as case
+        // folding, only when nothing matches exactly.
+        let mut indices: Vec<usize> = match exact.get(entry.bytes.as_slice()) {
+            Some(found) => found.clone(),
+            None => named
+                .iter()
+                .filter(|(name, _)| volume.names_match_bytes(name, &entry.bytes))
+                .map(|(_, index)| *index)
+                .collect(),
+        };
+        indices.sort_unstable();
+        indices.dedup();
+        let mut matching: Vec<_> = indices.iter().map(|index| &candidates[*index]).collect();
         if matching.is_empty() {
             missing.push(path.clone());
             continue;
