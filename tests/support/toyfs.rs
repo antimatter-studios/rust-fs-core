@@ -738,10 +738,7 @@ impl SalvageAdapter for ToyAdapter {
                     offset: 0,
                     source: Extent::new(start, claimed),
                     uninitialized: false,
-                    encoded: Some(Encoding {
-                        codec: "reverse".into(),
-                        length: claimed,
-                    }),
+                    encoded: Some(Encoding::whole("reverse", claimed)),
                 }],
                 claimed,
                 end: WalkEnd::Complete,
@@ -850,14 +847,24 @@ impl SalvageAdapter for ToyAdapter {
         &self,
         source: &dyn BlockRead,
         stored: Extent,
-        codec: &str,
+        encoding: &Encoding,
         offset: u64,
         output: &mut [u8],
     ) -> Result<usize, SalvageError> {
-        if codec != "reverse" || self.bugs.contains(&Bug::EncodedUndecoded) {
+        if encoding.codec != "reverse" || self.bugs.contains(&Bug::EncodedUndecoded) {
             return Err(SalvageError::Unsupported(Feature::EncodedExtents));
         }
-        decode_reversed(source, stored, offset, output)
+        if offset > encoding.length {
+            return Err(SalvageError::Bounds);
+        }
+        // The run is decoded[encoding.offset ..][.. encoding.length].
+        let want = (encoding.length - offset).min(output.len() as u64) as usize;
+        decode_reversed(
+            source,
+            stored,
+            encoding.offset + offset,
+            &mut output[..want],
+        )
     }
 
     fn cluster_layout(&self) -> Result<ClusterLayout, SalvageError> {

@@ -2,7 +2,8 @@
 //! how a plan resolves onto source bytes before anything is read.
 
 use super::{
-    append, append_encoded, Extent, Feature, MaterializedRange, SalvageAdapter, SalvageError,
+    append, append_encoded, Encoding, Extent, Feature, MaterializedRange, SalvageAdapter,
+    SalvageError,
 };
 use crate::BlockRead;
 use serde::{Deserialize, Serialize};
@@ -31,13 +32,10 @@ pub enum PlanStep {
     /// adapter's [`ClusterLayout`]. A cluster is the format's allocation
     /// unit, whatever the format calls it.
     Clusters { first: u64, count: u64 },
-    /// Emit the `length` bytes that the encoded `source` bytes decode to,
-    /// through the adapter's [`SalvageAdapter::read_encoded`].
-    Encoded {
-        source: Extent,
-        codec: String,
-        length: u64,
-    },
+    /// Emit the run of file bytes that the encoded `source` bytes decode to,
+    /// as `encoding` names it, through the adapter's
+    /// [`SalvageAdapter::read_encoded`].
+    Encoded { source: Extent, encoding: Encoding },
 }
 
 /// How a format numbers its allocation units on the source: cluster `first`
@@ -176,7 +174,7 @@ impl Plan {
                 PlanStep::Extent(extent) => extent.length,
                 PlanStep::Zeros(length) => *length,
                 PlanStep::Bytes(bytes) => bytes.len() as u64,
-                PlanStep::Encoded { length, .. } => *length,
+                PlanStep::Encoded { encoding, .. } => encoding.length,
                 PlanStep::Clusters { .. } => return None,
             })
         })
@@ -205,7 +203,8 @@ impl Plan {
     /// 2. The step count, then each step as a tag byte and its fields:
     ///    `1` extent (offset, length), `2` zeros (length), `3` bytes (length,
     ///    then the bytes), `4` clusters (first, count), `5` encoded (source
-    ///    offset, source length, decoded length, then the codec as text).
+    ///    offset, source length, decoded length, run offset, run length,
+    ///    then the codec's byte length and its bytes).
     ///    Tag 5 is an addition: a plan without encoded steps encodes exactly
     ///    as before, so its digest is unchanged.
     /// 3. The final length, then the valid length, each as `0` when absent
@@ -259,17 +258,15 @@ impl Plan {
                     number(&mut out, *first);
                     number(&mut out, *count);
                 }
-                PlanStep::Encoded {
-                    source,
-                    codec,
-                    length,
-                } => {
+                PlanStep::Encoded { source, encoding } => {
                     out.push(5);
                     number(&mut out, source.offset);
                     number(&mut out, source.length);
-                    number(&mut out, *length);
-                    number(&mut out, codec.len() as u64);
-                    out.extend_from_slice(codec.as_bytes());
+                    number(&mut out, encoding.decoded);
+                    number(&mut out, encoding.offset);
+                    number(&mut out, encoding.length);
+                    number(&mut out, encoding.codec.len() as u64);
+                    out.extend_from_slice(encoding.codec.as_bytes());
                 }
             }
         }
@@ -321,7 +318,7 @@ impl Plan {
                 PlanStep::Bytes(bytes) => (Origin::Literal { step: index }, bytes.len() as u64),
                 PlanStep::Zeros(length) => (Origin::Zeros, *length),
                 PlanStep::Extent(extent) => (Origin::Source(extent.offset), extent.length),
-                PlanStep::Encoded { source, length, .. } => {
+                PlanStep::Encoded { source, encoding } => {
                     if source.end().is_none_or(|end| end > source_size) {
                         return Err(SalvageError::Bounds);
                     }
@@ -330,7 +327,7 @@ impl Plan {
                             stored: *source,
                             step: index,
                         },
-                        *length,
+                        encoding.length,
                     )
                 }
                 PlanStep::Clusters { first, count } => {
@@ -630,12 +627,12 @@ impl<'a, A: SalvageAdapter + ?Sized> PlanReader<'a, A> {
                     self.read_source(start + within, bytes, position, &mut read.ranges);
                 }
                 Origin::Encoded { stored, step } => {
-                    let PlanStep::Encoded { codec, .. } = &self.plan.steps[step] else {
+                    let PlanStep::Encoded { encoding, .. } = &self.plan.steps[step] else {
                         unreachable!("an encoded piece comes from an encoded step")
                     };
                     let readable = self
                         .adapter
-                        .read_encoded(self.source, stored, codec, within, bytes)
+                        .read_encoded(self.source, stored, encoding, within, bytes)
                         .is_ok_and(|read| read == bytes.len());
                     if !readable {
                         bytes.fill(0);

@@ -672,13 +672,19 @@ fn check_walks<A: SalvageAdapter>(
             }
             let want = encoding.length.min(64 * 1024) as usize;
             let mut decoded = vec![0u8; want];
-            let read = salvage.read_encoded(extent.source, &encoding.codec, 0, &mut decoded);
-            let at_end = salvage.read_encoded(
-                extent.source,
-                &encoding.codec,
-                encoding.length,
-                &mut [0u8; 1],
-            );
+            let read = salvage.read_encoded(extent.source, encoding, 0, &mut decoded);
+            let at_end =
+                salvage.read_encoded(extent.source, encoding, encoding.length, &mut [0u8; 1]);
+            let shape = encoding
+                .offset
+                .checked_add(encoding.length)
+                .is_some_and(|end| end <= encoding.decoded);
+            if !shape {
+                problems.push(format!(
+                    "{:?}: run {}..+{} lies outside the {} decoded bytes",
+                    candidate.location, encoding.offset, encoding.length, encoding.decoded
+                ));
+            }
             if !matches!(read, Ok(n) if n == want) || !matches!(at_end, Ok(0)) {
                 problems.push(format!(
                     "{:?}: {} extent {:?} decodes {} and {} at its end",
@@ -707,7 +713,12 @@ fn check_walks<A: SalvageAdapter>(
         format!("{walked} walked, {decoded_extents} encoded extent(s) decoded; {problems:?}"),
     );
     if !capabilities.supports(Feature::EncodedExtents) {
-        let probe = salvage.read_encoded(Extent::new(0, 0), "none", 0, &mut [0u8; 1]);
+        let probe = salvage.read_encoded(
+            Extent::new(0, 0),
+            &super::salvage::Encoding::whole("none", 0),
+            0,
+            &mut [0u8; 1],
+        );
         report.record(
             "primitive.encoded-refused-as-flagged",
             matches!(

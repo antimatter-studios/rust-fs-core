@@ -7,12 +7,12 @@
 //! ([`PrimitiveAPI::structures`]) and the salvage verbs
 //! ([`SalvageAdapter`]), which every format answers in the same terms.
 
-use super::salvage::Feature;
 use super::salvage::{
     Candidate, Capabilities, Damage, DamageReport, Extent, ExtentWalk, Integrity,
     MaterializeReport, Plan, PlanCheck, PlanReader, SalvageAdapter, SalvageError, ScanReport, Sink,
     Tree,
 };
+use super::salvage::{Encoding, Feature};
 use super::volume::VolumeAPI;
 use crate::BlockRead;
 use serde::de::DeserializeOwned;
@@ -187,12 +187,12 @@ impl<'a, A: SalvageAdapter> Salvage<'a, A> {
     pub fn read_encoded(
         &self,
         stored: Extent,
-        codec: &str,
+        encoding: &Encoding,
         offset: u64,
         output: &mut [u8],
     ) -> Result<usize, SalvageError> {
         self.adapter
-            .read_encoded(self.source, stored, codec, offset, output)
+            .read_encoded(self.source, stored, encoding, offset, output)
     }
 
     pub fn read_extent(

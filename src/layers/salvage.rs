@@ -336,23 +336,45 @@ pub struct WalkExtent {
     #[serde(default, skip_serializing_if = "is_false")]
     pub uninitialized: bool,
     /// The source bytes are encoded -- compressed, as an EROFS pcluster, a
-    /// SquashFS block, a Btrfs compressed extent or an NTFS LZNT1 unit -- and
-    /// decode to `encoded.length` file bytes. `None` when they are stored as
-    /// they are.
+    /// SquashFS block or fragment, a Btrfs compressed extent or an NTFS LZNT1
+    /// unit -- and the run's file bytes are part of what they decode to.
+    /// `None` when they are stored as they are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoded: Option<Encoding>,
 }
 
-/// How a walk extent's source bytes are encoded.
+/// How a walk extent's source bytes are encoded, and which of the bytes they
+/// decode to are the run's: `decoded[offset .. offset + length]`.
+///
+/// A unit of stored bytes can serve several runs: a deduplicated EROFS
+/// pcluster, a SquashFS fragment block holding the tails of many files.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Encoding {
     /// The codec, in the format's own lowercase terms: `"lz4"`, `"lzma"`,
-    /// `"zstd"`, `"deflate"`, `"lznt1"`. The driver that walked the extent
-    /// decodes it through [`SalvageAdapter::read_encoded`].
+    /// `"zstd"`, `"deflate"`, `"lznt1"`, or a transform such as an EROFS
+    /// interlaced block. The driver that walked the extent decodes it
+    /// through [`SalvageAdapter::read_encoded`].
     pub codec: String,
-    /// The file bytes the source bytes decode to.
+    /// The bytes the stored unit decodes to in all.
+    pub decoded: u64,
+    /// Where the run's bytes start in the decoded bytes.
+    #[serde(default)]
+    pub offset: u64,
+    /// The file bytes the run covers.
     pub length: u64,
+}
+
+impl Encoding {
+    /// A run that is the whole of what its stored bytes decode to.
+    pub fn whole(codec: &str, decoded: u64) -> Self {
+        Self {
+            codec: codec.to_owned(),
+            decoded,
+            offset: 0,
+            length: decoded,
+        }
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -455,8 +477,7 @@ impl ExtentWalk {
                 (_, true) => PlanStep::Zeros(extent.length()),
                 (Some(encoding), false) => PlanStep::Encoded {
                     source: extent.source,
-                    codec: encoding.codec.clone(),
-                    length: encoding.length,
+                    encoding: encoding.clone(),
                 },
                 (None, false) => PlanStep::Extent(extent.source),
             });
@@ -786,12 +807,13 @@ pub trait SalvageAdapter {
         output: &mut [u8],
     ) -> Result<usize, SalvageError>;
 
-    /// Reads the decoded file bytes of an encoded walk extent: `source` is
-    /// the extent's source bytes as stored and `codec` its
-    /// [`Encoding::codec`]. Reads from `offset` into the decoded bytes, up to
-    /// their end or the output's length, and returns how many were read:
-    /// `Ok(0)` at the end, [`SalvageError::Bounds`] past it or when `source`
-    /// leaves the device.
+    /// Reads the file bytes of an encoded walk extent: `stored` is the
+    /// extent's source bytes as stored and `encoding` says how they decode
+    /// and which decoded bytes are the run's. Reads from `offset` into the
+    /// run -- decoded byte `encoding.offset + offset` -- up to the run's end
+    /// or the output's length, and returns how many were read: `Ok(0)` at the
+    /// end, [`SalvageError::Bounds`] past it or when `stored` leaves the
+    /// device.
     ///
     /// Bytes that do not decode are an error, never guessed: a plan reading
     /// them writes zeros and flags the range unreadable. Defaults to
@@ -801,11 +823,11 @@ pub trait SalvageAdapter {
         &self,
         source: &dyn BlockRead,
         stored: Extent,
-        codec: &str,
+        encoding: &Encoding,
         offset: u64,
         output: &mut [u8],
     ) -> Result<usize, SalvageError> {
-        let _ = (source, stored, codec, offset, output);
+        let _ = (source, stored, encoding, offset, output);
         Err(SalvageError::Unsupported(Feature::EncodedExtents))
     }
 

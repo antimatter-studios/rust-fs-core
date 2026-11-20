@@ -566,12 +566,17 @@ fn an_encoded_file_walks_as_stored_bytes_and_plans_as_decoded_ones() {
     let mut decoded = [0u8; 6];
     assert_eq!(
         salvage
-            .read_encoded(walk.extents[0].source, "reverse", 0, &mut decoded)
+            .read_encoded(walk.extents[0].source, &encoding, 0, &mut decoded)
             .unwrap(),
         6
     );
     assert_eq!(&decoded, b"stored");
-    let refused = salvage.read_encoded(walk.extents[0].source, "zstd", 0, &mut decoded);
+    let refused = salvage.read_encoded(
+        walk.extents[0].source,
+        &fs_core::layers::Encoding::whole("zstd", 30),
+        0,
+        &mut decoded,
+    );
     assert!(matches!(
         refused,
         Err(fs_core::layers::SalvageError::Unsupported(
@@ -581,9 +586,21 @@ fn an_encoded_file_walks_as_stored_bytes_and_plans_as_decoded_ones() {
     // An encoded step past the source is refused before anything is read.
     let outside = Plan::new(vec![PlanStep::Encoded {
         source: Extent::new(64 * BLOCK, 1),
-        codec: "reverse".into(),
-        length: 1,
+        encoding: fs_core::layers::Encoding::whole("reverse", 1),
     }]);
+    // A run that is the middle of what its stored bytes decode to.
+    let middle = Plan::new(vec![PlanStep::Encoded {
+        source: walk.extents[0].source,
+        encoding: fs_core::layers::Encoding {
+            codec: "reverse".into(),
+            decoded: 30,
+            offset: 7,
+            length: 8,
+        },
+    }]);
+    let mut run = Vec::new();
+    salvage.materialize(&middle, &mut run).unwrap();
+    assert_eq!(run, b"reversed");
     assert!(salvage.check_plan(&outside).is_err());
     // A plan without encoded steps keeps its digest; one with them is new.
     assert_eq!(pinned().digest(), PINNED_DIGEST);
