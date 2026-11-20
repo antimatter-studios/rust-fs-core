@@ -12,6 +12,31 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-20
+
+### Fixed
+
+- **Candidates packed into one record are told apart.** The provided method
+  `SalvageAdapter::candidate_id` names a candidate in trees and parent
+  claims. It defaults to `location.offset`, so existing drivers are
+  unchanged. A driver whose records share source bytes overrides it: SquashFS
+  inodes in one compressed metadata block use their inode reference. The
+  conformance checks key candidates on it. A rescan finds a packed candidate
+  among its record's candidates, and a scan stopped among them may resume at
+  the record and deliver them again, but loses none (#467).
+
+- **A compressed unit stored larger than it decodes to passes the walk
+  checks.** `conformance::check_primitive` and the salvage set compare a
+  walk's file bytes with its claim, and its stored bytes only with the
+  source. A short file whose compressed unit carries overhead, such as a
+  49-byte Btrfs LZO file stored in 54 bytes, no longer fails, and neither
+  does a file whose tail is a window of a shared fragment block, such as a
+  6-byte EROFS tail in a 4 KiB fragment pcluster (#462).
+- **Encoded runs back to back on the source are not reported as unmerged.**
+  The salvage set's walk-shape check skips encoded runs, as the
+  `ExtentWalk` contract says they are never merged, so a Btrfs file in
+  several compressed units placed back to back conforms (#463).
+
 ## [0.5.0] — 2026-11-20
 
 ### Added
@@ -1290,7 +1315,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.4...v0.4.5
