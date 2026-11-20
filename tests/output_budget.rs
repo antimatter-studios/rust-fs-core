@@ -455,7 +455,7 @@ fn the_release_tier_prints_progress_not_one_line_per_test() {
     // that test-floor.sh counts.
     let chores = std::fs::read_to_string(repo().join("chores.yml")).unwrap();
     let release = std::fs::read_to_string(repo().join(".github/workflows/release.yml")).unwrap();
-    let expected = "scripts/tier.sh \"test (release)\" release 1000 60000 -- cargo test --locked --release --all-targets --features cli -- --quiet";
+    let expected = "scripts/tier.sh \"test (release)\" release 1000 60000 -- cargo test --locked --release --all-targets --features cli,layers -- --quiet";
     assert!(
         chores.contains(expected),
         "chores.yml's release tier lists every test: {expected}"

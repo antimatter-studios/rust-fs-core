@@ -27,6 +27,16 @@ driver and disk-image reader plugs into.
 - `BlockReadStreamer` — `std::io::Read + Seek` over any `BlockRead`
 - A unified `Error` type with a `Custom(String)` escape hatch so each
   driver can lift its own internal errors to the trait boundary
+- `layers` — behind the `layers` cargo feature: the three API layers every
+  driver implements, so a consumer opens, inspects, salvages and browses any
+  format through one set of traits. `VolumeAPI` (open, bytes, geometry,
+  superblock, health), `PrimitiveAPI` (read-only, damage-tolerant on-disk
+  structures and the `SalvageAdapter` verbs: find candidates, walk extents,
+  rebuild the tree, report damage, read by extent, materialize a plan) and
+  `FileAPI` (browse, read and copy on a healthy volume), with serializable
+  evidence types and a `conformance` module each driver runs against its own
+  images. [docs/three-layers.md](docs/three-layers.md) is the contract and
+  the rule for pinning this crate.
 - `cli` — behind the `cli` cargo feature: the command-line plumbing every
   tool in the family shares. One multi-call binary dispatching on `argv[0]`,
   the `<tool> (<crate>) <version>` line, `<repo> doctor`, JSON results with
@@ -117,6 +127,8 @@ src/
   readonly.rs         ReadOnlyDevice (rejects writes whatever the inner type allows)
   stream.rs           BlockReadStreamer (std::io::Read + Seek over a BlockRead)
   ffi.rs              the C ABI — FsCoreDevice, FsCoreCallbackCfg
+  layers.rs           the three driver API layers (feature `layers`), and in layers/:
+                      volume, primitive, file, salvage (+ plan), conformance (+ salvage)
   cli.rs              the tools' shared plumbing (feature `cli`), and in cli/:
                       dispatch, version, doctor, output, docs, family, transfer
 tests/

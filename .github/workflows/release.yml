@@ -56,7 +56,7 @@ jobs:
 
       - name: test (debug, quiet and budgeted)
         run: |
-          bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli
+          bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli,layers
           bash scripts/core.sh test-floor debug 348
       # A RELEASE-PROFILE RUN, DECIDED IN #111. The profile published is
       # the release one, and optimisation can change behaviour the debug
@@ -70,7 +70,7 @@ jobs:
       # that combination.
       - name: test (release, quiet and budgeted)
         run: |
-          bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli -- --quiet
+          bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli,layers -- --quiet
           bash scripts/core.sh test-floor release 348
       - name: keep the full test transcripts
         if: always()
@@ -84,7 +84,7 @@ jobs:
       # features), and once with the `cli` feature the tools turn on, so a
       # lint in either shape is caught.
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo clippy --locked --all-targets --features cli -- -D warnings
+      - run: cargo clippy --locked --all-targets --features cli,layers -- -D warnings
 
   publish:
     name: publish to crates.io
