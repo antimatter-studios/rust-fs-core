@@ -361,6 +361,7 @@ pub fn check_primitive<V: PrimitiveAPI>(volume: &V, limits: &Limits) -> Report {
         Err(error) => report.record("primitive.capabilities", false, error.to_string()),
     }
 
+    check_hypotheses(volume, &mut report);
     check_structures(volume, &salvage, &capabilities, &mut report);
     let candidates = check_scan(&salvage, &capabilities, size, &mut report);
     if let Some(candidates) = &candidates {
@@ -378,6 +379,25 @@ pub fn check_primitive<V: PrimitiveAPI>(volume: &V, limits: &Limits) -> Report {
     check_read_extent(&salvage, &capabilities, size, &mut report);
     check_materialize(volume, &salvage, &capabilities, size, &mut report);
     report
+}
+
+/// Every hypothesis the driver offers builds an adapter.
+fn check_hypotheses<V: PrimitiveAPI>(volume: &V, report: &mut Report) {
+    let hypotheses = match volume.hypotheses() {
+        Ok(hypotheses) => hypotheses,
+        Err(error) => return report.record("primitive.hypotheses", false, error.to_string()),
+    };
+    let mut problems = Vec::new();
+    for hypothesis in hypotheses.iter().take(8) {
+        if let Err(error) = volume.adapter_with(hypothesis) {
+            problems.push(format!("{hypothesis:?}: {error:?}"));
+        }
+    }
+    report.record(
+        "primitive.hypotheses-build-adapters",
+        problems.is_empty(),
+        format!("{} hypothesis(es); {problems:?}", hypotheses.len()),
+    );
 }
 
 type Bound<'a, V> = super::primitive::Salvage<'a, <V as PrimitiveAPI>::Adapter>;
@@ -596,6 +616,7 @@ fn check_walks<A: SalvageAdapter>(
     );
     let mut problems = Vec::new();
     let mut walked = 0usize;
+    let mut decoded_extents = 0usize;
     for candidate in candidates.iter().take(limits.max_walks) {
         let walk = salvage.walk_extents(candidate);
         let deleted = candidate.state == CandidateState::Deleted;
@@ -640,6 +661,37 @@ fn check_walks<A: SalvageAdapter>(
             .extents
             .iter()
             .all(|e| e.end().is_some_and(|end| end <= walk.claimed));
+        for extent in walk.extents.iter().filter(|e| e.encoded.is_some()) {
+            let encoding = extent.encoded.as_ref().expect("filtered");
+            if !capabilities.supports(Feature::EncodedExtents) {
+                problems.push(format!(
+                    "{:?}: an encoded extent, though encoded-extents is listed missing",
+                    candidate.location
+                ));
+                continue;
+            }
+            let want = encoding.length.min(64 * 1024) as usize;
+            let mut decoded = vec![0u8; want];
+            let read = salvage.read_encoded(extent.source, &encoding.codec, 0, &mut decoded);
+            let at_end = salvage.read_encoded(
+                extent.source,
+                &encoding.codec,
+                encoding.length,
+                &mut [0u8; 1],
+            );
+            if !matches!(read, Ok(n) if n == want) || !matches!(at_end, Ok(0)) {
+                problems.push(format!(
+                    "{:?}: {} extent {:?} decodes {} and {} at its end",
+                    candidate.location,
+                    encoding.codec,
+                    extent.source,
+                    describe_salvage(&read),
+                    describe_salvage(&at_end)
+                ));
+            } else {
+                decoded_extents += 1;
+            }
+        }
         let plan_length = walk.plan().length();
         let complete_covers = walk.end != WalkEnd::Complete || plan_length == Some(walk.claimed);
         if !inside || !ordered || !within_claim || mapped > walk.claimed || !complete_covers {
@@ -652,8 +704,19 @@ fn check_walks<A: SalvageAdapter>(
     report.record(
         "primitive.walks",
         problems.is_empty(),
-        format!("{walked} walked; {problems:?}"),
+        format!("{walked} walked, {decoded_extents} encoded extent(s) decoded; {problems:?}"),
     );
+    if !capabilities.supports(Feature::EncodedExtents) {
+        let probe = salvage.read_encoded(Extent::new(0, 0), "none", 0, &mut [0u8; 1]);
+        report.record(
+            "primitive.encoded-refused-as-flagged",
+            matches!(
+                probe,
+                Err(SalvageError::Unsupported(Feature::EncodedExtents))
+            ),
+            describe_salvage(&probe),
+        );
+    }
 }
 
 fn check_tree<A: SalvageAdapter>(
@@ -897,7 +960,10 @@ pub fn check_files<V: FileAPI>(volume: &V, expected: &[Expected], limits: &Limit
 }
 
 struct Walked<N> {
+    /// For messages; lossy where a name is.
     path: String,
+    /// The path as [`FileAPI::lookup_bytes`] takes it.
+    bytes: Vec<u8>,
     entry: DirEntry<N>,
 }
 
@@ -908,10 +974,10 @@ fn walk_tree<V: FileAPI>(
     report: &mut Report,
 ) -> Vec<Walked<V::Node>> {
     let mut walked = Vec::new();
-    let mut pending = vec![(String::new(), root, 0usize)];
+    let mut pending = vec![(String::new(), Vec::new(), root, 0usize)];
     let mut problems = Vec::new();
     let mut over_limit = false;
-    while let Some((path, directory, depth)) = pending.pop() {
+    while let Some((path, path_bytes, directory, depth)) = pending.pop() {
         let entries = match volume.read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) => {
@@ -924,11 +990,24 @@ fn walk_tree<V: FileAPI>(
             let name_ok = !entry.name.is_empty()
                 && entry.name != "."
                 && entry.name != ".."
-                && !entry.name.contains(['/', '\0']);
-            if !name_ok {
-                problems.push(format!("{path}/: bad name {:?}", entry.name));
+                && !entry.name.contains(['/', '\0'])
+                && !entry.bytes.is_empty()
+                && entry.bytes != b"."
+                && entry.bytes != b".."
+                && !entry.bytes.iter().any(|byte| *byte == b'/' || *byte == 0);
+            // The bytes and the name agree: the name is the bytes decoded,
+            // exactly unless lossy.
+            let agrees = match std::str::from_utf8(&entry.bytes) {
+                Ok(text) => !entry.lossy && text == entry.name,
+                Err(_) => entry.lossy,
+            };
+            if !name_ok || !agrees {
+                problems.push(format!(
+                    "{path}/: bad name {:?} (bytes {:?}, lossy {})",
+                    entry.name, entry.bytes, entry.lossy
+                ));
             }
-            if !entry.lossy && !names.insert(entry.name.clone()) {
+            if !names.insert(entry.bytes.clone()) {
                 problems.push(format!("{path}/: {:?} listed twice", entry.name));
             }
             if walked.len() >= limits.max_nodes {
@@ -936,14 +1015,26 @@ fn walk_tree<V: FileAPI>(
                 break;
             }
             let child = format!("{path}/{}", entry.name);
+            let mut child_bytes = path_bytes.clone();
+            child_bytes.push(b'/');
+            child_bytes.extend_from_slice(&entry.bytes);
             if entry.kind == NodeKind::Directory && name_ok {
                 if depth + 1 > limits.max_depth {
                     over_limit = true;
                 } else {
-                    pending.push((child.clone(), entry.node.clone(), depth + 1));
+                    pending.push((
+                        child.clone(),
+                        child_bytes.clone(),
+                        entry.node.clone(),
+                        depth + 1,
+                    ));
                 }
             }
-            walked.push(Walked { path: child, entry });
+            walked.push(Walked {
+                path: child,
+                bytes: child_bytes,
+                entry,
+            });
         }
     }
     report.record(
@@ -964,7 +1055,7 @@ fn check_walked<V: FileAPI>(volume: &V, walk: &[Walked<V::Node>], report: &mut R
     let mut read_problems = Vec::new();
     let mut lookup_problems = Vec::new();
     let mut files = 0usize;
-    for Walked { path, entry } in walk {
+    for Walked { path, bytes, entry } in walk {
         let metadata = match volume.metadata(&entry.node) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -980,11 +1071,12 @@ fn check_walked<V: FileAPI>(volume: &V, walk: &[Walked<V::Node>], report: &mut R
                 entry.kind, entry.size, metadata.kind, metadata.size
             ));
         }
-        if !entry.lossy {
-            match volume.lookup(path).and_then(|node| volume.metadata(&node)) {
-                Ok(found) if found == metadata => {}
-                other => lookup_problems.push(format!("{path}: {}", describe(&other))),
-            }
+        match volume
+            .lookup_bytes(bytes)
+            .and_then(|node| volume.metadata(&node))
+        {
+            Ok(found) if found == metadata => {}
+            other => lookup_problems.push(format!("{path}: {}", describe(&other))),
         }
         if entry.kind == NodeKind::File {
             files += 1;
@@ -1059,7 +1151,7 @@ fn check_refusals<V: FileAPI>(volume: &V, walk: &[Walked<V::Node>], report: &mut
         absent.is_err(),
         describe(&absent),
     );
-    if let Some(Walked { path, entry }) = walk
+    if let Some(Walked { path, entry, .. }) = walk
         .iter()
         .find(|w| w.entry.kind == NodeKind::File && !w.entry.lossy)
     {
@@ -1076,7 +1168,8 @@ fn check_refusals<V: FileAPI>(volume: &V, walk: &[Walked<V::Node>], report: &mut
             format!("{path}/x: {}", describe(&through)),
         );
     }
-    if let Some(Walked { path, entry }) = walk.iter().find(|w| w.entry.kind == NodeKind::Directory)
+    if let Some(Walked { path, entry, .. }) =
+        walk.iter().find(|w| w.entry.kind == NodeKind::Directory)
     {
         let read = volume.read_at(&entry.node, 0, &mut [0u8; 1]);
         report.record(
@@ -1162,7 +1255,7 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
     let mut missing = Vec::new();
     let mut different = Vec::new();
     let mut compared = 0usize;
-    for Walked { path, entry } in walk
+    for Walked { path, entry, .. } in walk
         .iter()
         .filter(|w| w.entry.kind == NodeKind::File && w.entry.size > 0 && !w.entry.lossy)
     {

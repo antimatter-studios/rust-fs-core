@@ -32,10 +32,10 @@ pub use file::{DirEntry, FileAPI, Metadata, NodeKind, Timestamp};
 pub use primitive::{PrimitiveAPI, Salvage, Structure, StructureRole};
 pub use salvage::{
     Candidate, CandidateKind, CandidateState, Capabilities, ClusterLayout, Damage, DamageKind,
-    DamageReport, Extent, ExtentWalk, Feature, Integrity, MaterializeReport, MaterializedRange,
-    Parent, ParentClaim, Plan, PlanCheck, PlanFault, PlanMetadata, PlanOverlap, PlanRead,
-    PlanReader, PlanStep, SalvageAdapter, SalvageError, ScanReport, Severity, Sink, Tree, TreeNode,
-    WalkEnd, WalkExtent,
+    DamageReport, Encoding, Extent, ExtentWalk, Feature, Integrity, MaterializeReport,
+    MaterializedRange, Parent, ParentClaim, Plan, PlanCheck, PlanFault, PlanMetadata, PlanOverlap,
+    PlanRead, PlanReader, PlanStep, SalvageAdapter, SalvageError, ScanReport, Severity, Sink, Tree,
+    TreeNode, WalkEnd, WalkExtent,
 };
 pub use volume::{
     check_bounds, ApiError, Geometry, HealthState, OpenVolume, Probe, Recognition, SuperblockCopy,

@@ -1443,11 +1443,13 @@ impl<D: Driver> Run<'_, D> {
                 PlanStep::Extent(extent) => {
                     expected.extend_from_slice(image.slice(*extent).unwrap_or_default())
                 }
-                PlanStep::Clusters { .. } => {}
+                // The set's own plans hold no encoded steps; a driver's
+                // decoding is checked where its walks name encoded extents.
+                PlanStep::Clusters { .. } | PlanStep::Encoded { .. } => {}
             }
         }
         let mut sources = Vec::new();
-        for range in &report.ranges {
+        for range in report.ranges.iter().filter(|range| !range.encoded) {
             let output_range =
                 range.output.offset as usize..(range.output.offset + range.output.length) as usize;
             let Some(source) = range.source else {

@@ -38,7 +38,15 @@ fn a_conforming_driver_passes_every_layer() {
     let report = conformance::check_healthy(&volume, &expected(), &Limits::default());
     report.assert_passed();
     assert!(report.checks.len() > 30, "{report}");
-    conformance::check_files_against_candidates(&volume, &Limits::default()).assert_passed();
+    let cross = conformance::check_files_against_candidates(&volume, &Limits::default());
+    cross.assert_passed();
+    // The encoded file is among those compared byte for byte.
+    let compared = cross
+        .checks
+        .iter()
+        .find(|check| check.name == "cross.salvaged-bytes-match-files")
+        .unwrap();
+    assert!(compared.detail.starts_with("5 compared"), "{cross}");
 }
 
 #[test]
@@ -93,6 +101,8 @@ fn each_defect_fails_its_check() {
         (Bug::ScanMiscounts, "primitive.scan-count"),
         (Bug::TreeReversed, "primitive.tree-one-node-per-candidate"),
         (Bug::DuplicateEntry, "file.directories-list"),
+        (Bug::EncodedUndecoded, "primitive.walks"),
+        (Bug::LossyBytes, "file.directories-list"),
     ];
     for (bug, check) in cases {
         let volume = open().with_bug(bug);
@@ -418,11 +428,13 @@ fn a_walk_with_holes_and_uninitialized_runs_plans_the_file_in_place() {
                 offset: 4096,
                 source: Extent::new(8192, 100),
                 uninitialized: false,
+                encoded: None,
             },
             WalkExtent {
                 offset: 8192,
                 source: Extent::new(16384, 50),
                 uninitialized: true,
+                encoded: None,
             },
         ],
         claimed: 10000,
@@ -495,4 +507,102 @@ fn reading_an_extent_at_its_end_reads_nothing() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn a_name_that_is_not_utf8_is_found_by_its_bytes() {
+    let volume = open();
+    let node = volume.lookup_bytes(b"/docs/deep/caf\xe9").unwrap();
+    let mut out = Vec::new();
+    volume.copy_to(&node, &mut out).unwrap();
+    assert_eq!(out, b"latin-1 name");
+    assert!(
+        volume.lookup("/docs/deep/caf\u{e9}").is_err(),
+        "UTF-8 é is other bytes"
+    );
+    let deep = volume.lookup("/docs/deep").unwrap();
+    let entry = volume
+        .read_dir(&deep)
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.lossy)
+        .unwrap();
+    assert_eq!(entry.bytes, b"caf\xe9");
+    assert_eq!(entry.name, "caf\u{fffd}");
+    // Case folding still applies to names that are UTF-8.
+    assert!(volume.lookup_bytes(b"/DOCS/README.MD").is_ok());
+}
+
+#[test]
+fn an_encoded_file_walks_as_stored_bytes_and_plans_as_decoded_ones() {
+    use fs_core::layers::Feature;
+    let volume = open();
+    let salvage = volume.salvage().unwrap();
+    let candidates = salvage.all_candidates().unwrap();
+    let packed = candidates
+        .iter()
+        .find(|c| c.name.as_deref() == Some("packed.txt"))
+        .unwrap();
+    let walk = salvage.walk_extents(packed).unwrap();
+    let encoding = walk.extents[0].encoded.clone().unwrap();
+    assert_eq!(encoding.codec, "reverse");
+    assert_eq!(walk.extents[0].length(), 30);
+    let plan = walk.plan();
+    assert!(matches!(plan.steps[0], PlanStep::Encoded { .. }));
+    let mut out = Vec::new();
+    let report = salvage.materialize(&plan, &mut out).unwrap();
+    assert_eq!(out, b"stored reversed, read forwards");
+    assert!(report.ranges[0].encoded);
+    assert_eq!(
+        report.source_of(0),
+        None,
+        "decoded bytes map to no one source byte"
+    );
+    let reader = salvage.plan_reader(&plan).unwrap();
+    let mut middle = [0u8; 8];
+    reader.read_at(7, &mut middle).unwrap();
+    assert_eq!(&middle, b"reversed");
+    assert_eq!(reader.source_of(0), None);
+    let mut decoded = [0u8; 6];
+    assert_eq!(
+        salvage
+            .read_encoded(walk.extents[0].source, "reverse", 0, &mut decoded)
+            .unwrap(),
+        6
+    );
+    assert_eq!(&decoded, b"stored");
+    let refused = salvage.read_encoded(walk.extents[0].source, "zstd", 0, &mut decoded);
+    assert!(matches!(
+        refused,
+        Err(fs_core::layers::SalvageError::Unsupported(
+            Feature::EncodedExtents
+        ))
+    ));
+    // An encoded step past the source is refused before anything is read.
+    let outside = Plan::new(vec![PlanStep::Encoded {
+        source: Extent::new(64 * BLOCK, 1),
+        codec: "reverse".into(),
+        length: 1,
+    }]);
+    assert!(salvage.check_plan(&outside).is_err());
+    // A plan without encoded steps keeps its digest; one with them is new.
+    assert_eq!(pinned().digest(), PINNED_DIGEST);
+    assert_ne!(plan.digest(), Plan::new(Vec::new()).digest());
+    let json = serde_json::to_string(&plan).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Plan>(&json).unwrap().digest(),
+        plan.digest()
+    );
+}
+
+#[test]
+fn a_geometry_hypothesis_builds_an_adapter_without_the_superblock() {
+    let volume = open();
+    let hypotheses = volume.hypotheses().unwrap();
+    assert_eq!(hypotheses, [64]);
+    let salvage = volume.salvage_with(&hypotheses[0]).unwrap();
+    let candidates = salvage.all_candidates().unwrap();
+    assert!(candidates.iter().any(|c| c.name.as_deref() == Some("leaf")));
+    let layout = fs_core::layers::SalvageAdapter::cluster_layout(salvage.adapter()).unwrap();
+    assert_eq!(layout.count, 64);
 }

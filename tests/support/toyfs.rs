@@ -17,10 +17,11 @@
 
 use fs_core::layers::{
     check_bounds, ApiError, Candidate, CandidateKind, CandidateState, Capabilities, ClusterLayout,
-    Damage, DamageKind, DamageReport, DirEntry, Extent, ExtentWalk, Feature, FileAPI, Geometry,
-    Integrity, Metadata, NodeKind, OpenVolume, Parent, ParentClaim, PrimitiveAPI, Probe,
+    Damage, DamageKind, DamageReport, DirEntry, Encoding, Extent, ExtentWalk, Feature, FileAPI,
+    Geometry, Integrity, Metadata, NodeKind, OpenVolume, Parent, ParentClaim, PrimitiveAPI, Probe,
     Recognition, SalvageAdapter, SalvageError, ScanReport, Severity, Sink, Structure,
     StructureRole, SuperblockCopy, Tree, TreeNode, VolumeAPI, VolumeHealth, VolumeSupport, WalkEnd,
+    WalkExtent,
 };
 use fs_core::BlockRead;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,10 @@ pub enum Bug {
     DuplicateEntry,
     /// The health verdict says clean over an error finding.
     HealthHidesDamage,
+    /// Encoded extents are walked, but never decoded.
+    EncodedUndecoded,
+    /// A name that is not UTF-8 is listed by its lossy text, not its bytes.
+    LossyBytes,
 }
 
 // ---------------------------------------------------------------- image ---
@@ -90,7 +95,7 @@ impl Builder {
         self.image[at + 8..at + 16].copy_from_slice(&parent.to_le_bytes());
     }
 
-    fn entry(&mut self, directory: u64, kind: u8, name: &str, first: u64, size: u64) {
+    fn entry(&mut self, directory: u64, kind: u8, name: &[u8], first: u64, size: u64) {
         let base = (directory * BLOCK) as usize + ENTRY;
         let slot = (0..ENTRIES)
             .find(|i| self.image[base + i * ENTRY] == 0)
@@ -98,13 +103,18 @@ impl Builder {
         let at = base + slot * ENTRY;
         self.image[at] = kind;
         self.image[at + 1] = name.len() as u8;
-        self.image[at + 2..at + 2 + name.len()].copy_from_slice(name.as_bytes());
+        self.image[at + 2..at + 2 + name.len()].copy_from_slice(name);
         self.image[at + 32..at + 40].copy_from_slice(&first.to_le_bytes());
         self.image[at + 40..at + 48].copy_from_slice(&size.to_le_bytes());
     }
 
     /// Adds a file under `directory` and returns its first block.
     pub fn file(&mut self, directory: u64, name: &str, contents: &[u8]) -> u64 {
+        self.file_bytes(directory, name.as_bytes(), contents)
+    }
+
+    /// A file whose name is stored as these bytes, UTF-8 or not.
+    pub fn file_bytes(&mut self, directory: u64, name: &[u8], contents: &[u8]) -> u64 {
         let first = self.next;
         let blocks = (contents.len() as u64).div_ceil(BLOCK).max(1);
         self.next += blocks;
@@ -114,12 +124,29 @@ impl Builder {
         first
     }
 
+    /// A file stored encoded: its bytes reversed, decoded by the `reverse`
+    /// codec.
+    pub fn encoded_file(&mut self, directory: u64, name: &str, contents: &[u8]) {
+        let first = self.next;
+        self.next += (contents.len() as u64).div_ceil(BLOCK).max(1);
+        let at = (first * BLOCK) as usize;
+        let reversed: Vec<u8> = contents.iter().rev().copied().collect();
+        self.image[at..at + contents.len()].copy_from_slice(&reversed);
+        self.entry(directory, 3, name.as_bytes(), first, contents.len() as u64);
+    }
+
     pub fn deleted_file(&mut self, directory: u64, name: &str, contents: &[u8]) {
         let first = self.next;
         self.next += (contents.len() as u64).div_ceil(BLOCK).max(1);
         let at = (first * BLOCK) as usize;
         self.image[at..at + contents.len()].copy_from_slice(contents);
-        self.entry(directory, 0x81, name, first, contents.len() as u64);
+        self.entry(
+            directory,
+            0x81,
+            name.as_bytes(),
+            first,
+            contents.len() as u64,
+        );
     }
 
     /// Adds a directory and returns its block.
@@ -127,7 +154,7 @@ impl Builder {
         let block = self.next;
         self.next += 1;
         self.directory(block, parent);
-        self.entry(parent, 2, name, block, BLOCK);
+        self.entry(parent, 2, name.as_bytes(), block, BLOCK);
         block
     }
 
@@ -152,6 +179,8 @@ pub fn healthy() -> Vec<u8> {
     let deep = builder.dir(docs, "deep");
     builder.file(deep, "leaf", b"leaf bytes");
     builder.deleted_file(2, "gone.txt", b"deleted but here");
+    builder.encoded_file(docs, "packed.txt", b"stored reversed, read forwards");
+    builder.file_bytes(deep, b"caf\xe9", b"latin-1 name");
     builder.build()
 }
 
@@ -442,13 +471,14 @@ pub struct Node {
     kind: NodeKind,
     first: u64,
     size: u64,
+    encoded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RawEntry {
     offset: u64,
     kind: u8,
-    name: String,
+    name: Vec<u8>,
     first: u64,
     size: u64,
 }
@@ -470,7 +500,7 @@ fn entries_in(source: &dyn BlockRead, block: u64) -> Result<Option<Vec<RawEntry>
         entries.push(RawEntry {
             offset: block * BLOCK + at as u64,
             kind: record[0],
-            name: String::from_utf8_lossy(&record[2..2 + length]).into_owned(),
+            name: record[2..2 + length].to_vec(),
             first: u64::from_le_bytes(record[32..40].try_into().unwrap()),
             size: u64::from_le_bytes(record[40..48].try_into().unwrap()),
         });
@@ -494,6 +524,7 @@ impl FileAPI for ToyVolume {
             kind: NodeKind::Directory,
             first: self.superblock.root,
             size: BLOCK,
+            encoded: false,
         })
     }
 
@@ -508,15 +539,24 @@ impl FileAPI for ToyVolume {
             .filter(|entry| entry.kind & 0x80 == 0)
             .map(|entry| {
                 let kind = kind_of(entry.kind);
+                let lossy = std::str::from_utf8(&entry.name).is_err();
                 DirEntry {
-                    name: entry.name,
-                    lossy: false,
+                    name: String::from_utf8_lossy(&entry.name).into_owned(),
+                    bytes: if self.has(Bug::LossyBytes) {
+                        String::from_utf8_lossy(&entry.name)
+                            .into_owned()
+                            .into_bytes()
+                    } else {
+                        entry.name
+                    },
+                    lossy,
                     kind,
                     size: entry.size,
                     node: Node {
                         kind,
                         first: entry.first,
                         size: entry.size,
+                        encoded: entry.kind & 0x7f == 3,
                     },
                 }
             })
@@ -544,6 +584,16 @@ impl FileAPI for ToyVolume {
         if self.has(Bug::ShortFirstRead) && offset == 0 && count > 1 {
             count -= 1;
         }
+        if file.encoded {
+            let read = decode_reversed(
+                &self.source,
+                Extent::new(file.first * BLOCK, file.size),
+                offset,
+                &mut output[..count],
+            )
+            .map_err(|_| ToyError::Corrupt("encoded file"))?;
+            return Ok(read);
+        }
         self.source
             .read_at(file.first * BLOCK + offset, &mut output[..count])?;
         Ok(count)
@@ -554,6 +604,30 @@ impl FileAPI for ToyVolume {
     }
 }
 
+/// The `reverse` codec: the stored bytes, reversed.
+fn decode_reversed(
+    source: &dyn BlockRead,
+    stored: Extent,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<usize, SalvageError> {
+    stored
+        .end()
+        .filter(|end| *end <= source.size_bytes())
+        .ok_or(SalvageError::Bounds)?;
+    if offset > stored.length {
+        return Err(SalvageError::Bounds);
+    }
+    let mut bytes = vec![0u8; stored.length as usize];
+    source
+        .read_at(stored.offset, &mut bytes)
+        .map_err(SalvageError::Device)?;
+    bytes.reverse();
+    let count = (stored.length - offset).min(output.len() as u64) as usize;
+    output[..count].copy_from_slice(&bytes[offset as usize..offset as usize + count]);
+    Ok(count)
+}
+
 // ------------------------------------------------------------ primitive ---
 
 /// The candidate detail: where the entry's data starts.
@@ -561,6 +635,8 @@ impl FileAPI for ToyVolume {
 pub struct ToyDetail {
     pub first: u64,
     pub directory: u64,
+    /// Stored by the `reverse` codec.
+    pub encoded: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -620,11 +696,12 @@ impl SalvageAdapter for ToyAdapter {
                         CandidateState::Live
                     },
                     integrity: Integrity::Unchecked,
-                    name: Some(entry.name),
+                    name: Some(String::from_utf8_lossy(&entry.name).into_owned()),
                     size: Some(entry.size),
                     detail: ToyDetail {
                         first: entry.first,
                         directory: block,
+                        encoded: entry.kind & 0x7f == 3,
                     },
                 };
                 report.candidates += 1;
@@ -654,6 +731,21 @@ impl SalvageAdapter for ToyAdapter {
                 claimed,
                 WalkEnd::OutOfRange,
             ));
+        }
+        if candidate.detail.encoded && claimed > 0 {
+            return Ok(ExtentWalk {
+                extents: vec![WalkExtent {
+                    offset: 0,
+                    source: Extent::new(start, claimed),
+                    uninitialized: false,
+                    encoded: Some(Encoding {
+                        codec: "reverse".into(),
+                        length: claimed,
+                    }),
+                }],
+                claimed,
+                end: WalkEnd::Complete,
+            });
         }
         let extents = if claimed == 0 {
             Vec::new()
@@ -754,6 +846,20 @@ impl SalvageAdapter for ToyAdapter {
         Ok(count)
     }
 
+    fn read_encoded(
+        &self,
+        source: &dyn BlockRead,
+        stored: Extent,
+        codec: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, SalvageError> {
+        if codec != "reverse" || self.bugs.contains(&Bug::EncodedUndecoded) {
+            return Err(SalvageError::Unsupported(Feature::EncodedExtents));
+        }
+        decode_reversed(source, stored, offset, output)
+    }
+
     fn cluster_layout(&self) -> Result<ClusterLayout, SalvageError> {
         Ok(ClusterLayout {
             first: 0,
@@ -766,6 +872,8 @@ impl SalvageAdapter for ToyAdapter {
 
 impl PrimitiveAPI for ToyVolume {
     type Adapter = ToyAdapter;
+    /// The block count, the one thing the toy's geometry needs.
+    type Hypothesis = u64;
 
     fn source(&self) -> &dyn BlockRead {
         &self.source
@@ -775,6 +883,18 @@ impl PrimitiveAPI for ToyVolume {
         Ok(ToyAdapter {
             blocks: self.superblock.blocks,
             root: self.superblock.root,
+            bugs: self.bugs.clone(),
+        })
+    }
+
+    fn hypotheses(&self) -> Result<Vec<u64>, SalvageError> {
+        Ok(vec![self.source.size_bytes() / BLOCK])
+    }
+
+    fn adapter_with(&self, blocks: &u64) -> Result<ToyAdapter, SalvageError> {
+        Ok(ToyAdapter {
+            blocks: *blocks,
+            root: 2,
             bugs: self.bugs.clone(),
         })
     }

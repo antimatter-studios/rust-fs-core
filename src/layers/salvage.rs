@@ -119,6 +119,12 @@ pub enum Feature {
     /// Materializing plan steps that name clusters, through
     /// [`SalvageAdapter::cluster_layout`].
     ClusterSteps,
+    /// Decoding walk extents whose source bytes are encoded, through
+    /// [`SalvageAdapter::read_encoded`].
+    EncodedExtents,
+    /// Building an adapter from a caller's geometry hypothesis, through
+    /// [`PrimitiveAPI::adapter_with`](super::PrimitiveAPI::adapter_with).
+    GeometryHypotheses,
 }
 
 impl Feature {
@@ -134,6 +140,8 @@ impl Feature {
             Self::DeletedCandidates => "deleted-candidates",
             Self::DeletedExtents => "deleted-extents",
             Self::ClusterSteps => "cluster-steps",
+            Self::EncodedExtents => "encoded-extents",
+            Self::GeometryHypotheses => "geometry-hypotheses",
         }
     }
 }
@@ -315,7 +323,7 @@ pub enum WalkEnd {
 
 /// One run of a candidate's storage: the file bytes from `offset` are held
 /// by the source bytes `source`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WalkExtent {
     /// The byte offset in the candidate's own data (the file offset).
@@ -327,6 +335,24 @@ pub struct WalkExtent {
     /// zeros, whatever the source holds.
     #[serde(default, skip_serializing_if = "is_false")]
     pub uninitialized: bool,
+    /// The source bytes are encoded -- compressed, as an EROFS pcluster, a
+    /// SquashFS block, a Btrfs compressed extent or an NTFS LZNT1 unit -- and
+    /// decode to `encoded.length` file bytes. `None` when they are stored as
+    /// they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoded: Option<Encoding>,
+}
+
+/// How a walk extent's source bytes are encoded.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Encoding {
+    /// The codec, in the format's own lowercase terms: `"lz4"`, `"lzma"`,
+    /// `"zstd"`, `"deflate"`, `"lznt1"`. The driver that walked the extent
+    /// decodes it through [`SalvageAdapter::read_encoded`].
+    pub codec: String,
+    /// The file bytes the source bytes decode to.
+    pub length: u64,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -334,9 +360,27 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl WalkExtent {
+    /// A run stored as it is: `source` holds the file bytes from `offset`.
+    pub fn stored(offset: u64, source: Extent) -> Self {
+        Self {
+            offset,
+            source,
+            uninitialized: false,
+            encoded: None,
+        }
+    }
+
+    /// The file bytes the run covers: the decoded length when encoded,
+    /// otherwise the source length.
+    pub fn length(&self) -> u64 {
+        self.encoded
+            .as_ref()
+            .map_or(self.source.length, |encoding| encoding.length)
+    }
+
     /// The first file byte past the run, or `None` when not representable.
     pub fn end(&self) -> Option<u64> {
-        self.offset.checked_add(self.source.length)
+        self.offset.checked_add(self.length())
     }
 }
 
@@ -345,12 +389,13 @@ impl WalkExtent {
 /// Extents are in file order and do not overlap in the file. A gap between
 /// them, or before the first, is a hole: the format stores nothing there and
 /// the bytes read as zeros (sparse files on ext4, XFS and NTFS). Adjacent
-/// extents are merged where both the file and the source continue and the
-/// `uninitialized` flags agree. Every extent ends at or before `claimed`.
-/// Data stored inside a record (ext4 inline data, an NTFS resident
-/// attribute) is an extent over those record bytes. Data a format stores
-/// compressed is not expressible as extents; such a driver reads it through
-/// its own primitives.
+/// stored extents are merged where both the file and the source continue
+/// and the `uninitialized` flags agree; encoded extents are never merged.
+/// Every extent ends at or before `claimed`, in file bytes. Data stored
+/// inside a record (ext4 inline data, an NTFS resident attribute) is an
+/// extent over those record bytes. Compressed data is an extent with an
+/// [`Encoding`]: its source is the bytes as stored, and the file bytes come
+/// from [`SalvageAdapter::read_encoded`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtentWalk {
@@ -372,11 +417,7 @@ impl ExtentWalk {
         let extents = sources
             .into_iter()
             .map(|source| {
-                let extent = WalkExtent {
-                    offset,
-                    source,
-                    uninitialized: false,
-                };
+                let extent = WalkExtent::stored(offset, source);
                 offset = offset.saturating_add(source.length);
                 extent
             })
@@ -388,7 +429,8 @@ impl ExtentWalk {
         }
     }
 
-    /// Bytes the walk mapped onto the source, uninitialized ones included.
+    /// Source bytes the walk mapped, as stored: uninitialized ones included,
+    /// encoded ones at their encoded size.
     pub fn mapped(&self) -> u64 {
         self.extents.iter().map(|extent| extent.source.length).sum()
     }
@@ -409,12 +451,16 @@ impl ExtentWalk {
             if extent.offset > at {
                 steps.push(PlanStep::Zeros(extent.offset - at));
             }
-            steps.push(if extent.uninitialized {
-                PlanStep::Zeros(extent.source.length)
-            } else {
-                PlanStep::Extent(extent.source)
+            steps.push(match (&extent.encoded, extent.uninitialized) {
+                (_, true) => PlanStep::Zeros(extent.length()),
+                (Some(encoding), false) => PlanStep::Encoded {
+                    source: extent.source,
+                    codec: encoding.codec.clone(),
+                    length: encoding.length,
+                },
+                (None, false) => PlanStep::Extent(extent.source),
             });
-            at = extent.offset.saturating_add(extent.source.length);
+            at = extent.offset.saturating_add(extent.length());
         }
         if self.end == WalkEnd::Complete && self.claimed > at {
             steps.push(PlanStep::Zeros(self.claimed - at));
@@ -564,6 +610,10 @@ pub struct MaterializedRange {
     /// there to keep later offsets in place; this flag, not the bytes, is the
     /// evidence.
     pub readable: bool,
+    /// True when the bytes were decoded from `source` rather than copied, so
+    /// no output byte maps to one source byte.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub encoded: bool,
 }
 
 /// Provenance for every output byte of a materialized plan.
@@ -576,11 +626,15 @@ pub struct MaterializeReport {
 }
 
 impl MaterializeReport {
-    /// The source byte that produced an output byte, if one did.
+    /// The source byte that produced an output byte, if one did. Decoded
+    /// bytes have none: their range names the encoded source bytes instead.
     pub fn source_of(&self, output: u64) -> Option<u64> {
         let range = self.ranges.iter().find(|range| {
             range.output.offset <= output && range.output.end().is_some_and(|end| output < end)
         })?;
+        if range.encoded {
+            return None;
+        }
         Some(range.source?.offset + (output - range.output.offset))
     }
 
@@ -592,9 +646,25 @@ impl MaterializeReport {
             .map(|range| range.output)
     }
 
-    fn push(&mut self, length: u64, source: Option<Extent>, readable: bool) {
-        append(&mut self.ranges, self.length, length, source, readable);
-        self.length += length;
+    fn push(&mut self, range: &MaterializedRange) {
+        if range.encoded {
+            append_encoded(
+                &mut self.ranges,
+                self.length,
+                range.output.length,
+                range.source,
+                range.readable,
+            );
+        } else {
+            append(
+                &mut self.ranges,
+                self.length,
+                range.output.length,
+                range.source,
+                range.readable,
+            );
+        }
+        self.length += range.output.length;
     }
 }
 
@@ -616,7 +686,11 @@ fn append(
             (None, None) => true,
             _ => false,
         };
-        if joins_source && last.readable == readable && last.output.end() == Some(at) {
+        if joins_source
+            && !last.encoded
+            && last.readable == readable
+            && last.output.end() == Some(at)
+        {
             last.output.length += length;
             if let (Some(previous), Some(next)) = (last.source.as_mut(), source) {
                 previous.length += next.length;
@@ -628,7 +702,27 @@ fn append(
         output: Extent::new(at, length),
         source,
         readable,
+        encoded: false,
     });
+}
+
+/// Appends `length` output bytes at `at`, decoded from the encoded source
+/// bytes `source`, as a range of their own.
+fn append_encoded(
+    ranges: &mut Vec<MaterializedRange>,
+    at: u64,
+    length: u64,
+    source: Option<Extent>,
+    readable: bool,
+) {
+    if length > 0 {
+        ranges.push(MaterializedRange {
+            output: Extent::new(at, length),
+            source,
+            readable,
+            encoded: true,
+        });
+    }
 }
 
 /// The common salvage surface each driver implements over its primitives.
@@ -692,6 +786,29 @@ pub trait SalvageAdapter {
         output: &mut [u8],
     ) -> Result<usize, SalvageError>;
 
+    /// Reads the decoded file bytes of an encoded walk extent: `source` is
+    /// the extent's source bytes as stored and `codec` its
+    /// [`Encoding::codec`]. Reads from `offset` into the decoded bytes, up to
+    /// their end or the output's length, and returns how many were read:
+    /// `Ok(0)` at the end, [`SalvageError::Bounds`] past it or when `source`
+    /// leaves the device.
+    ///
+    /// Bytes that do not decode are an error, never guessed: a plan reading
+    /// them writes zeros and flags the range unreadable. Defaults to
+    /// `Unsupported(EncodedExtents)` for a format that stores nothing
+    /// encoded.
+    fn read_encoded(
+        &self,
+        source: &dyn BlockRead,
+        stored: Extent,
+        codec: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, SalvageError> {
+        let _ = (source, stored, codec, offset, output);
+        Err(SalvageError::Unsupported(Feature::EncodedExtents))
+    }
+
     /// How this adapter numbers clusters on the source, for plan steps that
     /// name them. Fails with `Unsupported` when the format has no such
     /// numbering, and with [`SalvageError::NoGeometry`] when no layout copy is
@@ -726,7 +843,7 @@ pub trait SalvageAdapter {
             sink.write_all(&buffer[..count])
                 .map_err(SalvageError::Sink)?;
             for range in read.ranges {
-                report.push(range.output.length, range.source, range.readable);
+                report.push(&range);
             }
             offset += count as u64;
         }

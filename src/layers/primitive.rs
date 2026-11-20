@@ -7,6 +7,7 @@
 //! ([`PrimitiveAPI::structures`]) and the salvage verbs
 //! ([`SalvageAdapter`]), which every format answers in the same terms.
 
+use super::salvage::Feature;
 use super::salvage::{
     Candidate, Capabilities, Damage, DamageReport, Extent, ExtentWalk, Integrity,
     MaterializeReport, Plan, PlanCheck, PlanReader, SalvageAdapter, SalvageError, ScanReport, Sink,
@@ -14,7 +15,9 @@ use super::salvage::{
 };
 use super::volume::VolumeAPI;
 use crate::BlockRead;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::io;
 
 /// What a structure is for, in format-neutral terms.
@@ -68,6 +71,14 @@ pub trait PrimitiveAPI: VolumeAPI {
     /// The format's salvage adapter: format context only, never a device.
     type Adapter: SalvageAdapter;
 
+    /// What a caller may suppose about the geometry when the structures
+    /// that record it are gone: block size, metadata start, cluster size,
+    /// in the format's own terms. Plain data, so a caller that does not know
+    /// the format can still pass one back from [`Self::hypotheses`]. A
+    /// driver that keeps a backup of every such structure, and so never
+    /// needs one, uses `()`.
+    type Hypothesis: Clone + fmt::Debug + Serialize + DeserializeOwned;
+
     /// The source the volume reads, as a read-only device.
     fn source(&self) -> &dyn BlockRead;
 
@@ -80,10 +91,39 @@ pub trait PrimitiveAPI: VolumeAPI {
     /// their integrity failed, never left out.
     fn structures(&self) -> Result<Vec<Structure>, SalvageError>;
 
+    /// Plausible geometry hypotheses for this source, most likely first:
+    /// what the driver can infer from the bytes that survive, such as the
+    /// block sizes the format allows or a metadata start found by scanning.
+    /// Empty by default.
+    fn hypotheses(&self) -> Result<Vec<Self::Hypothesis>, SalvageError> {
+        Ok(Vec::new())
+    }
+
+    /// The salvage adapter for this volume built from a caller's hypothesis
+    /// rather than from the surviving structures, for a source whose
+    /// superblock is gone. The results are evidence under that hypothesis.
+    /// Defaults to `Unsupported(GeometryHypotheses)`.
+    fn adapter_with(&self, hypothesis: &Self::Hypothesis) -> Result<Self::Adapter, SalvageError> {
+        let _ = hypothesis;
+        Err(SalvageError::Unsupported(Feature::GeometryHypotheses))
+    }
+
     /// The salvage verbs, bound to this volume's source.
     fn salvage(&self) -> Result<Salvage<'_, Self::Adapter>, SalvageError> {
         Ok(Salvage {
             adapter: self.adapter()?,
+            source: self.source(),
+        })
+    }
+
+    /// The salvage verbs under a geometry hypothesis, bound to this volume's
+    /// source.
+    fn salvage_with(
+        &self,
+        hypothesis: &Self::Hypothesis,
+    ) -> Result<Salvage<'_, Self::Adapter>, SalvageError> {
+        Ok(Salvage {
+            adapter: self.adapter_with(hypothesis)?,
             source: self.source(),
         })
     }
@@ -142,6 +182,17 @@ impl<'a, A: SalvageAdapter> Salvage<'a, A> {
 
     pub fn report_damage(&self, sink: &mut dyn Sink<Damage>) -> Result<DamageReport, SalvageError> {
         self.adapter.report_damage(self.source, sink)
+    }
+
+    pub fn read_encoded(
+        &self,
+        stored: Extent,
+        codec: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, SalvageError> {
+        self.adapter
+            .read_encoded(self.source, stored, codec, offset, output)
     }
 
     pub fn read_extent(

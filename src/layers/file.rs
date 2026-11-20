@@ -85,9 +85,15 @@ pub struct DirEntry<N> {
     /// The name, decoded from the format's encoding. Never empty, never
     /// `.` or `..`, and never holding `/` or NUL.
     pub name: String,
-    /// True when the stored name could not be decoded and `name` holds
-    /// replacement characters. Such an entry is reached through `node`, not
-    /// by path.
+    /// The name as a byte string: exactly the stored bytes on a format whose
+    /// names are bytes (ext4, XFS, Btrfs, bcachefs, EROFS, SquashFS), and the
+    /// UTF-8 of `name` on one that stores a text encoding (FAT, exFAT, NTFS).
+    /// [`FileAPI::lookup_bytes`] matches it, so an entry whose name is not
+    /// UTF-8 can still be found by path.
+    pub bytes: Vec<u8>,
+    /// True when `bytes` did not decode and `name` holds replacement
+    /// characters. Such an entry is found by [`FileAPI::lookup_bytes`], not by
+    /// [`FileAPI::lookup`].
     pub lossy: bool,
     pub kind: NodeKind,
     /// The logical size, as the directory records it or as the node's
@@ -143,22 +149,45 @@ pub trait FileAPI: VolumeAPI {
         stored == wanted
     }
 
+    /// Whether a stored byte name matches a wanted one: through
+    /// [`Self::names_match`] when both are UTF-8, so a format's case folding
+    /// still applies, and byte for byte otherwise.
+    fn names_match_bytes(&self, stored: &[u8], wanted: &[u8]) -> bool {
+        match (std::str::from_utf8(stored), std::str::from_utf8(wanted)) {
+            (Ok(stored), Ok(wanted)) => self.names_match(stored, wanted),
+            _ => stored == wanted,
+        }
+    }
+
     /// Resolves a path from the root, one [`Self::read_dir`] per component.
-    /// Symbolic links are not followed.
+    /// Symbolic links are not followed. The same as [`Self::lookup_bytes`]
+    /// over the path's UTF-8.
     fn lookup(&self, path: &str) -> Result<Self::Node, Self::Error> {
+        self.lookup_bytes(path.as_bytes())
+    }
+
+    /// Resolves a byte path from the root: `/`-separated, empty components
+    /// ignored, each matched against [`DirEntry::bytes`] through
+    /// [`Self::names_match_bytes`]. A name that is not UTF-8 is found this
+    /// way. Symbolic links are not followed.
+    fn lookup_bytes(&self, path: &[u8]) -> Result<Self::Node, Self::Error> {
         let mut node = self.root()?;
-        let mut walked = String::new();
-        for component in path.split('/').filter(|part| !part.is_empty()) {
+        let mut walked = Vec::new();
+        for component in path
+            .split(|byte| *byte == b'/')
+            .filter(|part| !part.is_empty())
+        {
             if self.metadata(&node)?.kind != NodeKind::Directory {
-                return Err(ApiError::NotADirectory(walked).into());
+                let shown = String::from_utf8_lossy(&walked).into_owned();
+                return Err(ApiError::NotADirectory(shown).into());
             }
             let entries = self.read_dir(&node)?;
-            walked.push('/');
-            walked.push_str(component);
+            walked.push(b'/');
+            walked.extend_from_slice(component);
             node = entries
                 .into_iter()
-                .find(|entry| !entry.lossy && self.names_match(&entry.name, component))
-                .ok_or_else(|| ApiError::NotFound(walked.clone()))?
+                .find(|entry| self.names_match_bytes(&entry.bytes, component))
+                .ok_or_else(|| ApiError::NotFound(String::from_utf8_lossy(&walked).into_owned()))?
                 .node;
         }
         Ok(node)

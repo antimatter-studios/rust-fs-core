@@ -74,7 +74,10 @@ they reach is a `BlockRead`, which has no write method.
 |---|---|
 | `type Adapter: SalvageAdapter` | The format's salvage adapter: format context only, never a device. |
 | `source()` | The volume's source, lent read-only. |
+| `type Hypothesis` | What a caller may suppose about the geometry when the structures recording it are gone (block size, metadata start), in the format's own terms; plain serde data. `()` for a driver that never needs one. |
 | `adapter()` | The adapter for this volume, from whatever geometry survived; `SalvageError::NoGeometry` when none did. |
+| `hypotheses()` | Plausible hypotheses the driver infers from the surviving bytes, most likely first. Empty by default. |
+| `adapter_with(hypothesis)` / `salvage_with(hypothesis)` | The adapter built from a caller's hypothesis instead of the superblock, for a source whose superblock is gone. Results are evidence under that hypothesis. Defaults to `Unsupported(GeometryHypotheses)`. |
 | `structures()` | Every structure at a known location -- boot sectors, superblocks and their backups, allocation maps, record tables, directory roots, journals -- each with role, location, copy number and integrity. Damaged ones are listed, never left out. |
 | `salvage()` | The adapter bound to the source: a `Salvage` whose methods are the salvage verbs without the source argument. |
 
@@ -82,28 +85,39 @@ The format's own primitives -- FAT entries and chains, MFT records and
 attribute streams, inodes, B-tree nodes -- stay in the driver, as inherent
 methods or a driver trait that extends `PrimitiveAPI`.
 
-`SalvageAdapter` is the salvage-verb trait first written in rust-fs-exfat and
-moved here unchanged in shape:
+`SalvageAdapter` is the salvage-verb trait first written in rust-fs-exfat,
+moved here and extended where ext4 and EROFS did not fit:
 
 | Verb | Method | Result |
 |---|---|---|
 | Find candidates | `find_candidates(source, range, sink)` | `Candidate`s to the sink, then a `ScanReport` with unreadable ranges and a resume offset |
-| Walk chains or extents | `walk_extents(source, candidate)` | `ExtentWalk`: file-ordered `WalkExtent`s (file offset, source extent, `uninitialized`), with gaps as holes, and why the walk ended. `ExtentWalk::plan()` turns it into a `Plan` that rebuilds the data in place: zeros for holes and uninitialized runs. `ExtentWalk::contiguous` builds a hole-free walk (FAT, exFAT chains). |
+| Walk chains or extents | `walk_extents(source, candidate)` | `ExtentWalk`: file-ordered `WalkExtent`s -- file offset, source extent, `uninitialized`, and an `Encoding` (codec and decoded length) when the source bytes are compressed -- with gaps as holes, and why the walk ended. `claimed` is in file bytes; `mapped()` counts source bytes as stored. `ExtentWalk::plan()` turns it into a `Plan` that rebuilds the file in place: zeros for holes and uninitialized runs, `PlanStep::Encoded` for compressed runs. `ExtentWalk::contiguous` builds a hole-free walk (FAT, exFAT chains). |
 | Rebuild the tree | `rebuild_tree(source, candidates)` | `Tree`: every `ParentClaim` per candidate, with the name the claiming record gives it and that record's state. A hard-linked inode has one claim per link; a deleted entry's claim is weaker evidence than a live one. |
 | Report damage | `report_damage(source, sink)` | `Damage`s to the sink, then a `DamageReport` |
-| Read by extent | `read_extent(source, extent, offset, output)` | Bytes read: `Ok(0)` at the extent's end, `Bounds` past it |
-| Materialize from a plan | `materialize`, `plan_reader`, `check_plan` | Output bytes with the provenance of every byte |
+| Read by extent | `read_extent(source, extent, offset, output)` | Source bytes as stored: `Ok(0)` at the extent's end, `Bounds` past it |
+| Decode an extent | `read_encoded(source, stored, codec, offset, output)` | The decoded file bytes of an encoded walk extent, `Ok(0)` at their end. Bytes that do not decode are an error, never guessed. Defaults to `Unsupported(EncodedExtents)`. |
+| Materialize from a plan | `materialize`, `plan_reader`, `check_plan` | Output bytes with the provenance of every byte. An encoded step's output range is flagged `encoded` and names its stored bytes; `source_of` gives no single source byte for it. |
 
 `capabilities()` names the `Feature`s a driver lacks. A missing feature is
 refused with `SalvageError::Unsupported(feature)`; an empty result always
 means nothing was found. A read-only format (squashfs, erofs) lists
 `DeletedCandidates` and `DeletedExtents`. A format without a linear
-numbering of allocation units (btrfs, bcachefs) lists `ClusterSteps`.
+numbering of allocation units (btrfs, bcachefs) lists `ClusterSteps`. A
+format that stores nothing compressed lists `EncodedExtents`.
+
+A format with no record table -- EROFS, which finds inodes by scanning --
+needs a plausibility filter on what it reports as a candidate (decodes, has
+a link, names a file type, reserved fields zero), strong enough that a
+healthy image shows no failed candidates. Otherwise slots inside data blocks
+surface as damaged candidates, and the salvage set's `Reported` rule
+rejects them.
 
 Evidence -- candidates, walks, trees, damage, plans, reports, geometry,
 health, structures -- is plain serde data with no handles, so it can be
 stored, sent and compared. A plan's `digest()` is stable across platforms
 and releases; it is the same value rust-fs-exfat computed before the move.
+`PlanStep::Encoded` has its own tag in the canonical encoding, so a plan
+without one digests exactly as before.
 
 ## FileAPI -- `fs_core::layers::file`
 
@@ -114,7 +128,7 @@ number, MFT reference with sequence, directory-entry location):
 |---|---|
 | `type Node` | The handle, valid for the volume that issued it. |
 | `root()` | The root directory. |
-| `read_dir(node)` | Entries without `.` and `..`; `ApiError::NotADirectory` on anything else. Each `DirEntry` has a decoded `name` (`lossy` when undecodable), kind, size and node. |
+| `read_dir(node)` | Entries without `.` and `..`; `ApiError::NotADirectory` on anything else. Each `DirEntry` has a decoded `name`, its `bytes` (the stored bytes on a byte-named format, the UTF-8 of `name` on FAT, exFAT and NTFS), `lossy` when the bytes do not decode, kind, size and node. |
 | `metadata(node)` | `Metadata`: kind, size and, where the format records them, allocated bytes, times, mode, links and attribute bits. |
 | `read_at(node, offset, output)` | Exactly `min(bytes left, output.len())` bytes; 0 at or past the end; `ApiError::IsADirectory` on a directory. |
 
@@ -122,8 +136,10 @@ Provided on top, the same for every driver:
 
 | Item | Contract |
 |---|---|
-| `lookup(path)` | Absolute `/`-separated paths, empty components ignored, one `read_dir` per component. |
+| `lookup_bytes(path)` | Absolute `/`-separated byte paths, empty components ignored, one `read_dir` per component, matched on `DirEntry::bytes`. A name that is not UTF-8 is found this way. |
+| `lookup(path)` | `lookup_bytes` over the path's UTF-8. |
 | `names_match(stored, wanted)` | Exact by default. FAT, exFAT and NTFS override it with their case folding. |
+| `names_match_bytes(stored, wanted)` | `names_match` when both are UTF-8, byte for byte otherwise. |
 | `copy_to(node, sink)` | Exactly the file's size to an `io::Write`, or an error. |
 | `read_link(node)` | `ApiError::Unsupported` unless the format has links. |
 
@@ -149,15 +165,26 @@ conformance::check_damaged(&damaged, &Limits::default()).assert_passed();
 | Function | Checks |
 |---|---|
 | `check_volume` | Format name, bounded reads (end, straddle, `u64::MAX`), geometry units and layout, superblock, health consistent with its findings, and clean when asked. |
-| `check_primitive` | Adapter builds; structures listed, include a boot sector or superblock, and read alike through both layers; scan counts, bounds, stop and resume; walks stay on the source and map no more than claimed; trees keep one node per candidate in order; damage counts; extent reads refuse out of bounds; materialization returns the source's bytes; cluster layout agrees with geometry. Every missing feature must refuse as flagged, and every present one must run. |
-| `check_files` | The whole tree walks within the limits; names are valid and unique; metadata matches listings; every path resolves; every file copies exactly its size, reads exactly at 0 and the middle, and 0 at its end; refusals for absent paths, paths through files, listing a file and reading a directory; and the image holds the `Expected` files, directories and absences. |
-| `check_files_against_candidates` | Opt-in, for formats whose candidates carry names and whose data is stored uncompressed: every file has a live candidate, and salvaged bytes equal the file's bytes. |
+| `check_primitive` | Adapter builds; structures listed, include a boot sector or superblock, and read alike through both layers; scan counts, bounds, stop and resume; walks stay on the source, keep file order, end within the claim, plan to exactly the claim when complete, and every encoded extent decodes to its length; hypotheses build adapters; trees keep one node per candidate in order; damage counts; extent reads refuse out of bounds; materialization returns the source's bytes; cluster layout agrees with geometry. Every missing feature must refuse as flagged, and every present one must run. |
+| `check_files` | The whole tree walks within the limits; names are valid and unique, and agree with their bytes; metadata matches listings; every path resolves by its bytes, non-UTF-8 names included; every file copies exactly its size, reads exactly at 0 and the middle, and 0 at its end; refusals for absent paths, paths through files, listing a file and reading a directory; and the image holds the `Expected` files, directories and absences. |
+| `check_files_against_candidates` | Opt-in, for formats whose candidates carry names: every file has a live candidate, and where one candidate's complete walk claims the file's size, the bytes its plan rebuilds -- holes, uninitialized and encoded runs included -- equal the file's bytes. |
 | `salvage::run` | The deeper salvage set from rust-fs-exfat, over driver-built images with declared damage, unreadable sectors and strict-API rejection. |
 
 The report fails when nothing ran, and a tree larger than the `Limits`
 fails rather than being checked in part. Conformance proves a driver keeps
 the contract's shape; whether it reads the format correctly still needs an
 independent oracle.
+
+## Known limits
+
+- One source per volume. An `Extent` names bytes on the volume's one
+  `BlockRead`, so multi-device EROFS images and multi-device Btrfs walks end
+  `Broken` at the first extent on another device (#460).
+- `Geometry::sector_size` means little for an image format (EROFS,
+  SquashFS); such a driver reports 512, or its read granularity, with the
+  allocation unit equal to its block size.
+- Alternate copies of a structure (journal and log copies, a FAT mirror) have
+  no shared listing yet (#457).
 
 ## How the formats map
 
@@ -170,8 +197,8 @@ independent oracle.
 | XFS | superblock | block, linear per AG | AG headers (SB, AGF, AGI, AGFL), log | per driver |
 | Btrfs | superblock | sector; chunk-mapped, `layout` is `None` | superblock mirrors, chunk tree, root tree | `ClusterSteps` |
 | bcachefs | superblock | bucket; mapped, `layout` is `None` | superblock + backups, journal, btree roots | `ClusterSteps` |
-| EROFS | superblock | block | superblock, inode area | `DeletedCandidates`, `DeletedExtents` |
-| SquashFS | superblock | block (compressed data) | superblock, inode/directory/fragment/id tables | `DeletedCandidates`, `DeletedExtents` |
+| EROFS | superblock | block | superblock, inode area | `DeletedCandidates`, `DeletedExtents` (compressed pclusters are encoded extents) |
+| SquashFS | superblock | block (compressed data) | superblock, inode/directory/fragment/id tables | `DeletedCandidates`, `DeletedExtents` (compressed blocks are encoded extents) |
 
 A candidate's `Detail` must be `Serialize + DeserializeOwned`, so a driver
 adds its own `serde = { version = "1", features = ["derive"] }` dependency
