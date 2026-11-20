@@ -12,6 +12,49 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-20
+
+### Added
+
+- **The three driver API layers are shared traits, behind the `layers`
+  feature.** `fs_core::layers` defines `VolumeAPI` and `OpenVolume` (open,
+  probe, volume bytes, geometry, the superblock and its copies, health, and
+  what the driver supports on the volume), `PrimitiveAPI` (the
+  on-disk structures, read-only and damage-tolerant, with the salvage verbs
+  bound to the volume's source) and `FileAPI` (directory listing, metadata,
+  positioned reads, path lookup and copying on a healthy volume). Every
+  rust-fs driver implements them, so a consumer reaches any format through
+  one set of traits. `docs/three-layers.md` is the contract and says how
+  drivers pin this crate: by version or git tag, with a local `[patch]` kept
+  out of the published manifest.
+- **The salvage adapter, its evidence types and plans moved here from
+  rust-fs-exfat.** `SalvageAdapter`, `Candidate`, `ExtentWalk`, `Tree`,
+  `Damage`, `Plan`, `PlanReader` and the reports are unchanged in shape, and a
+  plan's digest is the value rust-fs-exfat computed. `Feature`, `DamageKind`
+  and `SalvageError` are now `#[non_exhaustive]`, so later releases can add to
+  them.
+- **A conformance helper any driver runs over its own images.**
+  `layers::conformance` checks each layer's contract -- bounded reads,
+  capability flags against refusals, scan counts and resumes, the layers
+  agreeing about the same bytes, every file reading back its size -- and
+  `layers::conformance::salvage` is the deeper salvage set from rust-fs-exfat.
+
+### Changed
+
+- **An extent walk keeps file offsets.** `ExtentWalk::extents` holds
+  file-ordered `WalkExtent`s (file offset, source extent, `uninitialized`),
+  and a gap between them is a hole, so sparse files and unwritten extents
+  survive a walk. `ExtentWalk::plan()` rebuilds the data in place, with zeros
+  for holes and uninitialized runs, and `ExtentWalk::contiguous()` builds a
+  chain-shaped walk.
+- **Parent claims carry the claiming entry's name and state.**
+  `TreeNode::parents` holds `ParentClaim`s, so hard links and deleted entries
+  are told apart on formats that keep names in directory entries.
+- **A damaged redundant copy makes a volume `Degraded`, not `Clean`.** A
+  warning finding sets `HealthState::Degraded`, and a clean volume carries no
+  findings.
+- `read_extent` at an extent's end returns `Ok(0)`.
+
 ## [0.4.6] — 2026-11-14
 
 ### Changed
@@ -1254,7 +1297,8 @@ rather than by recollection.
 - `OwnedRwSlice` and the `fs_core_device_slice_ro` / `_rw` C ABI, for
   addressing a partition inside a whole-disk device.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/antimatter-studios/rust-fs-core/compare/v0.4.3...v0.4.4
