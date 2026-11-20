@@ -112,7 +112,10 @@ pub enum HealthState {
 /// The volume's health: a state and the findings behind it.
 ///
 /// This is the quick verdict taken when a volume opens -- boot copies,
-/// superblock checksums, dirty flags. A full scan of every structure is
+/// superblock checksums, descriptor tables, dirty flags, the root -- and it
+/// can miss deep damage, such as a zeroed subdirectory block. `Clean` means
+/// the structures checked here are sound, not that the volume holds no
+/// damage. A full scan of every structure is
 /// [`SalvageAdapter::report_damage`](super::SalvageAdapter::report_damage).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

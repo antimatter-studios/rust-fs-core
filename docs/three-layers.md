@@ -57,7 +57,7 @@ they reach is a `BlockRead`, which has no write method.
 | `superblock()` | The decoded `Superblock` the volume was opened with. |
 | `superblocks()` | Every copy the format keeps, primary first, as `SuperblockCopy`: copy number, location, the decoded copy where it decodes, and its integrity. Damaged copies are listed, never left out. |
 | `support()` | `VolumeSupport` for this volume: whether `FileAPI` can browse it, the salvage features the driver lacks (equal to its adapter's capabilities), and the format features this volume uses that the driver cannot read. |
-| `health()` | The quick `VolumeHealth` verdict at open, with the `Damage` findings behind it. `VolumeHealth::from_findings` derives the state, worst first: an error finding makes it `Damaged`, a notice `NeedsRecovery` (dirty flag, journal to replay), a warning `Degraded` (a redundant copy is damaged, such as a dead backup superblock), and no findings `Clean`. `Unknown` when the driver cannot tell. A clean volume carries no findings. |
+| `health()` | The quick `VolumeHealth` verdict at open, with the `Damage` findings behind it. `VolumeHealth::from_findings` derives the state, worst first: an error finding makes it `Damaged`, a notice `NeedsRecovery` (dirty flag, journal to replay), a warning `Degraded` (a redundant copy is damaged, such as a dead backup superblock), and no findings `Clean`. `Unknown` when the driver cannot tell. A clean volume carries no findings. Quick: it reads what the driver reads to open (superblock copies, descriptor tables, the root) and can miss deep damage, such as a zeroed subdirectory block. A consumer does not show `Clean` as "no damage"; `report_damage` is the full scan. |
 
 `OpenVolume` (kept apart so `VolumeAPI` stays usable as a trait object):
 
@@ -97,6 +97,13 @@ moved here and extended where ext4 and EROFS did not fit:
 | Read by extent | `read_extent(source, extent, offset, output)` | Source bytes as stored: `Ok(0)` at the extent's end, `Bounds` past it |
 | Decode an extent | `read_encoded(source, stored, encoding, offset, output)` | The run's file bytes from an encoded walk extent, `offset` into the run, `Ok(0)` at its end. Bytes that do not decode are an error, never guessed. Defaults to `Unsupported(EncodedExtents)`. |
 | Materialize from a plan | `materialize`, `plan_reader`, `check_plan` | Output bytes with the provenance of every byte. An encoded step's output range is flagged `encoded` and names its stored bytes; `source_of` gives no single source byte for it. |
+
+An adapter holds format context, never a device, and decodes only from
+the source each call is given. It may cache what it decoded from a source
+-- a directory index, a name table -- only keyed on that source's identity
+and on a checksum of the structures the cache was built from, so an adapter
+built from one source decodes nothing from another, and a cache never
+outlives a change to the bytes it came from.
 
 `capabilities()` names the `Feature`s a driver lacks. A missing feature is
 refused with `SalvageError::Unsupported(feature)`; an empty result always
@@ -171,7 +178,12 @@ conformance::check_damaged(&damaged, &Limits::default()).assert_passed();
 | `salvage::run` | The deeper salvage set from rust-fs-exfat, over driver-built images with declared damage, unreadable sectors and strict-API rejection. |
 
 The report fails when nothing ran, and a tree larger than the `Limits`
-fails rather than being checked in part. Conformance proves a driver keeps
+fails rather than being checked in part: raise `max_nodes` and `max_walks`
+for a large fixture (build `Limits { max_nodes: 100_000, ..Limits::default() }`).
+Every check over a walked entry is linear, except path resolution, which
+reads every directory on the path: `max_lookups` spreads that many lookups
+evenly over the tree, always including names that are not UTF-8, and the
+report says how many ran. Conformance proves a driver keeps
 the contract's shape; whether it reads the format correctly still needs an
 independent oracle.
 
