@@ -23,6 +23,10 @@ pub mod error;
 pub mod ffi;
 #[cfg(any(unix, windows))]
 pub mod file_device;
+// The three driver API layers (VolumeAPI, PrimitiveAPI with the salvage
+// verbs, FileAPI), behind the `layers` feature.
+#[cfg(feature = "layers")]
+pub mod layers;
 pub mod readonly;
 pub mod slice;
 pub mod stream;
