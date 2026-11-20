@@ -98,6 +98,10 @@ pub enum HealthState {
     /// The format records that it was not cleanly unmounted, or that a
     /// journal or log must be replayed. Nothing checked is damaged.
     NeedsRecovery,
+    /// Everything checked is usable, but a redundant copy is damaged: a
+    /// broken backup superblock, a mirror that disagrees with its primary.
+    /// Nothing is lost yet; one more failure would lose it.
+    Degraded,
     /// A checked structure is damaged; see the findings.
     Damaged,
     /// The driver cannot tell, for example because it opened the volume
@@ -118,21 +122,18 @@ pub struct VolumeHealth {
 }
 
 impl VolumeHealth {
-    /// The state the findings imply: [`HealthState::Damaged`] when any is an
-    /// error, [`HealthState::NeedsRecovery`] when any is a notice, otherwise
-    /// [`HealthState::Clean`]. A warning is damage a redundant copy covers, so
-    /// alone it leaves the volume clean.
+    /// The state the findings imply, worst first: [`HealthState::Damaged`]
+    /// when any is an error, [`HealthState::NeedsRecovery`] when any is a
+    /// notice, [`HealthState::Degraded`] when any is a warning, otherwise
+    /// [`HealthState::Clean`]. So a clean volume carries no findings.
     pub fn from_findings(findings: Vec<Damage>) -> Self {
-        let state = if findings
-            .iter()
-            .any(|finding| finding.severity == Severity::Error)
-        {
+        let worst = |severity| findings.iter().any(|f| f.severity == severity);
+        let state = if worst(Severity::Error) {
             HealthState::Damaged
-        } else if findings
-            .iter()
-            .any(|finding| finding.severity == Severity::Notice)
-        {
+        } else if worst(Severity::Notice) {
             HealthState::NeedsRecovery
+        } else if worst(Severity::Warning) {
+            HealthState::Degraded
         } else {
             HealthState::Clean
         };

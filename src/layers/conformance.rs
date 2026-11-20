@@ -303,15 +303,14 @@ pub fn check_volume<V: VolumeAPI + ?Sized>(volume: &V, expect_clean: bool) -> Re
     }
     match volume.health() {
         Ok(health) => {
-            let errors = health
-                .findings
-                .iter()
-                .any(|finding| finding.severity == super::salvage::Severity::Error);
             report.record(
                 "volume.health-consistent",
-                // An error finding means damaged, and damaged needs a finding.
-                (!errors || health.state == HealthState::Damaged)
-                    && (health.state != HealthState::Damaged || !health.findings.is_empty()),
+                // The state is what the findings imply, unless the driver
+                // cannot tell.
+                health.state == HealthState::Unknown
+                    || health.state
+                        == super::volume::VolumeHealth::from_findings(health.findings.clone())
+                            .state,
                 format!(
                     "{:?} with {} finding(s)",
                     health.state,
@@ -631,13 +630,21 @@ fn check_walks<A: SalvageAdapter>(
         walked += 1;
         let mapped = walk.mapped();
         let inside = walk
+            .sources()
+            .all(|e| e.end().is_some_and(|end| end <= size));
+        let ordered = walk
+            .extents
+            .windows(2)
+            .all(|pair| pair[0].end().is_some_and(|end| end <= pair[1].offset));
+        let within_claim = walk
             .extents
             .iter()
-            .all(|e| e.end().is_some_and(|end| end <= size));
-        let complete_covers = walk.end != WalkEnd::Complete || mapped == walk.claimed;
-        if !inside || mapped > walk.claimed || !complete_covers {
+            .all(|e| e.end().is_some_and(|end| end <= walk.claimed));
+        let plan_length = walk.plan().length();
+        let complete_covers = walk.end != WalkEnd::Complete || plan_length == Some(walk.claimed);
+        if !inside || !ordered || !within_claim || mapped > walk.claimed || !complete_covers {
             problems.push(format!(
-                "{:?}: mapped {mapped} of {} claimed, end {:?}, inside {inside}",
+                "{:?}: mapped {mapped} of {} claimed, end {:?}, inside {inside}, in file order {ordered}, within the claim {within_claim}, plan {plan_length:?}",
                 candidate.location, walk.claimed, walk.end
             ));
         }
@@ -676,8 +683,8 @@ fn check_tree<A: SalvageAdapter>(
         .nodes
         .iter()
         .flat_map(|node| node.parents.iter())
-        .filter_map(|parent| match parent {
-            super::salvage::Parent::Candidate(offset) if !offsets.contains(offset) => Some(*offset),
+        .filter_map(|claim| match claim.parent {
+            super::salvage::Parent::Candidate(offset) if !offsets.contains(&offset) => Some(offset),
             _ => None,
         })
         .collect();
@@ -740,6 +747,12 @@ fn check_read_extent<A: SalvageAdapter>(
         "primitive.read-extent",
         matches!(read, Ok(n) if n as u64 == length),
         describe_salvage(&read),
+    );
+    let at_end = salvage.read_extent(Extent::new(0, length), length, &mut buffer);
+    report.record(
+        "primitive.read-extent-at-its-end-reads-nothing",
+        matches!(at_end, Ok(0)),
+        describe_salvage(&at_end),
     );
     let past_offset = salvage.read_extent(Extent::new(0, length), length + 1, &mut buffer);
     report.record(
@@ -1173,17 +1186,10 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
         let Ok(walked) = salvage.walk_extents(candidate) else {
             continue;
         };
-        if walked.end != WalkEnd::Complete || walked.mapped() != entry.size {
+        if walked.end != WalkEnd::Complete || walked.claimed != entry.size {
             continue;
         }
-        let plan = Plan::new(
-            walked
-                .extents
-                .iter()
-                .copied()
-                .map(PlanStep::Extent)
-                .collect(),
-        );
+        let plan = walked.plan();
         let mut through_salvage = Vec::new();
         let mut through_files = Vec::new();
         let salvaged = salvage.materialize(&plan, &mut through_salvage);

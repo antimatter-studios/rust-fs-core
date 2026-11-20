@@ -313,22 +313,113 @@ pub enum WalkEnd {
     Unreadable(Extent),
 }
 
+/// One run of a candidate's storage: the file bytes from `offset` are held
+/// by the source bytes `source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkExtent {
+    /// The byte offset in the candidate's own data (the file offset).
+    pub offset: u64,
+    /// The source bytes the format allocated for that data.
+    pub source: Extent,
+    /// The format allocated the bytes but records them as not yet written
+    /// (an ext4 uninitialized extent, an XFS unwritten extent): they read as
+    /// zeros, whatever the source holds.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub uninitialized: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl WalkExtent {
+    /// The first file byte past the run, or `None` when not representable.
+    pub fn end(&self) -> Option<u64> {
+        self.offset.checked_add(self.source.length)
+    }
+}
+
 /// The storage a candidate claims, as far as its map could be followed.
+///
+/// Extents are in file order and do not overlap in the file. A gap between
+/// them, or before the first, is a hole: the format stores nothing there and
+/// the bytes read as zeros (sparse files on ext4, XFS and NTFS). Adjacent
+/// extents are merged where both the file and the source continue and the
+/// `uninitialized` flags agree. Every extent ends at or before `claimed`.
+/// Data stored inside a record (ext4 inline data, an NTFS resident
+/// attribute) is an extent over those record bytes. Data a format stores
+/// compressed is not expressible as extents; such a driver reads it through
+/// its own primitives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtentWalk {
-    /// Source byte ranges in claim order, merged where adjacent and trimmed to
-    /// the claimed size. A broken walk keeps every extent it reached.
-    pub extents: Vec<Extent>,
+    /// File-ordered runs, trimmed to the claimed size. A broken walk keeps
+    /// every extent it reached.
+    pub extents: Vec<WalkExtent>,
     /// Bytes the candidate claims.
     pub claimed: u64,
+    /// [`WalkEnd::Complete`] means every claimed byte is accounted for: held
+    /// by an extent, uninitialized, or a hole.
     pub end: WalkEnd,
 }
 
 impl ExtentWalk {
-    /// Bytes the walk mapped onto the source.
+    /// A walk whose source extents hold the file back to back from offset 0,
+    /// with no holes: the shape of a FAT or exFAT cluster chain.
+    pub fn contiguous(sources: Vec<Extent>, claimed: u64, end: WalkEnd) -> Self {
+        let mut offset = 0u64;
+        let extents = sources
+            .into_iter()
+            .map(|source| {
+                let extent = WalkExtent {
+                    offset,
+                    source,
+                    uninitialized: false,
+                };
+                offset = offset.saturating_add(source.length);
+                extent
+            })
+            .collect();
+        Self {
+            extents,
+            claimed,
+            end,
+        }
+    }
+
+    /// Bytes the walk mapped onto the source, uninitialized ones included.
     pub fn mapped(&self) -> u64 {
-        self.extents.iter().map(|extent| extent.length).sum()
+        self.extents.iter().map(|extent| extent.source.length).sum()
+    }
+
+    /// The source extents, in file order.
+    pub fn sources(&self) -> impl Iterator<Item = Extent> + '_ {
+        self.extents.iter().map(|extent| extent.source)
+    }
+
+    /// The plan that rebuilds the candidate's data from this walk: source
+    /// bytes where they are stored, zeros for holes and uninitialized runs.
+    /// A complete walk's plan is exactly `claimed` bytes long; an incomplete
+    /// one ends at the last byte the walk reached.
+    pub fn plan(&self) -> Plan {
+        let mut steps = Vec::new();
+        let mut at = 0u64;
+        for extent in &self.extents {
+            if extent.offset > at {
+                steps.push(PlanStep::Zeros(extent.offset - at));
+            }
+            steps.push(if extent.uninitialized {
+                PlanStep::Zeros(extent.source.length)
+            } else {
+                PlanStep::Extent(extent.source)
+            });
+            at = extent.offset.saturating_add(extent.source.length);
+        }
+        if self.end == WalkEnd::Complete && self.claimed > at {
+            steps.push(PlanStep::Zeros(self.claimed - at));
+        }
+        Plan::new(steps)
     }
 }
 
@@ -341,15 +432,45 @@ pub enum Parent {
     Candidate(u64),
 }
 
+/// One claim that a candidate sits under a parent, with the name and state
+/// of the record that makes it.
+///
+/// Formats that keep names in directory entries rather than in the object
+/// (ext4, XFS, Btrfs, bcachefs) give each claim its own name: a hard-linked
+/// inode has one claim per link. A claim that names nothing, such as a
+/// directory's own `..`, has no name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentClaim {
+    pub parent: Parent,
+    /// The name the claiming record gives the candidate.
+    pub name: Option<String>,
+    /// The claiming record's state: a live entry is stronger evidence than a
+    /// deleted one.
+    pub state: CandidateState,
+}
+
+impl ParentClaim {
+    /// A claim with no name, made by a live record.
+    pub fn live(parent: Parent) -> Self {
+        Self {
+            parent,
+            name: None,
+            state: CandidateState::Live,
+        }
+    }
+}
+
 /// One candidate's place in the rebuilt tree.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TreeNode {
     /// The candidate's `location.offset`.
     pub candidate: u64,
-    /// Every parent claim found. None makes an orphan; more than one is a
-    /// conflicting parent claim. Claims are evidence and may form cycles.
-    pub parents: Vec<Parent>,
+    /// Every parent claim found. None makes an orphan. More than one is
+    /// either hard links, on a format that has them, or conflicting claims;
+    /// the claims' names and states are the evidence. Claims may form cycles.
+    pub parents: Vec<ParentClaim>,
 }
 
 /// Relationships rebuilt from candidates, one node per candidate in input order.
@@ -364,6 +485,9 @@ impl Tree {
         self.nodes.iter().filter(|node| node.parents.is_empty())
     }
 
+    /// Nodes with more than one parent claim: conflicting claims, or hard
+    /// links on a format that has them. The claims' names and states tell
+    /// which.
     pub fn conflicts(&self) -> impl Iterator<Item = &TreeNode> {
         self.nodes.iter().filter(|node| node.parents.len() > 1)
     }
@@ -558,7 +682,8 @@ pub trait SalvageAdapter {
     /// extent's end or the output's length, and returns how many were read.
     ///
     /// Fails with [`SalvageError::Bounds`] when `offset` exceeds the extent's
-    /// length or the extent leaves the source.
+    /// length or the extent leaves the source. An `offset` equal to the
+    /// length reads nothing and returns `Ok(0)`.
     fn read_extent(
         &self,
         source: &dyn BlockRead,

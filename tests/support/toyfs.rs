@@ -18,9 +18,9 @@
 use fs_core::layers::{
     check_bounds, ApiError, Candidate, CandidateKind, CandidateState, Capabilities, ClusterLayout,
     Damage, DamageKind, DamageReport, DirEntry, Extent, ExtentWalk, Feature, FileAPI, Geometry,
-    Integrity, Metadata, NodeKind, OpenVolume, Parent, PrimitiveAPI, Probe, Recognition,
-    SalvageAdapter, SalvageError, ScanReport, Severity, Sink, Structure, StructureRole,
-    SuperblockCopy, Tree, TreeNode, VolumeAPI, VolumeHealth, VolumeSupport, WalkEnd,
+    Integrity, Metadata, NodeKind, OpenVolume, Parent, ParentClaim, PrimitiveAPI, Probe,
+    Recognition, SalvageAdapter, SalvageError, ScanReport, Severity, Sink, Structure,
+    StructureRole, SuperblockCopy, Tree, TreeNode, VolumeAPI, VolumeHealth, VolumeSupport, WalkEnd,
 };
 use fs_core::BlockRead;
 use serde::{Deserialize, Serialize};
@@ -649,22 +649,18 @@ impl SalvageAdapter for ToyAdapter {
         let start = candidate.detail.first * BLOCK;
         let blocks = claimed.div_ceil(BLOCK);
         if candidate.detail.first + blocks > self.blocks || start + claimed > source.size_bytes() {
-            return Ok(ExtentWalk {
-                extents: Vec::new(),
+            return Ok(ExtentWalk::contiguous(
+                Vec::new(),
                 claimed,
-                end: WalkEnd::OutOfRange,
-            });
+                WalkEnd::OutOfRange,
+            ));
         }
         let extents = if claimed == 0 {
             Vec::new()
         } else {
             vec![Extent::new(start, claimed)]
         };
-        Ok(ExtentWalk {
-            extents,
-            claimed,
-            end: WalkEnd::Complete,
-        })
+        Ok(ExtentWalk::contiguous(extents, claimed, WalkEnd::Complete))
     }
 
     fn rebuild_tree(
@@ -675,8 +671,13 @@ impl SalvageAdapter for ToyAdapter {
         let mut nodes: Vec<TreeNode> = candidates
             .iter()
             .map(|candidate| {
+                let claim = |parent| ParentClaim {
+                    parent,
+                    name: candidate.name.clone(),
+                    state: candidate.state,
+                };
                 let parents = if candidate.detail.directory == self.root {
-                    vec![Parent::Root]
+                    vec![claim(Parent::Root)]
                 } else {
                     candidates
                         .iter()
@@ -684,7 +685,7 @@ impl SalvageAdapter for ToyAdapter {
                             parent.kind == CandidateKind::Directory
                                 && parent.detail.first == candidate.detail.directory
                         })
-                        .map(|parent| Parent::Candidate(parent.location.offset))
+                        .map(|parent| claim(Parent::Candidate(parent.location.offset)))
                         .collect()
                 };
                 TreeNode {

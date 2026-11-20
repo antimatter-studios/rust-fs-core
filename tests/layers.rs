@@ -240,7 +240,11 @@ fn health_follows_the_worst_finding() {
         detail: String::new(),
     };
     assert!(VolumeHealth::from_findings(Vec::new()).is_clean());
-    assert!(VolumeHealth::from_findings(vec![finding(Severity::Warning)]).is_clean());
+    assert_eq!(
+        VolumeHealth::from_findings(vec![finding(Severity::Warning)]).state,
+        HealthState::Degraded,
+        "a dead backup is not clean"
+    );
     assert_eq!(
         VolumeHealth::from_findings(vec![finding(Severity::Notice)]).state,
         HealthState::NeedsRecovery
@@ -266,7 +270,7 @@ fn the_bound_salvage_verbs_read_the_volume_source() {
         .find(|c| c.name.as_deref() == Some("leaf"))
         .unwrap();
     let walk = salvage.walk_extents(leaf).unwrap();
-    let plan = Plan::new(walk.extents.iter().copied().map(PlanStep::Extent).collect());
+    let plan = walk.plan();
     let reader = salvage.plan_reader(&plan).unwrap();
     let mut out = [0u8; 10];
     reader.read_at(0, &mut out).unwrap();
@@ -402,5 +406,93 @@ fn plans_resolve_lengths_and_refuse_what_they_cannot_execute() {
             .validate(0)
             .unwrap(),
         6
+    );
+}
+
+#[test]
+fn a_walk_with_holes_and_uninitialized_runs_plans_the_file_in_place() {
+    use fs_core::layers::{ExtentWalk, WalkEnd, WalkExtent};
+    let walk = ExtentWalk {
+        extents: vec![
+            WalkExtent {
+                offset: 4096,
+                source: Extent::new(8192, 100),
+                uninitialized: false,
+            },
+            WalkExtent {
+                offset: 8192,
+                source: Extent::new(16384, 50),
+                uninitialized: true,
+            },
+        ],
+        claimed: 10000,
+        end: WalkEnd::Complete,
+    };
+    assert_eq!(walk.mapped(), 150);
+    let plan = walk.plan();
+    assert_eq!(
+        plan.steps,
+        vec![
+            PlanStep::Zeros(4096),
+            PlanStep::Extent(Extent::new(8192, 100)),
+            PlanStep::Zeros(3996),
+            PlanStep::Zeros(50),
+            PlanStep::Zeros(10000 - 8242),
+        ]
+    );
+    assert_eq!(plan.length(), Some(10000));
+    let broken = ExtentWalk {
+        end: WalkEnd::Broken,
+        ..walk.clone()
+    };
+    assert_eq!(
+        broken.plan().length(),
+        Some(8242),
+        "a broken walk plans what it reached"
+    );
+    let json = serde_json::to_string(&walk).unwrap();
+    assert_eq!(serde_json::from_str::<ExtentWalk>(&json).unwrap(), walk);
+    let contiguous = ExtentWalk::contiguous(
+        vec![Extent::new(512, 512), Extent::new(4096, 10)],
+        522,
+        WalkEnd::Complete,
+    );
+    assert_eq!(contiguous.extents[1].offset, 512);
+    assert_eq!(contiguous.plan().length(), Some(522));
+}
+
+#[test]
+fn parent_claims_carry_the_name_and_state_of_the_entry_making_them() {
+    let volume = open();
+    let salvage = volume.salvage().unwrap();
+    let candidates = salvage.all_candidates().unwrap();
+    let tree = salvage.rebuild_tree(&candidates).unwrap();
+    let leaf = candidates
+        .iter()
+        .position(|c| c.name.as_deref() == Some("leaf"))
+        .unwrap();
+    let claim = &tree.nodes[leaf].parents[0];
+    assert_eq!(claim.name.as_deref(), Some("leaf"));
+    assert_eq!(claim.state, fs_core::layers::CandidateState::Live);
+    let gone = candidates
+        .iter()
+        .position(|c| c.name.as_deref() == Some("gone.txt"))
+        .unwrap();
+    assert_eq!(
+        tree.nodes[gone].parents[0].state,
+        fs_core::layers::CandidateState::Deleted
+    );
+}
+
+#[test]
+fn reading_an_extent_at_its_end_reads_nothing() {
+    let volume = open();
+    let salvage = volume.salvage().unwrap();
+    let mut buffer = [0u8; 4];
+    assert_eq!(
+        salvage
+            .read_extent(Extent::new(0, 8), 8, &mut buffer)
+            .unwrap(),
+        0
     );
 }

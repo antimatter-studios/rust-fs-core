@@ -887,9 +887,9 @@ impl<D: Driver> Run<'_, D> {
                     self.exercised.insert(Feature::DeletedExtents);
                 }
             }
-            for extent in &walk.extents {
+            for extent in walk.sources() {
                 if reads < READS {
-                    self.read_back(subject, *extent);
+                    self.read_back(subject, extent);
                     reads += 1;
                 }
             }
@@ -915,33 +915,44 @@ impl<D: Driver> Run<'_, D> {
         let case = subject.case;
         let size = subject.image.size();
         let off_source: Vec<_> = walk
-            .extents
-            .iter()
+            .sources()
             .filter(|extent| extent.length == 0 || extent.end().is_none_or(|end| end > size))
             .collect();
         self.check(Rule::Consistency, case, off_source.is_empty(), || {
             format!("the walk of the candidate at byte {at} names empty extents or extents off the source: {off_source:?}")
         });
-        let unmerged = walk
+        let unordered = walk
             .extents
             .windows(2)
-            .any(|pair| pair[0].end() == Some(pair[1].offset));
+            .any(|pair| pair[0].end().is_none_or(|end| end > pair[1].offset));
+        self.check(Rule::Consistency, case, !unordered, || {
+            format!(
+                "the walk of the candidate at byte {at} is not in file order or overlaps in the file: {:?}",
+                walk.extents
+            )
+        });
+        let unmerged = walk.extents.windows(2).any(|pair| {
+            pair[0].end() == Some(pair[1].offset)
+                && pair[0].source.end() == Some(pair[1].source.offset)
+                && pair[0].uninitialized == pair[1].uninitialized
+        });
         self.check(Rule::Consistency, case, !unmerged, || {
             format!(
                 "the walk of the candidate at byte {at} leaves adjacent extents unmerged: {:?}",
                 walk.extents
             )
         });
-        let mapped = walk
-            .extents
-            .iter()
-            .try_fold(0u64, |total, extent| total.checked_add(extent.length));
-        let fits = mapped.is_some_and(|mapped| {
-            mapped <= walk.claimed && (walk.end != WalkEnd::Complete || mapped == walk.claimed)
+        let mapped = walk.extents.iter().try_fold(0u64, |total, extent| {
+            total.checked_add(extent.source.length)
         });
+        let fits = mapped.is_some_and(|mapped| mapped <= walk.claimed)
+            && walk
+                .extents
+                .iter()
+                .all(|extent| extent.end().is_some_and(|end| end <= walk.claimed));
         self.check(Rule::Consistency, case, fits, || {
             format!(
-                "the walk of the candidate at byte {at} maps {mapped:?} of {} claimed bytes and ends {:?}",
+                "the walk of the candidate at byte {at} maps {mapped:?} of {} claimed bytes, or runs past them, and ends {:?}",
                 walk.claimed, walk.end
             )
         });
@@ -995,7 +1006,7 @@ impl<D: Driver> Run<'_, D> {
             .filter(|node| {
                 node.parents.iter().enumerate().any(|(index, parent)| {
                     node.parents[..index].contains(parent)
-                        || matches!(parent, Parent::Candidate(offset) if !known.contains(offset))
+                        || matches!(parent.parent, Parent::Candidate(offset) if !known.contains(&offset))
                 })
             })
             .collect();
@@ -1142,7 +1153,7 @@ impl<D: Driver> Run<'_, D> {
         let mut budget = PLAN_BYTES;
         for extent in walks
             .iter()
-            .flat_map(|(_, walk)| &walk.extents)
+            .flat_map(|(_, walk)| walk.sources())
             .take(PLAN_EXTENTS)
         {
             let length = extent.length.min(budget);
@@ -1779,7 +1790,7 @@ mod tests {
     //! Records: 64-byte slots after it, each naming a data extent.
 
     use super::*;
-    use crate::layers::salvage::{CandidateKind, TreeNode};
+    use crate::layers::salvage::{CandidateKind, ParentClaim, TreeNode};
     use serde::Deserialize;
 
     const SLOT: u64 = 64;
@@ -2075,11 +2086,7 @@ mod tests {
                 _ if start < size => (vec![Extent::new(start, size - start)], WalkEnd::OutOfRange),
                 _ => (Vec::new(), WalkEnd::OutOfRange),
             };
-            Ok(ExtentWalk {
-                extents,
-                claimed,
-                end,
-            })
+            Ok(ExtentWalk::contiguous(extents, claimed, end))
         }
 
         fn rebuild_tree(
@@ -2091,7 +2098,7 @@ mod tests {
                 .iter()
                 .map(|candidate| TreeNode {
                     candidate: candidate.location.offset,
-                    parents: vec![Parent::Root],
+                    parents: vec![ParentClaim::live(Parent::Root)],
                 })
                 .collect();
             Ok(Tree { nodes })
