@@ -1266,8 +1266,8 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
     // A candidate's names: its own, and those its live parent claims give
     // it, since an inode format keeps names in directory entries.
     let claims = salvage.rebuild_tree(&candidates).ok();
-    let names_of = |index: usize| -> Vec<String> {
-        let own = candidates[index].name.clone();
+    let names_of = |index: usize| -> Vec<Vec<u8>> {
+        let own = candidates[index].name.clone().map(String::into_bytes);
         let claimed = claims
             .as_ref()
             .and_then(|tree| tree.nodes.get(index))
@@ -1282,7 +1282,7 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
     let mut compared = 0usize;
     for Walked { path, entry, .. } in walk
         .iter()
-        .filter(|w| w.entry.kind == NodeKind::File && w.entry.size > 0 && !w.entry.lossy)
+        .filter(|w| w.entry.kind == NodeKind::File && w.entry.size > 0)
     {
         let mut matching: Vec<_> = candidates
             .iter()
@@ -1292,7 +1292,7 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
                     && c.state == CandidateState::Live
                     && names_of(*index)
                         .iter()
-                        .any(|name| volume.names_match(name, &entry.name))
+                        .any(|name| volume.names_match_bytes(name, &entry.bytes))
             })
             .map(|(_, c)| c)
             .collect();

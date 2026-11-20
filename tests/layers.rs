@@ -40,13 +40,14 @@ fn a_conforming_driver_passes_every_layer() {
     assert!(report.checks.len() > 30, "{report}");
     let cross = conformance::check_files_against_candidates(&volume, &Limits::default());
     cross.assert_passed();
-    // The encoded file is among those compared byte for byte.
+    // The encoded file and the one with a name that is not UTF-8 are among
+    // those compared byte for byte.
     let compared = cross
         .checks
         .iter()
         .find(|check| check.name == "cross.salvaged-bytes-match-files")
         .unwrap();
-    assert!(compared.detail.starts_with("5 compared"), "{cross}");
+    assert!(compared.detail.starts_with("6 compared"), "{cross}");
 }
 
 #[test]
@@ -484,7 +485,7 @@ fn parent_claims_carry_the_name_and_state_of_the_entry_making_them() {
         .position(|c| c.name.as_deref() == Some("leaf"))
         .unwrap();
     let claim = &tree.nodes[leaf].parents[0];
-    assert_eq!(claim.name.as_deref(), Some("leaf"));
+    assert_eq!(claim.name.as_deref(), Some(&b"leaf"[..]));
     assert_eq!(claim.state, fs_core::layers::CandidateState::Live);
     let gone = candidates
         .iter()

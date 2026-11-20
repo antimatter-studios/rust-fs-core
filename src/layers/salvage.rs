@@ -510,8 +510,11 @@ pub enum Parent {
 #[serde(rename_all = "camelCase")]
 pub struct ParentClaim {
     pub parent: Parent,
-    /// The name the claiming record gives the candidate.
-    pub name: Option<String>,
+    /// The name the claiming record gives the candidate, as bytes: as stored
+    /// on a format whose names are bytes (ext4, XFS, Btrfs, EROFS), and the
+    /// UTF-8 of the name on one that stores text (FAT, exFAT, NTFS), as
+    /// [`DirEntry::bytes`](super::DirEntry::bytes) holds it.
+    pub name: Option<Vec<u8>>,
     /// The claiming record's state: a live entry is stronger evidence than a
     /// deleted one.
     pub state: CandidateState,

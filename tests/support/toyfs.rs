@@ -637,6 +637,8 @@ pub struct ToyDetail {
     pub directory: u64,
     /// Stored by the `reverse` codec.
     pub encoded: bool,
+    /// The entry's name as stored, which `name` may hold lossily.
+    pub name: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -702,6 +704,7 @@ impl SalvageAdapter for ToyAdapter {
                         first: entry.first,
                         directory: block,
                         encoded: entry.kind & 0x7f == 3,
+                        name: entry.name.clone(),
                     },
                 };
                 report.candidates += 1;
@@ -762,7 +765,7 @@ impl SalvageAdapter for ToyAdapter {
             .map(|candidate| {
                 let claim = |parent| ParentClaim {
                     parent,
-                    name: candidate.name.clone(),
+                    name: Some(candidate.detail.name.clone()),
                     state: candidate.state,
                 };
                 let parents = if candidate.detail.directory == self.root {
