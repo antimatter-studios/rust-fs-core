@@ -56,11 +56,19 @@ const LABELS: &[&str] = &["darwin-arm64", "linux-x86_64"];
 /// its next release failing on a leg it did not ask for (#232).
 const OPT_IN: &str = "windows";
 
-/// The Windows legs, label and native runner, packaged only when a caller
-/// opts in.
+/// The Windows legs, label and the runner-gate class that picks their native
+/// runner, packaged only when a caller opts in.
 const WINDOWS: &[(&str, &str)] = &[
-    ("windows-x86_64", "windows-latest"),
-    ("windows-arm64", "windows-11-arm"),
+    ("windows-x86_64", "windows-x64"),
+    ("windows-arm64", "windows-arm64"),
+];
+
+/// The runner-gate class that picks each always-on leg's native runner.
+const CLASSES: &[(&str, &str)] = &[
+    ("darwin-arm64", "macos-arm64"),
+    ("linux-x86_64", "linux-x64"),
+    ("windows-x86_64", "windows-x64"),
+    ("windows-arm64", "windows-arm64"),
 ];
 
 fn load(yaml: &str) -> Yaml<'static> {
@@ -149,57 +157,44 @@ fn needs(job: &Yaml) -> Vec<String> {
     }
 }
 
-/// `(label, runner)` of every entry in a sequence of matrix entries.
-fn legs(entries: &Yaml) -> BTreeSet<(String, String)> {
-    entries
-        .as_sequence()
-        .map(|s| {
-            s.iter()
-                .filter_map(|e| {
-                    let label = e.as_mapping_get("label").and_then(Yaml::as_str)?;
-                    let runner = e.as_mapping_get("runner").and_then(Yaml::as_str)?;
-                    Some((label.to_owned(), runner.to_owned()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// The label a packaging job builds for: the `LABEL` its packaging step
+/// passes to core's script. Each platform is its own job, with its own gate,
+/// so a platform's runner is picked for that platform alone.
+fn leg_label(job: &Yaml) -> Option<String> {
+    steps(job)
+        .into_iter()
+        .find(|s| runs(s, PACKAGE))
+        .and_then(|s| s.as_mapping_get("env"))
+        .and_then(|e| e.as_mapping_get("LABEL"))
+        .and_then(Yaml::as_str)
+        .map(str::to_owned)
 }
 
-type Legs = BTreeSet<(String, String)>;
+/// Whether a job runs only for a caller that sets the opt-in.
+fn only_when_opted_in(job: &Yaml) -> bool {
+    let cond = job
+        .as_mapping_get("if")
+        .and_then(Yaml::as_str)
+        .unwrap_or("")
+        .trim();
+    cond == format!("inputs.{OPT_IN}") || cond == format!("${{{{ inputs.{OPT_IN} }}}}")
+}
 
-/// The legs `strategy.matrix.include` runs, `(label, runner)`, for a caller
-/// that leaves the opt-in off and for one that sets it. A static list runs
-/// the same legs for both. The only other shape read is the one the
-/// workflow uses,
-///
-/// ```text
-/// ${{ fromJSON(inputs.windows && '<legs when on>' || '<legs when off>') }}
-/// ```
-///
-/// with each list in JSON, which is YAML's flow style; anything else is
-/// read as no legs at all, which no caller can release with.
-fn labels(job: &Yaml) -> (Legs, Legs) {
-    let Some(include) = job
-        .as_mapping_get("strategy")
-        .and_then(|s| s.as_mapping_get("matrix"))
-        .and_then(|m| m.as_mapping_get("include"))
-    else {
-        return Default::default();
-    };
-    if include.as_sequence().is_some() {
-        let both = legs(include);
-        return (both.clone(), both);
+/// The runner-gate class a job's gate job picks, when the job takes its
+/// runner from `needs.<job>-gate.outputs.runner`.
+fn gate_class(jobs: &Yaml, job_name: &str) -> Option<String> {
+    let job = jobs.as_mapping_get(job_name)?;
+    let runs_on = job.as_mapping_get("runs-on").and_then(Yaml::as_str)?;
+    let gate = format!("{job_name}-gate");
+    if runs_on.trim() != format!("${{{{ needs.{gate}.outputs.runner }}}}") {
+        return None;
     }
-    let expr = include.as_str().unwrap_or("").trim();
-    let on_prefix = format!("${{{{ fromJSON(inputs.{OPT_IN} && '");
-    let parsed = expr
-        .strip_prefix(on_prefix.as_str())
-        .and_then(|rest| rest.strip_suffix("') }}"))
-        .and_then(|rest| rest.split_once("' || '"));
-    let Some((on, off)) = parsed else {
-        return Default::default();
-    };
-    (legs(&load(off)), legs(&load(on)))
+    let gate_job = jobs.as_mapping_get(&gate)?;
+    steps(gate_job)
+        .into_iter()
+        .find_map(|s| s.as_mapping_get("run").and_then(Yaml::as_str))
+        .and_then(|r| r.trim().strip_prefix("runner-gate pick "))
+        .map(|c| c.trim().to_owned())
 }
 
 /// Everything wrong with `yaml` as the family's release-tarball workflow;
@@ -301,9 +296,10 @@ fn gaps(yaml: &str) -> Vec<String> {
         }
     }
 
-    if packaging.len() != 1 {
+    let platforms = LABELS.len() + WINDOWS.len();
+    if packaging.len() != platforms {
         gaps.push(format!(
-            "{} jobs run `{PACKAGE}`, not one: {packaging:?}",
+            "{} jobs run `{PACKAGE}`, not one per platform ({platforms}): {packaging:?}",
             packaging.len()
         ));
     }
@@ -326,68 +322,76 @@ fn gaps(yaml: &str) -> Vec<String> {
         }
     }
 
-    let (Some(pack), Some(attach)) = (packaging.first(), attaching.first()) else {
+    let (Some(_), Some(attach)) = (packaging.first(), attaching.first()) else {
         return gaps;
     };
-    let pack_job = jobs_node.as_mapping_get(pack).expect("named job");
     let attach_job = jobs_node.as_mapping_get(attach).expect("named job");
-    if pack == attach {
+    if packaging.iter().any(|p| p == attach) {
         gaps.push(format!(
-            "job {pack} both builds and attests, so the build holds the release's grants"
+            "job {attach} both builds and attests, so the build holds the release's grants"
         ));
         return gaps;
     }
 
     let want: BTreeSet<String> = LABELS.iter().map(|l| (*l).to_owned()).collect();
-    let (off, on) = labels(pack_job);
-    let have: BTreeSet<String> = off.iter().map(|(l, _)| l.clone()).collect();
-    if have != want {
+    let mut off = BTreeSet::new();
+    let mut on = BTreeSet::new();
+    for pack in &packaging {
+        let pack_job = jobs_node.as_mapping_get(pack).expect("named job");
+        let Some(label) = leg_label(pack_job) else {
+            gaps.push(format!("job {pack} passes no LABEL to {PACKAGE}"));
+            continue;
+        };
+        on.insert(label.clone());
+        if !only_when_opted_in(pack_job) {
+            off.insert(label.clone());
+        }
+        // Its own gate, picking the class of that platform's native runner.
+        let class = CLASSES.iter().find(|(l, _)| *l == label).map(|(_, c)| *c);
+        if gate_class(jobs_node, pack).as_deref() != class {
+            gaps.push(format!(
+                "job {pack} does not take its runner from its own gate job, picking {class:?}"
+            ));
+        }
+        let pack_steps = steps(pack_job);
+        let packs_at = pack_steps
+            .iter()
+            .position(|s| runs(s, PACKAGE))
+            .expect("found above");
+        if !pack_steps[..packs_at]
+            .iter()
+            .any(|s| runs(s, "cargo build --release --locked"))
+        {
+            gaps.push(format!(
+                "job {pack} packages before any `cargo build --release --locked`"
+            ));
+        }
+        if !pack_steps[packs_at + 1..]
+            .iter()
+            .any(|s| uses(s).starts_with("actions/upload-artifact@"))
+        {
+            gaps.push(format!(
+                "job {pack} does not hand its tarball on as an artifact"
+            ));
+        }
+        if !needs(attach_job).iter().any(|n| n == pack) {
+            gaps.push(format!(
+                "job {attach} does not need {pack}, so it can attach before every leg passed"
+            ));
+        }
+    }
+    if off != want {
         gaps.push(format!(
-            "job {pack} packages for {have:?}, not every platform the family ships {want:?}"
+            "the jobs package for {off:?}, not every platform the family ships {want:?}"
         ));
     }
-    // With the opt-in set: the same legs, plus each Windows one on its own
-    // native runner, and nothing else.
-    let mut want_on: BTreeSet<(String, String)> = off
-        .iter()
-        .filter(|(l, _)| want.contains(l))
-        .cloned()
-        .collect();
-    want_on.extend(
-        WINDOWS
-            .iter()
-            .map(|(l, r)| ((*l).to_owned(), (*r).to_owned())),
-    );
+    // With the opt-in set: the same legs, plus each Windows one, and
+    // nothing else.
+    let mut want_on = want.clone();
+    want_on.extend(WINDOWS.iter().map(|(l, _)| (*l).to_owned()));
     if on != want_on {
         gaps.push(format!(
-            "job {pack} packages for {on:?} when {OPT_IN} is set, not {want_on:?}"
-        ));
-    }
-    let pack_steps = steps(pack_job);
-    let packs_at = pack_steps
-        .iter()
-        .position(|s| runs(s, PACKAGE))
-        .expect("found above");
-    if !pack_steps[..packs_at]
-        .iter()
-        .any(|s| runs(s, "cargo build --release --locked"))
-    {
-        gaps.push(format!(
-            "job {pack} packages before any `cargo build --release --locked`"
-        ));
-    }
-    if !pack_steps[packs_at + 1..]
-        .iter()
-        .any(|s| uses(s).starts_with("actions/upload-artifact@"))
-    {
-        gaps.push(format!(
-            "job {pack} does not hand its tarball on as an artifact"
-        ));
-    }
-
-    if !needs(attach_job).iter().any(|n| n == pack) {
-        gaps.push(format!(
-            "job {attach} does not need {pack}, so it can attach before every leg passed"
+            "the jobs package for {on:?} when {OPT_IN} is set, not {want_on:?}"
         ));
     }
     let attach_steps = steps(attach_job);
@@ -467,12 +471,52 @@ fn the_release_cli_workflow_packages_attests_and_attaches_from_one_place() {
 #[test]
 fn the_reader_discriminates() {
     let sha = "0123456789abcdef0123456789abcdef01234567";
-    // The legs, as the workflow writes them: JSON, one list for a caller
-    // that leaves the opt-in off and one for a caller that sets it.
-    let unix = r#"{"runner":"macos-latest","label":"darwin-arm64"},{"runner":"ubuntu-latest","label":"linux-x86_64"}"#;
-    let win = r#"{"runner":"windows-latest","label":"windows-x86_64"},{"runner":"windows-11-arm","label":"windows-arm64"}"#;
-    let off = format!("[{unix}]");
-    let on = format!("[{unix},{win}]");
+    // One job per platform, each with its own gate, as the workflow writes
+    // them. The Windows ones run only for a caller that sets the opt-in.
+    let package = |label: &str, class: &str, windows: bool| {
+        let cond = if windows {
+            "    if: inputs.windows\n"
+        } else {
+            ""
+        };
+        let gate_cond = if windows {
+            "    if: inputs.windows\n"
+        } else {
+            ""
+        };
+        r#"  package-@L@-gate:
+@GC@    runs-on: antimatter-vps-gate
+    steps:
+      - id: pick
+        run: runner-gate pick @C@
+  package-@L@:
+    needs: [package-@L@-gate]
+@JC@    runs-on: ${{ needs.package-@L@-gate.outputs.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@SHA # v5
+      - env:
+          T: ${{ inputs.toolchain }}
+        run: echo "$T"
+      - run: cargo build --release --locked --features cli --bin x
+      - env:
+          LABEL: @L@
+        run: bash ../rust-fs-core/scripts/package-cli.sh 1 "$LABEL"
+      - uses: actions/upload-artifact@SHA # v4
+"#
+        .replace("@L@", label)
+        .replace("@C@", class)
+        .replace("@GC@", gate_cond)
+        .replace("@JC@", cond)
+    };
+    let packages = format!(
+        "{}{}{}{}",
+        package("darwin-arm64", "macos-arm64", false),
+        package("linux-x86_64", "linux-x64", false),
+        package("windows-x86_64", "windows-x64", true),
+        package("windows-arm64", "windows-arm64", true),
+    );
     let good = r#"on:
   workflow_call:
     inputs:
@@ -488,22 +532,8 @@ fn the_reader_discriminates() {
         default: false
 permissions: {}
 jobs:
-  package:
-    permissions:
-      contents: read
-    strategy:
-      matrix:
-        include: ${{ fromJSON(inputs.windows && '@ON@' || '@OFF@') }}
-    steps:
-      - uses: actions/checkout@SHA # v5
-      - env:
-          T: ${{ inputs.toolchain }}
-        run: echo "$T"
-      - run: cargo build --release --locked --features cli --bin x
-      - run: bash ../rust-fs-core/scripts/package-cli.sh 1 l
-      - uses: actions/upload-artifact@SHA # v4
-  attach:
-    needs: package
+@PACKAGES@  attach:
+    needs: [package-darwin-arm64, package-linux-x86_64, package-windows-x86_64, package-windows-arm64]
     permissions:
       id-token: write
       attestations: write
@@ -519,8 +549,7 @@ jobs:
           subject-path: dist/*
       - run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 "#
-    .replace("@ON@", &on)
-    .replace("@OFF@", &off)
+    .replace("@PACKAGES@", &packages)
     .replace("ATTEST", ATTEST)
     .replace("SHA", sha);
     assert_eq!(gaps(&good), Vec::<String>::new(), "{good}");
@@ -561,16 +590,16 @@ jobs:
     // A local copy of the script.
     expect(
         good.replace(
-            "bash ../rust-fs-core/scripts/package-cli.sh 1 l",
-            "scripts/package-cli.sh 1 l",
+            "bash ../rust-fs-core/scripts/package-cli.sh 1 \"$LABEL\"",
+            "scripts/package-cli.sh 1 \"$LABEL\"",
         ),
         "jobs run `bash ../rust-fs-core/scripts/package-cli.sh`, not one",
     );
     // The shim no caller carries.
     expect(
         good.replace(
-            "bash ../rust-fs-core/scripts/package-cli.sh 1 l",
-            "bash scripts/core.sh package-cli 1 l",
+            "bash ../rust-fs-core/scripts/package-cli.sh 1 \"$LABEL\"",
+            "bash scripts/core.sh package-cli 1 \"$LABEL\"",
         ),
         "runs scripts/core.sh, which no caller carries",
     );
@@ -583,7 +612,7 @@ jobs:
     );
     // A platform dropped.
     expect(
-        good.replace(r#"{"runner":"macos-latest","label":"darwin-arm64"},"#, ""),
+        good.replace("LABEL: darwin-arm64", "LABEL: darwin-x"),
         "not every platform the family ships",
     );
     // Packaged before building, or never handed on.
@@ -603,8 +632,11 @@ jobs:
     );
     // Attaching without waiting for the legs.
     expect(
-        good.replace("    needs: package\n", ""),
-        "does not need package",
+        good.replace(
+            "needs: [package-darwin-arm64, package-linux-x86_64,",
+            "needs: [package-linux-x86_64,",
+        ),
+        "does not need package-darwin-arm64",
     );
     // No count of the tarballs, or the wrong one.
     expect(
@@ -628,21 +660,18 @@ jobs:
     // A Windows leg dropped, on the wrong runner, or run for a caller that
     // did not ask.
     expect(
-        good.replace(
-            r#",{"runner":"windows-11-arm","label":"windows-arm64"}"#,
-            "",
-        ),
+        good.replace("LABEL: windows-arm64", "LABEL: windows-arm"),
         "when windows is set",
     );
     expect(
         good.replace(
-            r#""runner":"windows-11-arm""#,
-            r#""runner":"windows-latest""#,
+            "runner-gate pick windows-arm64",
+            "runner-gate pick windows-x64",
         ),
-        "when windows is set",
+        "does not take its runner from its own gate job",
     );
     expect(
-        good.replace(&format!("|| '{off}'"), &format!("|| '{on}'")),
+        good.replace("    if: inputs.windows\n", ""),
         "not every platform the family ships",
     );
     // Each grant dropped in turn.
@@ -659,7 +688,7 @@ jobs:
     );
     expect(
         good.replace("      contents: read\n", "      contents: write\n"),
-        "job package attests nothing but holds contents: write",
+        "attests nothing but holds contents: write",
     );
     // Attesting the wrong thing, or not attaching it.
     expect(
