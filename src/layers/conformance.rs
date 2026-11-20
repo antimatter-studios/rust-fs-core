@@ -1231,14 +1231,14 @@ fn check_expected<V: FileAPI>(volume: &V, expected: &[Expected], report: &mut Re
 }
 
 /// Cross-checks the namespace against the salvage scan: every non-empty file
-/// [`FileAPI`] lists has a live file candidate of the same name, and where
-/// exactly one such candidate's walk maps exactly the file's size, the bytes
-/// those extents hold are the file's bytes.
+/// [`FileAPI`] lists has a live file candidate of the same name -- its own,
+/// or one a live parent claim gives it -- and where one such candidate (of
+/// the file's size, when the name is shared) has a complete walk claiming
+/// the file's size, the bytes its plan rebuilds are the file's bytes.
 ///
-/// Opt-in: it holds only for formats whose candidates carry names and whose
-/// file data is stored uncompressed in the extents a walk returns -- FAT,
-/// exFAT, ext4 without inline data. Formats with compressed or embedded
-/// data, or nameless candidates, do not run it.
+/// Opt-in: it needs a format whose candidates or parent claims carry names.
+/// Holes, uninitialized and encoded runs are rebuilt through the walk's
+/// plan, so compressed and sparse files are compared too.
 pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
     volume: &V,
     limits: &Limits,
@@ -1263,6 +1263,20 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
             return report;
         }
     };
+    // A candidate's names: its own, and those its live parent claims give
+    // it, since an inode format keeps names in directory entries.
+    let claims = salvage.rebuild_tree(&candidates).ok();
+    let names_of = |index: usize| -> Vec<String> {
+        let own = candidates[index].name.clone();
+        let claimed = claims
+            .as_ref()
+            .and_then(|tree| tree.nodes.get(index))
+            .into_iter()
+            .flat_map(|node| node.parents.iter())
+            .filter(|claim| claim.state == CandidateState::Live)
+            .filter_map(|claim| claim.name.clone());
+        own.into_iter().chain(claimed).collect()
+    };
     let mut missing = Vec::new();
     let mut different = Vec::new();
     let mut compared = 0usize;
@@ -1270,19 +1284,24 @@ pub fn check_files_against_candidates<V: FileAPI + PrimitiveAPI>(
         .iter()
         .filter(|w| w.entry.kind == NodeKind::File && w.entry.size > 0 && !w.entry.lossy)
     {
-        let matching: Vec<_> = candidates
+        let mut matching: Vec<_> = candidates
             .iter()
-            .filter(|c| {
+            .enumerate()
+            .filter(|(index, c)| {
                 c.kind == CandidateKind::File
                     && c.state == CandidateState::Live
-                    && c.name
-                        .as_deref()
-                        .is_some_and(|name| volume.names_match(name, &entry.name))
+                    && names_of(*index)
+                        .iter()
+                        .any(|name| volume.names_match(name, &entry.name))
             })
+            .map(|(_, c)| c)
             .collect();
         if matching.is_empty() {
             missing.push(path.clone());
             continue;
+        }
+        if matching.len() > 1 {
+            matching.retain(|c| c.size == Some(entry.size));
         }
         let [candidate] = matching.as_slice() else {
             continue;
