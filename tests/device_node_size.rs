@@ -89,26 +89,24 @@ fn a_device_whose_size_cannot_be_measured_refuses_to_open() {
 // ---------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
+#[path = "support/hdiutil_attachment.rs"]
+mod hdiutil_attachment;
+
+#[cfg(target_os = "macos")]
 mod macos {
+    use super::hdiutil_attachment::OwnedImage;
     use super::*;
     use fs_core::BlockDevice;
     use std::path::PathBuf;
     use std::process::Command;
 
+    include!("support/hdiutil_lifecycle_tests.rs");
+
     /// Detaches on drop, so a failing assertion does not leak a device.
     struct Attached {
         dir: PathBuf,
         dev: String,
-    }
-
-    impl Drop for Attached {
-        fn drop(&mut self) {
-            Command::new("hdiutil")
-                .args(["detach", &self.dev, "-force"])
-                .output()
-                .ok();
-            std::fs::remove_dir_all(&self.dir).ok();
-        }
+        _image: OwnedImage,
     }
 
     fn attach() -> Attached {
@@ -116,13 +114,9 @@ mod macos {
     }
 
     fn attach_with_block_size(block_size: Option<u32>) -> Attached {
-        let dir = std::env::temp_dir().join(format!(
-            "fs_core_attach_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create the fixture directory");
-        let img = dir.join("raw.img");
+        let mut image = OwnedImage::new("device-node", "raw.img");
+        let dir = image.dir.clone();
+        let img = image.path.clone();
         std::fs::write(&img, vec![0xABu8; IMAGE_BYTES as usize]).expect("write the raw image");
         assert_eq!(
             std::fs::metadata(&img).expect("stat the image").len(),
@@ -142,7 +136,7 @@ mod macos {
             "diskimage-class=CRawDiskImage",
             img.to_str().expect("image path is utf-8"),
         ]);
-        let out = cmd.output().expect("run hdiutil");
+        let out = image.attach(&mut cmd);
 
         // NOT a skip. If the fixture cannot be built, this test has
         // measured nothing, and reporting that as success is the exact
@@ -160,7 +154,11 @@ mod macos {
             .unwrap_or_else(|| panic!("hdiutil named no /dev/disk device; stdout was {stdout:?}"))
             .to_string();
 
-        Attached { dir, dev }
+        Attached {
+            dir,
+            dev,
+            _image: image,
+        }
     }
 
     /// THE WITNESS. A block device node reports the length of what it is
