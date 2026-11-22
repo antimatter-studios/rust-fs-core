@@ -242,9 +242,9 @@ tasks:
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug'
 
   test:release:
-    desc: Release-profile suite, including every target
+    desc: Optimized suite, including every target
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli,layers -- --quiet'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --profile test-opt --all-targets --features cli,layers -- --quiet'
       - 'bash scripts/core.sh test-floor release 486'
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt release'
 
