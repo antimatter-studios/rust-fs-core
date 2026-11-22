@@ -4,6 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "hdiutil_attachment.rs"]
+mod hdiutil_attachment;
+use hdiutil_attachment::OwnedImage;
+
 fn run(tool: &str, args: &[&OsStr]) -> Output {
     let output = Command::new(tool)
         .args(args)
@@ -37,10 +41,12 @@ pub struct Volume {
     mount: PathBuf,
     mounted: bool,
     attached: bool,
+    ownership: OwnedImage,
 }
 impl Volume {
     pub fn new(root: &Path, partitioned: bool) -> Self {
-        let image = root.join("volume.dmg");
+        let mut ownership = OwnedImage::new("mounted", "volume.dmg");
+        let image = ownership.path.clone();
         let layout = if partitioned { "MBRSPUD" } else { "NONE" };
         run(
             "hdiutil",
@@ -58,14 +64,15 @@ impl Volume {
                 image.as_os_str(),
             ],
         );
-        let output = run(
-            "hdiutil",
-            &[
-                "attach".as_ref(),
-                "-nobrowse".as_ref(),
-                "-nomount".as_ref(),
-                image.as_os_str(),
-            ],
+        let output = ownership.attach(Command::new("hdiutil").args([
+            "attach".as_ref(),
+            "-nobrowse".as_ref(),
+            "-nomount".as_ref(),
+            image.as_os_str(),
+        ]));
+        assert!(
+            output.status.success(),
+            "macOS mount oracle requires hdiutil attach: {output:?}"
         );
         // One tab-separated line per attached node: whole disk first.
         let nodes: Vec<PathBuf> = String::from_utf8(output.stdout)
@@ -87,6 +94,7 @@ impl Volume {
             mount,
             mounted: false,
             attached: true,
+            ownership,
         };
         // DiskImages gives the attaching user the node; no chmod is needed.
         volume.attach_mount(false);
@@ -117,45 +125,9 @@ impl Volume {
         if self.mounted {
             self.unmount();
         }
-        let detached = Command::new("hdiutil")
-            .args(["detach"])
-            .arg(&self.device)
-            .output()
-            .unwrap_or_else(|err| panic!("macOS mount oracle requires hdiutil: {err}"));
-        if !detached.status.success() {
-            let stderr = String::from_utf8_lossy(&detached.stderr);
-            assert!(
-                stderr.to_ascii_lowercase().contains("resource busy"),
-                "macOS mount oracle requires hdiutil: {detached:?}"
-            );
-            // Disk Arbitration can still be releasing the just-unmounted
-            // partition. This image is disposable and all test children have
-            // exited, so force detachment to avoid leaking the device.
-            // A forced detach can still race Disk Arbitration while it is
-            // releasing the just-unmounted image. Retry that transient busy
-            // result instead of failing the whole macOS test immediately.
-            let mut forced = None;
-            for attempt in 0..5 {
-                let output = Command::new("hdiutil")
-                    .args(["detach", "-force"])
-                    .arg(&self.device)
-                    .output()
-                    .unwrap_or_else(|err| panic!("macOS mount oracle requires hdiutil: {err}"));
-                if output.status.success() {
-                    forced = Some(output);
-                    break;
-                }
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.to_ascii_lowercase().contains("resource busy") || attempt == 4 {
-                    panic!(
-                        "macOS mount oracle requires hdiutil detach -force {:?}: {output:?}",
-                        self.device
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1)));
-            }
-            assert!(forced.is_some(), "forced hdiutil detach did not complete");
-        }
+        self.ownership
+            .detach()
+            .expect("macOS mount oracle requires owned hdiutil detach");
         self.attached = false;
     }
 }
@@ -167,10 +139,6 @@ impl Drop for Volume {
         // During a failed assertion, a second panic would abort before the
         // image detaches; force it and leave the first failure to report.
         if std::thread::panicking() {
-            let _ = Command::new("hdiutil")
-                .args(["detach", "-force"])
-                .arg(&self.device)
-                .output();
             return;
         }
         self.detach();
