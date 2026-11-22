@@ -466,3 +466,36 @@ fn the_release_tier_prints_progress_not_one_line_per_test() {
         "release.yml's release tier lists every test: {release_expected}"
     );
 }
+
+#[test]
+fn optimized_test_profile_keeps_test_codegen_defaults_and_release_profile_intact() {
+    let cargo = std::fs::read_to_string(repo().join("Cargo.toml")).unwrap();
+    let profile = cargo
+        .split("[profile.test-opt]")
+        .nth(1)
+        .map(|rest| {
+            rest.split('\n')
+                .take_while(|line| !line.starts_with('['))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    assert!(profile.contains("inherits = \"dev\""));
+    assert!(profile.contains("opt-level = 3"));
+    assert!(!profile.contains("lto"));
+    assert!(!profile.contains("codegen-units"));
+
+    let release = cargo
+        .split("[profile.release]")
+        .nth(1)
+        .map(|rest| {
+            rest.split('\n')
+                .take_while(|line| !line.starts_with('['))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    assert!(release.contains("lto = true"));
+    assert!(release.contains("codegen-units = 1"));
+}
