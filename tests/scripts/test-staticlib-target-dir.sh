@@ -12,9 +12,10 @@ trap 'rm -rf "$SANDBOX"' EXIT HUP INT TERM
 
 run_case() {
     local name="$1" setting="$2" value="$3" root="$SANDBOX/$1" fakebin
-    mkdir -p "$root" "$root/src" "$root/tests" "$root/include" "$root/target/aarch64-apple-darwin/release"
+    mkdir -p "$root" "$root/src" "$root/tests" "$root/include" "$root/scripts" "$root/target/aarch64-apple-darwin/release"
     cp "$REPO/chores.yml" "$REPO/Cargo.toml" "$root/"
     cp "$REPO/tests/header_names_the_built_library.rs" "$root/tests/"
+    cp "$REPO/scripts/copy-staticlib.sh" "$root/scripts/"
     cp "$REPO/include/fs_core.h" "$root/include/"
     printf 'pub fn fixture() {}\n' > "$root/src/lib.rs"
     fakebin="$root/fakebin"
