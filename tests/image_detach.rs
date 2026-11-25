@@ -8,9 +8,21 @@ mod image_detach;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 const BUSY: &str = "hdiutil: couldn't eject \"disk11\" - Resource busy";
 const NEVER: usize = 1000;
+
+/// Held by every test from writing its stand-in to running it. Another test
+/// forking while this one still has the script open for writing hands the
+/// child that descriptor, and exec then fails with "Text file busy" (ETXTBSY).
+static SPAWN: Mutex<()> = Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("core-detach-{}-{tag}", std::process::id()));
@@ -43,6 +55,7 @@ fn calls(count: &Path) -> usize {
 
 #[test]
 fn busy_detach_is_retried_until_it_clears() {
+    let _serial = serial();
     let dir = scratch("clears");
     let (program, count) = stand_in(&dir, BUSY, 2);
     let result = image_detach::detach(program.as_os_str(), "/dev/disk11".as_ref());
@@ -56,6 +69,7 @@ fn busy_detach_is_retried_until_it_clears() {
 
 #[test]
 fn busy_detach_that_never_clears_is_retried_then_reported() {
+    let _serial = serial();
     let dir = scratch("never");
     let (program, count) = stand_in(&dir, BUSY, NEVER);
     let result = image_detach::detach(program.as_os_str(), "/dev/disk11".as_ref());
@@ -70,6 +84,7 @@ fn busy_detach_that_never_clears_is_retried_then_reported() {
 
 #[test]
 fn other_detach_failure_is_reported_without_retry() {
+    let _serial = serial();
     let dir = scratch("other");
     let (program, count) = stand_in(&dir, "hdiutil: detach: no such disk", NEVER);
     let result = image_detach::detach(program.as_os_str(), "/dev/disk11".as_ref());
