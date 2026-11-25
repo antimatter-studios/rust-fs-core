@@ -4,7 +4,6 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-command -v chore >/dev/null || { echo "FAIL  chore is required for this test" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL  python3 is required for this test" >&2; exit 1; }
 mkdir -p "$REPO/tmp"
 SANDBOX="$(mktemp -d "$REPO/tmp/staticlib-target-dir.XXXXXX")"
@@ -76,7 +75,8 @@ SH
         export PATH="$fakebin:$PATH" FIXTURE_CASE="$name"
         unset CARGO_TARGET_DIR
         [[ "$setting" != env ]] || export CARGO_TARGET_DIR="$value"
-        chore --force staticlib >/dev/null
+        cargo build --release --target aarch64-apple-darwin >/dev/null
+        bash scripts/copy-staticlib.sh aarch64-apple-darwin fs_core dist >/dev/null
     )
     local got
     got="$(cat "$root/dist/libfs_core.a")"
