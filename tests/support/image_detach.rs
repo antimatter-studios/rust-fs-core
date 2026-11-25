@@ -31,3 +31,12 @@ pub fn detach(program: &OsStr, device: &OsStr) -> Result<(), String> {
     }
     unreachable!("the loop returns on its last attempt")
 }
+
+/// Detach what one attach reported: its whole-disk `device` node when attach
+/// named one, otherwise the `mount` point, which detaches the same image.
+pub fn detach_attached(program: &OsStr, device: Option<&str>, mount: &OsStr) -> Result<(), String> {
+    match device {
+        Some(node) => detach(program, OsStr::new(node)),
+        None => detach(program, mount),
+    }
+}
