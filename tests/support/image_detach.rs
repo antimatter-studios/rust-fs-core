@@ -1,4 +1,6 @@
-//! Detach one DiskImages device node, as the case oracle's cleanup does.
+//! Support for DiskImages tests: detach by node, and an owned attachment
+//! that detaches on drop. Each test crate includes this file and uses a subset.
+#![allow(dead_code)]
 use std::ffi::OsStr;
 use std::process::Command;
 use std::time::Duration;
@@ -38,5 +40,60 @@ pub fn detach_attached(program: &OsStr, device: Option<&str>, mount: &OsStr) -> 
     match device {
         Some(node) => detach(program, OsStr::new(node)),
         None => detach(program, mount),
+    }
+}
+
+/// One DiskImages attachment owned by one test. Dropping it detaches the
+/// whole-disk node `hdiutil attach` reported, or the mount point when attach
+/// named none, on every exit: a normal return, and a panic from an assertion.
+/// Then it removes the scratch directory.
+pub struct AttachedImage {
+    program: std::ffi::OsString,
+    root: std::path::PathBuf,
+    // Set once attach has succeeded, so cleanup runs on every later exit.
+    mount: Option<std::path::PathBuf>,
+    device: Option<String>,
+}
+
+impl AttachedImage {
+    /// An image that has not attached yet. Dropping it detaches nothing.
+    pub fn new(program: impl Into<std::ffi::OsString>, root: std::path::PathBuf) -> Self {
+        Self {
+            program: program.into(),
+            root,
+            mount: None,
+            device: None,
+        }
+    }
+
+    /// Record a successful attach, before anything else can fail.
+    pub fn attached(&mut self, mount: std::path::PathBuf, device: Option<String>) {
+        self.mount = Some(mount);
+        self.device = device;
+    }
+}
+
+impl Drop for AttachedImage {
+    fn drop(&mut self) {
+        if let Some(mount) = self.mount.take() {
+            let device = self.device.take();
+            if let Err(error) = detach_attached(
+                self.program.as_os_str(),
+                device.as_deref(),
+                mount.as_os_str(),
+            ) {
+                let target = device.unwrap_or_else(|| mount.display().to_string());
+                let message =
+                    format!("detach of {target} failed; the image stays attached: {error}");
+                // A second panic during unwinding would abort before the
+                // first failure reports, so report it and let that stand.
+                if std::thread::panicking() {
+                    eprintln!("{message}");
+                    return;
+                }
+                panic!("{message}");
+            }
+        }
+        std::fs::remove_dir_all(&self.root).unwrap();
     }
 }
