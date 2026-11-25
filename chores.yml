@@ -255,6 +255,11 @@ tasks:
       - task: test:debug
       - task: test:release
 
+  prove:
+    desc: Run lint and every Linux CI tier, reporting all results
+    cmds:
+      - bash scripts/prove.sh lint test:debug coverage
+
   coverage:
     desc: Instrumented suite with the same 90% line-coverage gate as CI
     cmds:
