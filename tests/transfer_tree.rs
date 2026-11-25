@@ -12,6 +12,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
+#[path = "support/image_detach.rs"]
+mod image_detach;
+
 struct Host {
     root: PathBuf,
     malicious: bool,
@@ -456,20 +460,28 @@ fn duplicate_source_names_are_refused_even_on_case_sensitive_destinations() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
+    // The whole-disk node `hdiutil attach` reported for this image. Only that
+    // node is detached, so no other attached image is touched.
     struct Image {
         root: PathBuf,
-        mount: PathBuf,
+        device: Option<String>,
     }
     impl Drop for Image {
         fn drop(&mut self) {
-            let out = Command::new("hdiutil")
-                .arg("detach")
-                .arg(&self.mount)
-                .arg("-force")
-                .output()
-                .expect("hdiutil detach is required");
-            if !std::thread::panicking() {
-                assert!(out.status.success(), "detach failed: {out:?}");
+            if let Some(device) = self.device.take() {
+                if let Err(error) =
+                    image_detach::detach(std::ffi::OsStr::new("/usr/bin/hdiutil"), device.as_ref())
+                {
+                    let message =
+                        format!("detach of {device} failed; the image stays attached: {error}");
+                    // A second panic during unwinding would abort before the
+                    // first failure reports, so report it and let that stand.
+                    if std::thread::panicking() {
+                        eprintln!("{message}");
+                        return;
+                    }
+                    panic!("{message}");
+                }
             }
             fs::remove_dir_all(&self.root).unwrap();
         }
@@ -480,6 +492,10 @@ fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
         } else {
             "hfs-sensitive"
         });
+        let mut volume = Image {
+            root: root.clone(),
+            device: None,
+        };
         let image = root.join("oracle.sparseimage");
         let mount = root.join("mount");
         fs::create_dir(&mount).unwrap();
@@ -505,17 +521,18 @@ fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
             .arg(&image)
             .output()
             .expect("hdiutil attach is required for the case oracle");
-        let volume = Image { root, mount };
         assert!(out.status.success(), "attach failed: {out:?}");
+        volume.device = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .find(|word| word.starts_with("/dev/disk"))
+            .map(str::to_owned);
+        assert!(volume.device.is_some(), "attach named no device: {out:?}");
         for replace in [false, true] {
-            check_case_pair(
-                &volume.mount.join(format!("replace-{replace}")),
-                folding,
-                replace,
-            );
+            check_case_pair(&mount.join(format!("replace-{replace}")), folding, replace);
         }
         assert!(
-            times::check_precision(&volume.mount, &volume.mount.join("times"),),
+            times::check_precision(&mount, &mount.join("times")),
             "HFS+ must exercise timestamp precision loss"
         );
     }
