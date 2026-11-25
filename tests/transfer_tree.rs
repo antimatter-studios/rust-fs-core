@@ -464,16 +464,23 @@ fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
     // node is detached, so no other attached image is touched.
     struct Image {
         root: PathBuf,
+        // Set once attach has succeeded, so cleanup runs on every later exit,
+        // including the panic below when attach names no node.
+        mount: Option<PathBuf>,
         device: Option<String>,
     }
     impl Drop for Image {
         fn drop(&mut self) {
-            if let Some(device) = self.device.take() {
-                if let Err(error) =
-                    image_detach::detach(std::ffi::OsStr::new("/usr/bin/hdiutil"), device.as_ref())
-                {
+            if let Some(mount) = self.mount.take() {
+                let device = self.device.take();
+                if let Err(error) = image_detach::detach_attached(
+                    std::ffi::OsStr::new("/usr/bin/hdiutil"),
+                    device.as_deref(),
+                    mount.as_os_str(),
+                ) {
+                    let target = device.unwrap_or_else(|| mount.display().to_string());
                     let message =
-                        format!("detach of {device} failed; the image stays attached: {error}");
+                        format!("detach of {target} failed; the image stays attached: {error}");
                     // A second panic during unwinding would abort before the
                     // first failure reports, so report it and let that stand.
                     if std::thread::panicking() {
@@ -494,6 +501,7 @@ fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
         });
         let mut volume = Image {
             root: root.clone(),
+            mount: None,
             device: None,
         };
         let image = root.join("oracle.sparseimage");
@@ -522,6 +530,7 @@ fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
             .output()
             .expect("hdiutil attach is required for the case oracle");
         assert!(out.status.success(), "attach failed: {out:?}");
+        volume.mount = Some(mount.clone());
         volume.device = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter_map(|line| line.split_whitespace().next())
