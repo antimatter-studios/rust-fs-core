@@ -93,3 +93,22 @@ fn other_detach_failure_is_reported_without_retry() {
     assert_eq!(calls(&count), 1);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn attach_that_named_no_node_is_detached_by_mount_point() {
+    let _serial = serial();
+    let dir = scratch("no-node");
+    let (program, count) = stand_in(&dir, "", 0);
+    let mount = dir.join("mount");
+    image_detach::detach_attached(program.as_os_str(), None, mount.as_os_str())
+        .expect("detach by mount point must succeed");
+    let made = fs::read_to_string(&count)
+        .ok()
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    assert_eq!(
+        made, 1,
+        "an attached image must be detached even when attach named no node"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
