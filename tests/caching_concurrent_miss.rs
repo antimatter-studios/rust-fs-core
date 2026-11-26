@@ -27,7 +27,7 @@
 //! flakier.
 
 use fs_core::{BlockRead, CachingDevice, Result};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 mod common;
@@ -46,6 +46,14 @@ const SETTLE: Duration = Duration::from_secs(2);
 /// How long a racer is given to come back once the gate is open. Long
 /// enough that only a thread that is never woken at all runs it out.
 const JOIN_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Held by each test here that starts threads of its own, so the harness's
+/// test-thread limit is not multiplied by them: one such test's threads run at
+/// a time (#475). A test that failed while holding it does not fail the rest.
+fn race_permit() -> MutexGuard<'static, ()> {
+    static RACE: Mutex<()> = Mutex::new(());
+    RACE.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 struct GateState {
     arrived: usize,
@@ -168,6 +176,7 @@ fn expected_block(bytes: &[u8], offset: u64) -> Vec<u8> {
 
 #[test]
 fn concurrent_misses_on_one_block_read_the_device_once_and_evict_nothing() {
+    let _permit = race_permit();
     let bytes: Vec<u8> = (0..64u8).collect();
     let gate = Arc::new(Gate::new(RACERS));
     let device = Arc::new(GatedDevice::new(bytes.clone(), Arc::clone(&gate), TARGET));
@@ -283,6 +292,7 @@ fn concurrent_misses_on_one_block_read_the_device_once_and_evict_nothing() {
 /// would wait for a thread that had already gone.
 #[test]
 fn a_fetch_that_fails_releases_the_block_it_was_holding() {
+    let _permit = race_permit();
     /// Fails the first read of each offset and serves every later one.
     struct FailsOnce {
         bytes: Vec<u8>,
@@ -356,6 +366,7 @@ fn a_fetch_that_fails_releases_the_block_it_was_holding() {
 /// hung suite that has to be killed, and a hang reports nothing.
 #[test]
 fn a_device_that_re_enters_the_cache_reads_again_instead_of_waiting_for_itself() {
+    let _permit = race_permit();
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::OnceLock;
 
@@ -503,6 +514,7 @@ fn a_device_that_re_enters_the_cache_reads_again_instead_of_waiting_for_itself()
 /// into a named assertion instead.
 #[test]
 fn two_threads_re_entering_into_each_others_fetches_do_not_deadlock() {
+    let _permit = race_permit();
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Barrier, OnceLock};
 
