@@ -11,7 +11,7 @@
 //! `runs-on:` and its own steps, not by a comment that names a command.
 
 use saphyr::{LoadableYamlNode, Yaml};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The workflows that can run a job which loads kernel modules.
 const WORKFLOWS: &[&str] = &["ci.yml", "release.yml"];
@@ -22,12 +22,39 @@ const HOSTED: &str = "ubuntu-24.04";
 /// The gate class such a job may ask for.
 const KVM_CLASS: &str = "linux-x64-kvm";
 
-fn workflow(name: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// This repository's workflow directory.
+fn workflows_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(".github")
         .join("workflows")
-        .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+/// The names of the workflow files in `dir` that the rule judges.
+fn workflow_files(_dir: &Path) -> Vec<String> {
+    WORKFLOWS.iter().map(|name| name.to_string()).collect()
+}
+
+/// The module-loading Linux jobs of every judged workflow in `dir`: how many
+/// there are, and what to say about each one the rule refuses.
+fn judged_in(dir: &Path) -> (usize, Vec<String>) {
+    let mut checked = 0;
+    let mut offending = Vec::new();
+    for file in workflow_files(dir) {
+        let path = dir.join(&file);
+        // A listed workflow a directory does not hold has no job to judge.
+        if !path.exists() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        for (job, allowed, why) in judged(&text) {
+            checked += 1;
+            if !allowed {
+                offending.push(format!("{file}: job `{job}` {why}"));
+            }
+        }
+    }
+    (checked, offending)
 }
 
 /// The value of `name` in a YAML mapping, or `None`.
@@ -108,18 +135,9 @@ fn judged(text: &str) -> Vec<(String, bool, String)> {
 
 #[test]
 fn every_module_loading_job_runs_where_modules_can_be_loaded() {
-    let mut checked = 0;
-    let mut offending = Vec::new();
-    for file in WORKFLOWS {
-        for (job, allowed, why) in judged(&workflow(file)) {
-            checked += 1;
-            if !allowed {
-                offending.push(format!("{file}: job `{job}` {why}"));
-            }
-        }
-    }
-    // Fewer would mean the detection stopped finding the jobs, and the loop
-    // above would pass having checked nothing: ci.yml's Linux test and
+    let (checked, offending) = judged_in(&workflows_dir());
+    // Fewer would mean the detection stopped finding the jobs, and the test
+    // would pass having checked nothing: ci.yml's Linux test and
     // coverage jobs, and release.yml's test job.
     assert!(
         checked >= 3,
@@ -153,4 +171,32 @@ fn the_rule_refuses_the_vps_class_and_allows_the_kvm_class() {
     };
     assert_eq!(allowed(&literal("ubuntu-24.04")), [true]);
     assert_eq!(allowed(&literal("antimatter-vps-linux-x64")), [false]);
+}
+
+/// The rule reaches a workflow whatever its file is called (#500).
+#[test]
+fn a_module_loading_job_is_refused_whatever_the_workflow_is_called() {
+    let dir = std::env::temp_dir().join(format!("core-module-rule-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = "jobs:\n  gate:\n    runs-on: antimatter-vps-gate\n    steps:\n      \
+                - run: runner-gate pick linux-x64\n  work:\n    \
+                runs-on: ${{ needs.gate.outputs.runner }}\n    steps:\n      \
+                - run: sudo modprobe zfs\n";
+    // Both extensions GitHub reads, and a file it does not, which is no
+    // workflow and is not parsed as one.
+    for name in ["nightly-zfs.yml", "anything-at-all.yaml"] {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    std::fs::write(dir.join("notes.md"), "sudo modprobe zfs\n").unwrap();
+    let (checked, offending) = judged_in(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(checked, 2, "both workflows are judged: {offending:?}");
+    assert_eq!(
+        offending
+            .iter()
+            .map(|line| line.split(':').next().unwrap())
+            .collect::<Vec<_>>(),
+        ["anything-at-all.yaml", "nightly-zfs.yml"]
+    );
 }
