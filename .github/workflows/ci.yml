@@ -302,6 +302,35 @@ jobs:
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
           EXPECT_OVERFLOW_CHECKS: "1"
+      # TEMPORARY DIAGNOSTIC FOR #443, NOT A GATE. The macOS baseline reports
+      # "2 functions have mismatched data" from llvm-cov, and only a macOS
+      # runner with its profile data reproduces it: the coverage job is Linux.
+      # This step runs the suite instrumented, keeps the report and the
+      # warning lines, and uploads them. Remove it once #443 is closed.
+      - name: install cargo-llvm-cov for the mismatch diagnostic (temporary, #443)
+        if: runner.os == 'macOS'
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: coverage mismatch diagnostic (temporary, #443)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p tmp/logs
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --features cli,layers --no-report -- --quiet
+          cargo llvm-cov report --summary-only > tmp/logs/coverage-macos-443.log 2>&1
+          cat tmp/logs/coverage-macos-443.log
+          grep -n -B2 -A4 "mismatched" tmp/logs/coverage-macos-443.log || true
+        env:
+          AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
+      - name: keep the coverage mismatch diagnostic (temporary, #443)
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-macos-mismatch-443
+          path: tmp/logs/coverage-macos-443.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: keep the full test transcript
         if: always()
         uses: actions/upload-artifact@v4
