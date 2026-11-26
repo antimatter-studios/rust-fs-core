@@ -29,7 +29,8 @@
 //!
 //! [`salvage`] is the deeper set for the salvage verbs alone, over images
 //! the driver builds with declared damage: [`salvage::run`] with a
-//! [`salvage::Driver`].
+//! [`salvage::Driver`], or, for images too large to hold in memory,
+//! [`salvage::run_sources`] with a [`salvage::SourceDriver`].
 //!
 //! Nothing skips. A verb a driver lacks passes only when its capabilities
 //! say so and the verb refuses with `Unsupported` naming it. An empty report
