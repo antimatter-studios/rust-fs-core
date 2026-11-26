@@ -71,9 +71,23 @@ mod lifecycle {
         (Stdio::from(stdout), Stdio::from(stderr))
     }
 
-    /// Stands in for the bounded wait: it asks once, whatever the limit.
-    fn await_listing(_limit: Duration, mut listed: impl FnMut() -> bool) -> bool {
-        listed()
+    /// How long a probe's image may take to appear in `hdiutil info` after its
+    /// child reports the attach.
+    const LISTING_LIMIT: Duration = Duration::from_secs(30);
+
+    /// Asks `listed` until it answers true or `limit` has passed, and returns
+    /// the last answer.
+    fn await_listing(limit: Duration, mut listed: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if listed() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     struct Probe {
@@ -94,7 +108,7 @@ mod lifecycle {
             root: &Path,
             label: &str,
             mode: &str,
-            _listed: impl FnMut(&Path) -> bool,
+            mut listed: impl FnMut(&Path) -> bool,
         ) -> Self {
             let ready = root.join(format!("{label}.ready"));
             let log = root.join(format!("{label}.log"));
@@ -146,12 +160,24 @@ mod lifecycle {
             {
                 assert!(!device.starts_with(prefix), "protected device is forbidden");
             }
-            Self {
+            let probe = Self {
                 child,
                 image,
                 device,
                 log,
+            };
+            // A child in these modes stays attached until it is signalled. The
+            // others detach as soon as they have reported, so their images may
+            // never be seen here. A panic drops the probe, which reports the
+            // child's log and the listing.
+            if matches!(mode, "wait" | "unregistered") {
+                assert!(
+                    await_listing(LISTING_LIMIT, || listed(&probe.image)),
+                    "hdiutil info did not list {} within {LISTING_LIMIT:?}",
+                    probe.image.display()
+                );
             }
+            probe
         }
     }
 
