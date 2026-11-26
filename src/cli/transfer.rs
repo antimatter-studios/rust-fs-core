@@ -117,6 +117,19 @@ mod verify_tests;
 /// the file's size, when smaller) is all the file data a copy holds.
 pub const CHUNK: usize = 1 << 20;
 
+/// The path of `name` inside the image directory `parent`, joined with `/` on
+/// every host. A path inside the image is not a host path: [`Path::join`] puts
+/// a backslash in it on Windows, and a driver looks it up as given. Names that
+/// reach here hold no separator of their own.
+fn image_join(parent: &Path, name: &std::ffi::OsStr) -> std::path::PathBuf {
+    let mut joined = parent.as_os_str().to_owned();
+    if !joined.is_empty() && !joined.as_encoded_bytes().ends_with(b"/") {
+        joined.push("/");
+    }
+    joined.push(name);
+    joined.into()
+}
+
 /// A file a driver can read at a position: what `export` copies from.
 pub trait FileSource {
     /// Identity captured by the driver from the opened image and filesystem.
