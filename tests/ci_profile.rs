@@ -103,6 +103,175 @@ fn the_local_debug_tier_has_the_budget_ci_has() {
     }
 }
 
+/// What one file states for one test tier.
+#[derive(Default)]
+struct Stated {
+    /// `(lines, bytes)` of every budget it states for the tier.
+    budgets: Vec<(u64, u64)>,
+    /// Every executed-test floor it states for the tier.
+    floors: Vec<u64>,
+}
+
+/// A number as `chores.yml` and `AGENTS.md` write it: `80000`, `80,000`, or
+/// `486'` where the command is a quoted YAML scalar.
+fn stated_number(word: &str) -> u64 {
+    word.trim_end_matches('\'')
+        .replace(',', "")
+        .parse()
+        .unwrap_or_else(|_| panic!("not a number: {word:?}"))
+}
+
+/// The budgets and floors the commands of `text` give `tier`.
+///
+/// Comment lines are skipped: a number that is only quoted gates nothing.
+fn stated_in_commands(text: &str, tier: &str) -> Stated {
+    let mut stated = Stated::default();
+    for line in text.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        if let Some((_, rest)) = line.split_once("scripts/tier.sh ") {
+            // The label comes first, quoted when it has a space in it.
+            let after_label = match rest.strip_prefix('"') {
+                Some(quoted) => quoted.split_once('"'),
+                None => rest.split_once(' '),
+            };
+            let mut words = after_label.map_or("", |(_, rest)| rest).split_whitespace();
+            if words.next() == Some(tier) {
+                let mut number = || stated_number(words.next().unwrap_or_default());
+                stated.budgets.push((number(), number()));
+            }
+        }
+        if let Some((_, rest)) = line.split_once("scripts/core.sh test-floor ") {
+            let mut words = rest.split_whitespace();
+            if words.next() == Some(tier) {
+                stated
+                    .floors
+                    .push(stated_number(words.next().unwrap_or_default()));
+            }
+        }
+    }
+    stated
+}
+
+/// The budget and floor in the row `AGENTS.md`'s table gives `tier`:
+/// `| tier | measured | lines / bytes | floor |`.
+fn stated_in_the_table(text: &str, tier: &str) -> Stated {
+    let mut stated = Stated::default();
+    for line in text.lines() {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        if let ["", name, _, budget, floor, ""] = cells[..] {
+            if name == tier {
+                let (lines, bytes) = budget
+                    .split_once(" / ")
+                    .unwrap_or_else(|| panic!("the {tier} row states no budget: {line}"));
+                stated
+                    .budgets
+                    .push((stated_number(lines), stated_number(bytes)));
+                stated.floors.push(stated_number(floor));
+            }
+        }
+    }
+    stated
+}
+
+/// The floors `AGENTS.md` quotes in prose: "floor 488", "floor of **488**".
+fn floors_in_prose(text: &str) -> Vec<u64> {
+    let plain = text.replace('*', "");
+    ["floor ", "floor of "]
+        .iter()
+        .flat_map(|lead| plain.split(lead).skip(1))
+        .filter_map(|rest| {
+            let end = rest.find(|c: char| !c.is_ascii_digit());
+            rest[..end.unwrap_or(rest.len())].parse().ok()
+        })
+        .collect()
+}
+
+/// Every file that states a tier's floor or budget states the same one (#516).
+///
+/// A local or release gate with a lower floor passes a suite CI refuses, and
+/// one with a smaller budget fails a run CI accepts.
+#[test]
+fn every_tier_has_one_floor_and_one_budget_wherever_it_is_stated() {
+    let read = |name: &str| read_or_panic(&manifest_dir().join(name));
+    let chores = read("chores.yml");
+    let ci = read_or_panic(&ci_yml());
+    let release = read(".github/workflows/release.yml");
+    let agents = read("AGENTS.md");
+
+    let mut wrong = Vec::new();
+    let mut floors_in_force = Vec::new();
+    for tier in ["debug", "release", "coverage"] {
+        let mut sources = vec![
+            ("chores.yml", stated_in_commands(&chores, tier)),
+            ("AGENTS.md table", stated_in_the_table(&agents, tier)),
+        ];
+        // ci.yml runs no release tier, and release.yml no coverage tier.
+        if tier != "release" {
+            sources.push(("ci.yml", stated_in_commands(&ci, tier)));
+        }
+        if tier != "coverage" {
+            sources.push(("release.yml", stated_in_commands(&release, tier)));
+        }
+        let mut budgets = Vec::new();
+        let mut floors = Vec::new();
+        for (file, stated) in &sources {
+            if stated.budgets.is_empty() || stated.budgets.len() != stated.floors.len() {
+                wrong.push(format!(
+                    "{file} states {} budget(s) and {} floor(s) for the {tier} tier",
+                    stated.budgets.len(),
+                    stated.floors.len()
+                ));
+            }
+            budgets.extend(stated.budgets.iter().map(|budget| (*file, *budget)));
+            floors.extend(stated.floors.iter().map(|floor| (*file, *floor)));
+        }
+        if budgets.windows(2).any(|pair| pair[0].1 != pair[1].1) {
+            wrong.push(format!("{tier} budgets differ: {budgets:?}"));
+        }
+        if floors.windows(2).any(|pair| pair[0].1 != pair[1].1) {
+            wrong.push(format!("{tier} floors differ: {floors:?}"));
+        }
+        floors_in_force.extend(floors.iter().map(|(_, floor)| *floor));
+    }
+    let highest = floors_in_force.iter().max().copied();
+    for quoted in floors_in_prose(&agents) {
+        if Some(quoted) != highest {
+            wrong.push(format!(
+                "AGENTS.md quotes floor {quoted}; the floor in force is {highest:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The per-OS transfer floors are checked wherever a tier runs, not by CI
+/// alone (#516). `tests/scripts/test-transfer-floors.sh` tests the script.
+#[test]
+fn every_local_and_release_tier_checks_the_per_os_transfer_floors() {
+    let mut missing = Vec::new();
+    for (file, tiers) in [
+        ("chores.yml", &["debug", "release", "coverage"][..]),
+        (".github/workflows/release.yml", &["debug", "release"][..]),
+    ] {
+        let text = read_or_panic(&manifest_dir().join(file));
+        for tier in tiers {
+            let wanted = format!("bash scripts/transfer-floors.sh {tier}");
+            let runs_it = text.lines().any(|line| {
+                line.trim()
+                    .trim_start_matches("- ")
+                    .trim_matches('\'')
+                    .eq(&wanted)
+            });
+            if !runs_it {
+                missing.push(format!("{file} does not run `{wanted}`"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
 /// Read a file the guards depend on, or fail.
 ///
 /// It panics rather than returning `None` on purpose. An
