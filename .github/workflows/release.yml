@@ -72,10 +72,15 @@ jobs:
             exit 1
           fi
 
+      # THE FLOORS AND BUDGETS OF ci.yml AND chores.yml (#516), which
+      # tests/ci_profile.rs holds. The debug byte budget is 80,000 because
+      # the same command printed 71,046 bytes (1187 lines) on CI with every
+      # test passing (run 45857521244, test / ubuntu-latest).
       - name: test (debug, quiet and budgeted)
         run: |
-          bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli,layers
-          bash scripts/core.sh test-floor debug 348
+          bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers
+          bash scripts/core.sh test-floor debug 488
+          bash scripts/transfer-floors.sh debug
       # A RELEASE-PROFILE RUN, DECIDED IN #111. The profile published is
       # the release one, and optimisation can change behaviour the debug
       # run never sees: `debug_assert!` bodies vanish, overflow wraps.
@@ -89,7 +94,8 @@ jobs:
       - name: test (release, quiet and budgeted)
         run: |
           bash scripts/tier.sh "test (release)" release 1000 60000 -- cargo test --locked --release --all-targets --features cli,layers -- --quiet
-          bash scripts/core.sh test-floor release 348
+          bash scripts/core.sh test-floor release 488
+          bash scripts/transfer-floors.sh release
       - name: keep the full test transcripts
         if: always()
         uses: actions/upload-artifact@v4

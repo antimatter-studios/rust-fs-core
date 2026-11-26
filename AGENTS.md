@@ -287,8 +287,8 @@ rather than in one consumer of it.
 ```sh
 chore lint            # cargo fmt --check, the agent-core check, clippy --locked -D warnings
 chore build           # debug build
-chore test:debug      # the whole suite, debug, overflow checks armed, budgeted, floor 348
-chore test:release    # the same selection under --release, budgeted, floor 348
+chore test:debug      # the whole suite, debug, overflow checks armed, budgeted, floor 488
+chore test:release    # the same selection, optimized (test-opt profile), budgeted, floor 488
 chore test            # both tiers
 chore test:scripts    # the shell tests (tests/scripts/*.sh)
 chore coverage        # the suite under llvm-cov with the same 90% line floor CI uses
@@ -330,7 +330,8 @@ Two more independent graders stand behind that, and neither is this crate
 marking its own homework:
 
 - `cargo llvm-cov --fail-under-lines 90` in the `coverage` job.
-- An **executed-test floor of 348** on every tier (`scripts/core.sh test-floor`). A
+- An **executed-test floor of 488** on every tier (`scripts/core.sh test-floor`),
+  with per-target transfer floors on top (`scripts/transfer-floors.sh`). A
   suite that silently stops running a material part of itself otherwise reports
   exactly the same green as one that passes.
 
@@ -491,9 +492,15 @@ or bump it and every consumer's `core.sh` in the same pass.
 
 | tier | measured | budget | floor |
 |---|---|---|---|
-| debug | 557 lines / 31,250 bytes | 750 / 50,000 | 348 |
-| release | 557 lines / 31,295 bytes | 750 / 50,000 | 348 |
-| coverage | 575 lines / 32,607 bytes | 1200 / 70,000 | 348 |
+| debug | 1187 lines / 71,046 bytes (CI run 45857521244) | 1200 / 80,000 | 488 |
+| release | 377 lines / 15,291 bytes (CI run 44789488568, v0.5.1) | 1000 / 60,000 | 488 |
+| coverage | 411 lines / 17,462 bytes (CI run 45857521244) | 1200 / 70,000 | 488 |
+
+`chores.yml`, `ci.yml`, `release.yml` and this table state one budget and one
+floor per tier, and `tests/ci_profile.rs` fails if any of them differs. `ci.yml`
+runs no release tier, and `release.yml` no coverage tier. Every tier also checks
+the common per-target transfer floors and the host OS's
+(`.github/transfer-*-floors.txt`).
 
 Exit **65** is a passing run that printed more than its budget.
 `AM_FS_CORE_VERBOSE=1`, or `chore test -- --verbose`, streams a run as well as
