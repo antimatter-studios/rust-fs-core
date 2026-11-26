@@ -365,6 +365,32 @@ impl TreeSource for NamedTree {
         Ok(n)
     }
 }
+/// A path inside the image is joined with `/` on every host (#489): a driver
+/// looks it up as given, so a Windows separator names nothing. The strings are
+/// compared, because two `Path`s that differ only in separator are equal on
+/// Windows.
+#[test]
+fn nested_image_paths_reach_the_source_and_the_report_with_forward_slashes() {
+    let (root, _, dest) = scratch("image-separators");
+    let mut tree = NamedTree::new(&[
+        ("d", TreeKind::Directory),
+        ("d/e", TreeKind::Directory),
+        ("d/e/f", TreeKind::File),
+    ]);
+    let out = tree.export(&dest, true);
+    let report = out.report.unwrap().to_compact();
+    assert_eq!(out.code, 0, "{report}");
+    let asked = |paths: &[PathBuf]| -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| path.to_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(asked(&tree.listings), ["", "d", "d/e"]);
+    assert_eq!(asked(&tree.reads), ["d/e/f"]);
+    assert!(report.contains(r#""path": "d/e/f""#), "{report}");
+    fs::remove_dir_all(root).unwrap();
+}
 fn folds_case(dest: &Path) -> bool {
     fs::create_dir_all(dest).unwrap();
     let name = dest.join("CaseOracle");
