@@ -585,7 +585,7 @@ fn case_volume(filesystem: &str, root: PathBuf) -> CaseVolume {
         .filter_map(|line| line.split_whitespace().next())
         .find(|word| word.starts_with("/dev/disk"))
         .map(str::to_owned);
-    volume.attached(mount.clone(), device.clone());
+    volume.attached(image.clone(), mount.clone(), device.clone());
     assert!(device.is_some(), "attach named no device: {out:?}");
     CaseVolume {
         _volume: volume,
