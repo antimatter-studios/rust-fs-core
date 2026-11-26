@@ -6,6 +6,8 @@ mod lifecycle {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const CHILD_TEST: &str = "macos::lifecycle::attachment_child";
+    const FAILING_PROBE_TEST: &str = "macos::lifecycle::a_failing_probe_prints_its_childs_log";
+    const FAILING_PROBE_ROOT: &str = "FS_CORE_ATTACH_FAILING_PROBE_ROOT";
 
     fn own_info(image: &Path) -> Option<String> {
         let output = Command::new("/usr/bin/hdiutil")
@@ -57,6 +59,13 @@ mod lifecycle {
         }
     }
 
+    /// The two handles that give a child's stdout and stderr one log file.
+    fn child_log(log: &Path) -> (Stdio, Stdio) {
+        let stdout = Stdio::from(File::create(log).unwrap());
+        let stderr = Stdio::from(File::options().append(true).open(log).unwrap());
+        (stdout, stderr)
+    }
+
     struct Probe {
         child: Child,
         image: PathBuf,
@@ -68,15 +77,14 @@ mod lifecycle {
         fn start(root: &Path, label: &str, mode: &str) -> Self {
             let ready = root.join(format!("{label}.ready"));
             let log = root.join(format!("{label}.log"));
+            let (stdout, stderr) = child_log(&log);
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", CHILD_TEST, "--nocapture"])
                 .env("TMPDIR", root)
                 .env("FS_CORE_ATTACH_CHILD_READY", &ready)
                 .env("FS_CORE_ATTACH_CHILD_MODE", mode)
-                .stdout(Stdio::from(File::create(&log).unwrap()))
-                .stderr(Stdio::from(
-                    File::options().append(true).open(&log).unwrap(),
-                ))
+                .stdout(stdout)
+                .stderr(stderr)
                 .spawn()
                 .unwrap();
             let deadline = Instant::now() + Duration::from_secs(90);
@@ -217,6 +225,57 @@ mod lifecycle {
     }
 
     #[test]
+    fn the_childs_log_keeps_what_each_stream_wrote() {
+        let root = root("log");
+        let log = root.join("child.log");
+        let (stdout, stderr) = child_log(&log);
+        let status = Command::new("/bin/sh")
+            .args(["-c", "echo reason >&2; echo later"])
+            .stdout(stdout)
+            .stderr(stderr)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(fs::read_to_string(&log).unwrap(), "reason\nlater\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Runs itself again as the failing side: a probe that is alive when its
+    /// test panics. That probe's child attaches nothing.
+    #[test]
+    fn a_failing_probe_prints_its_childs_log() {
+        if let Some(root) = std::env::var_os(FAILING_PROBE_ROOT) {
+            let root = PathBuf::from(root);
+            let log = root.join("child.log");
+            fs::write(&log, "the child's own reason\n").unwrap();
+            let _probe = Probe {
+                child: Command::new("/bin/sleep").arg("60").spawn().unwrap(),
+                image: root.join("never-attached.img"),
+                device: String::new(),
+                log,
+            };
+            panic!("intentional failure while a probe is alive");
+        }
+        let root = root("failing-probe");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", FAILING_PROBE_TEST])
+            .env(FAILING_PROBE_ROOT, &root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(101), "{output:?}");
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            printed.contains("intentional failure while a probe is alive"),
+            "the failing side did not reach its failure:\n{printed}"
+        );
+        assert!(
+            printed.contains("the child's own reason"),
+            "a failing probe did not print its child's log:\n{printed}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn term_detaches_only_the_childs_own_image() {
         let root = root("term");
         let mut victim = Probe::start(&root, "term", "wait");
@@ -226,6 +285,15 @@ mod lifecycle {
         assert!(
             !snapshot("after TERM", &victim.image),
             "TERM left its own image attached"
+        );
+        let log = fs::read_to_string(&victim.log).unwrap();
+        let report = format!(
+            "owned DiskImages signal 15 cleanup of {}: detached",
+            victim.device
+        );
+        assert!(
+            log.contains(&report),
+            "the child did not report what its TERM cleanup did"
         );
     }
 
