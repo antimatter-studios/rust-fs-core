@@ -447,6 +447,40 @@ fn local_tasks_and_automation_use_budgeted_tiers_and_keep_the_logs() {
 }
 
 #[test]
+fn the_debug_tier_prints_progress_not_one_line_per_test() {
+    // The debug tier printed 1187 lines against a 1200-line budget (run
+    // 45857521244): 843 of them were libtest's one line per test (#518).
+    // --quiet goes after cargo's `--`: before it, cargo drops the `Running`
+    // lines that the per-target floors read.
+    let expected = "-- cargo test --locked --all-targets --features cli,layers -- --quiet";
+    let mut listing = Vec::new();
+    for name in [
+        "chores.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+    ] {
+        let text = std::fs::read_to_string(repo().join(name)).unwrap();
+        let runs: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .filter(|line| line.contains("scripts/tier.sh \"test (debug)\" debug "))
+            .collect();
+        assert!(!runs.is_empty(), "{name} runs no debug tier");
+        for run in runs {
+            // chores.yml quotes the whole command.
+            if !run.trim_end().trim_end_matches('\'').ends_with(expected) {
+                listing.push(format!("{name}: {}", run.trim()));
+            }
+        }
+    }
+    assert!(
+        listing.is_empty(),
+        "these debug tiers list every test instead of ending `{expected}`:\n{}",
+        listing.join("\n")
+    );
+}
+
+#[test]
 fn the_release_tier_prints_progress_not_one_line_per_test() {
     // v0.3.16's release run printed 1014 lines against a 1000-line budget
     // (run 39203088290): 657 of them were libtest's one `... ok` line per
