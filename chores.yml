@@ -81,7 +81,7 @@ chore_min_version: 0.6.0
 # and executed the same 374 tests as the post-change debug run:
 #
 #   tier       measured locally       budget           floor
-#   debug      1040 lines (CI, cold)  1200 / 70,000     486
+#   debug      70,076 bytes (CI)      1200 / 80,000     486
 #   release    751 lines (CI, cold)   1000 / 60,000     486
 #   coverage   575 / 32,607 bytes     1200 / 70,000     486
 #   semver     (see below)              40 / 4,000       -
@@ -97,6 +97,12 @@ chore_min_version: 0.6.0
 # same tier one layer up printed 1002 lines warm (run 39337753619). 1,200 /
 # 70,000 is that plus about 15%, the budget the top of the open chain already
 # measured (run 39209097465, 1052 lines / 62,179 bytes).
+#
+# THE DEBUG BYTE BUDGET MOVED ON 2026-11-26, from 70,000: the test / ubuntu-latest
+# debug tier printed 70,076 bytes on CI with every test passing (run
+# 45821414604), the extra bytes being a new test's pass line. 80,000 is that
+# plus about 14%. ci.yml states the same budget, and tests/ci_profile.rs fails
+# if the two differ.
 #
 # THE RELEASE TIER RUNS LIBTEST WITH --quiet SINCE 2026-10-19: the v0.3.16
 # release's test (release) tier printed 1014 lines / 58,026 bytes on CI with
@@ -238,7 +244,7 @@ tasks:
   test:debug:
     desc: Debug-profile suite, including every target
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 1200 70000 -- cargo test --locked --all-targets --features cli,layers'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers'
       - 'bash scripts/core.sh test-floor debug 486'
       - 'bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug'
 
