@@ -345,8 +345,22 @@ jobs:
                 tmp/coverage-443/merged.profdata > "tmp/coverage-443/profile-$name.txt" 2>&1 || true
               "$llvm_bin/llvm-profdata" merge -text tmp/coverage-443/merged.profdata \
                 -o "tmp/coverage-443/merged-$name.proftext" 2>&1 || true
+              # --dump makes llvm-cov print each mismatched function: its name
+              # and the hash it found no profile record for.
+              "$llvm_bin/llvm-cov" report --dump -instr-profile=tmp/coverage-443/merged.profdata "$bin" 2>&1 \
+                | grep '^hash-mismatch:' > "tmp/coverage-443/mismatch-$name.txt" || true
+              # Two binaries, in case the names alone do not explain it: one
+              # integration test and the library's own unit tests.
+              case "$name" in
+                error-*|fs_core-*) cp "$bin" "tmp/coverage-443/bin-$name" ;;
+              esac
             fi
           done < tmp/coverage-443/executables.txt
+          # Every mismatched function once, with the number of binaries that
+          # report it.
+          cat tmp/coverage-443/mismatch-*.txt | sort | uniq -c | sort -rn \
+            > tmp/logs/coverage-macos-443-mismatches.txt || true
+          head -n 60 tmp/logs/coverage-macos-443-mismatches.txt
           tar czf tmp/coverage-443.tgz -C tmp coverage-443
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
@@ -357,6 +371,7 @@ jobs:
           name: coverage-macos-mismatch-443
           path: |
             tmp/logs/coverage-macos-443.log
+            tmp/logs/coverage-macos-443-mismatches.txt
             tmp/coverage-443.tgz
           if-no-files-found: warn
           retention-days: 7
