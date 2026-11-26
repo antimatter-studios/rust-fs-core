@@ -1,5 +1,6 @@
 mod lifecycle {
     use super::attach;
+    use crate::hdiutil_attachment::{hdiutil_info, listing_evidence};
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
@@ -149,6 +150,11 @@ mod lifecycle {
                         println!("child log {} is unreadable: {error}", self.log.display())
                     }
                 }
+                let info = hdiutil_info().unwrap_or_else(|error| error.to_string());
+                println!(
+                    "hdiutil info at failure:\n{}",
+                    listing_evidence(&self.device, &info)
+                );
             }
             if own_info(&self.image).is_some() {
                 let result = Command::new("/usr/bin/hdiutil")
