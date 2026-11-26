@@ -13,13 +13,24 @@ pub const ATTEMPTS: u32 = 6;
 /// busy" (a scanning app holds the node for a moment). Any other failure, or a
 /// node still busy after the last attempt, returns the tool's stderr.
 ///
-/// `hdiutil info` is read before every retry. The node may have been released
-/// and given to another image since the refusal, so a retry runs only while the
-/// listing still names `image` on `device`. An image that is no longer listed is
-/// no longer attached, which is success. An image listed elsewhere, or a
-/// listing that cannot be read, is an error.
+/// `hdiutil info` is read before every attempt, the first included. The node may
+/// have been released and given to another image since the attach or the last
+/// refusal, so a detach runs only while the listing still names `image` on
+/// `device`. An image that is no longer listed is no longer attached, which is
+/// success. An image listed elsewhere, or a listing that cannot be read, is an
+/// error.
 pub fn detach(program: &OsStr, image: &Path, device: &OsStr) -> Result<(), String> {
     for attempt in 1..=ATTEMPTS {
+        let listing = info(program)?;
+        if !listed_on(&listing, image, device)? {
+            eprintln!(
+                "hdiutil info did not list {} before detach attempt {attempt} of {}; \
+                 no detach run:\n{listing}",
+                image.display(),
+                Path::new(device).display()
+            );
+            return Ok(());
+        }
         let mut command = Command::new(program);
         command.arg("detach");
         if attempt > 1 {
@@ -37,16 +48,6 @@ pub fn detach(program: &OsStr, image: &Path, device: &OsStr) -> Result<(), Strin
             return Err(stderr);
         }
         std::thread::sleep(Duration::from_millis(200 * u64::from(attempt)));
-        let listing = info(program)?;
-        if !listed_on(&listing, image, device)? {
-            eprintln!(
-                "detach of {} was refused as busy, then hdiutil info did not list {}; \
-                 no further detach run:\n{listing}",
-                Path::new(device).display(),
-                image.display()
-            );
-            return Ok(());
-        }
     }
     unreachable!("the loop returns on its last attempt")
 }
@@ -102,7 +103,7 @@ fn listed_on(listing: &str, image: &Path, target: &OsStr) -> Result<bool, String
         return Ok(true);
     }
     Err(format!(
-        "{} is no longer listed on {}; no further detach run:\n{listing}",
+        "{} is no longer listed on {}; no detach run:\n{listing}",
         image.display(),
         target.display()
     ))

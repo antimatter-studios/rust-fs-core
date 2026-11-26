@@ -75,7 +75,7 @@ fn stand_in(dir: &Path, stderr: &str, failing: usize) -> (PathBuf, PathBuf) {
     let script = format!(
         "#!/bin/sh\necho \"$*\" >> '{a}'\nn=$(cat '{c}' 2>/dev/null || echo 0)\n\
          if [ \"$1\" = info ]; then\n\
-         f='{l}'\nif [ -f \"$f.$n\" ]; then f=\"$f.$n\"; fi\nexec cat \"$f\"\nfi\n\
+         f='{l}'\nif [ -e \"$f.$n\" ]; then f=\"$f.$n\"; fi\nexec cat \"$f\"\nfi\n\
          n=$((n + 1))\necho \"$n\" > '{c}'\n\
          if [ \"$n\" -le {failing} ]; then cat '{m}' >&2; exit 1; fi\nexit 0\n",
         c = count.display(),
@@ -264,7 +264,7 @@ fn an_image_that_never_attached_detaches_nothing() {
 }
 
 /// The calls of one refused detach of `/dev/disk11` that ran no retry.
-const ONE_REFUSAL: &str = "detach /dev/disk11\ninfo\n";
+const ONE_REFUSAL: &str = "info\ndetach /dev/disk11\ninfo\n";
 
 #[test]
 fn a_refused_detach_is_retried_while_the_image_stays_on_its_node() {
@@ -274,7 +274,7 @@ fn a_refused_detach_is_retried_while_the_image_stays_on_its_node() {
     detach_node(&dir, &program).expect("busy detach must retry to success");
     assert_eq!(
         args_of(&dir),
-        "detach /dev/disk11\ninfo\ndetach -force /dev/disk11\ninfo\ndetach -force /dev/disk11\n"
+        "info\ndetach /dev/disk11\ninfo\ndetach -force /dev/disk11\ninfo\ndetach -force /dev/disk11\n"
     );
     fs::remove_dir_all(dir).unwrap();
 }
@@ -286,7 +286,7 @@ fn a_node_given_to_another_image_is_not_detached_again() {
     let (program, _count) = stand_in(&dir, BUSY, NEVER);
     let other = dir.join("other.sparseimage");
     fs::write(
-        dir.join("listing"),
+        dir.join("listing.1"),
         listing(&[(&other, "/dev/disk11", &dir.join("mount"))]),
     )
     .unwrap();
@@ -308,7 +308,7 @@ fn the_listing_is_read_again_before_every_retry() {
     let result = detach_node(&dir, &program);
     assert_eq!(
         args_of(&dir),
-        "detach /dev/disk11\ninfo\ndetach -force /dev/disk11\ninfo\n"
+        "info\ndetach /dev/disk11\ninfo\ndetach -force /dev/disk11\ninfo\n"
     );
     assert!(
         result.is_ok(),
@@ -323,7 +323,7 @@ fn an_image_that_moved_to_another_node_is_reported_without_a_retry() {
     let dir = scratch("moved");
     let (program, _count) = stand_in(&dir, BUSY, NEVER);
     let moved = listing(&[(&own_image(&dir), "/dev/disk12", &dir.join("elsewhere"))]);
-    fs::write(dir.join("listing"), moved).unwrap();
+    fs::write(dir.join("listing.1"), moved).unwrap();
     let result = detach_node(&dir, &program);
     assert_eq!(args_of(&dir), ONE_REFUSAL);
     let error = result.expect_err("a moved image is an error");
@@ -339,7 +339,8 @@ fn a_listing_that_cannot_be_read_stops_the_retries() {
     let _serial = serial();
     let dir = scratch("unreadable");
     let (program, _count) = stand_in(&dir, BUSY, NEVER);
-    fs::remove_file(dir.join("listing")).unwrap();
+    // `cat` of a directory fails, so `info` fails once one detach has run.
+    fs::create_dir(dir.join("listing.1")).unwrap();
     let result = detach_node(&dir, &program);
     assert_eq!(args_of(&dir), ONE_REFUSAL);
     let error = result.expect_err("an unread listing is an error");
@@ -363,7 +364,7 @@ fn a_detach_by_mount_point_is_retried_only_while_the_image_is_mounted_there() {
     let m = mount.display();
     assert_eq!(
         args_of(&dir),
-        format!("detach {m}\ninfo\ndetach -force {m}\ninfo\n")
+        format!("info\ndetach {m}\ninfo\ndetach -force {m}\ninfo\n")
     );
     assert!(
         result.is_ok(),
@@ -377,7 +378,7 @@ fn a_drop_whose_image_left_its_node_runs_no_further_detach() {
     let _serial = serial();
     let dir = scratch("drop-left");
     let (program, _count) = stand_in(&dir, BUSY, NEVER);
-    fs::write(dir.join("listing"), listing(&[])).unwrap();
+    fs::write(dir.join("listing.1"), listing(&[])).unwrap();
     let image_root = dir.join("image-root");
     fs::create_dir_all(&image_root).unwrap();
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -389,6 +390,119 @@ fn a_drop_whose_image_left_its_node_runs_no_further_detach() {
         );
     }));
     assert_eq!(args_of(&dir), ONE_REFUSAL);
+    assert!(
+        outcome.is_ok(),
+        "nothing stays attached, so the drop succeeds"
+    );
+    assert!(!image_root.exists(), "scratch directory is removed");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// The calls when the listing read before the first detach stops it.
+const NO_DETACH: &str = "info\n";
+
+#[test]
+fn an_image_no_longer_listed_gets_no_detach_at_all() {
+    let _serial = serial();
+    let dir = scratch("first-left");
+    let (program, _count) = stand_in(&dir, "", 0);
+    fs::write(dir.join("listing"), listing(&[])).unwrap();
+    let result = detach_node(&dir, &program);
+    assert_eq!(args_of(&dir), NO_DETACH);
+    assert!(
+        result.is_ok(),
+        "the image is no longer attached: {result:?}"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_node_given_to_another_image_before_the_first_detach_is_left_alone() {
+    let _serial = serial();
+    let dir = scratch("first-reused");
+    let (program, _count) = stand_in(&dir, "", 0);
+    let other = dir.join("other.sparseimage");
+    fs::write(
+        dir.join("listing"),
+        listing(&[(&other, "/dev/disk11", &dir.join("mount"))]),
+    )
+    .unwrap();
+    let result = detach_node(&dir, &program);
+    assert_eq!(args_of(&dir), NO_DETACH);
+    assert!(
+        result.is_ok(),
+        "the image is no longer attached: {result:?}"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_image_that_moved_before_the_first_detach_is_reported_without_a_detach() {
+    let _serial = serial();
+    let dir = scratch("first-moved");
+    let (program, _count) = stand_in(&dir, "", 0);
+    let moved = listing(&[(&own_image(&dir), "/dev/disk12", &dir.join("elsewhere"))]);
+    fs::write(dir.join("listing"), moved).unwrap();
+    let result = detach_node(&dir, &program);
+    assert_eq!(args_of(&dir), NO_DETACH);
+    let error = result.expect_err("a moved image is an error");
+    assert!(
+        error.contains("is no longer listed on /dev/disk11"),
+        "reported: {error:?}"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_listing_that_cannot_be_read_runs_no_detach() {
+    let _serial = serial();
+    let dir = scratch("first-unreadable");
+    let (program, _count) = stand_in(&dir, "", 0);
+    fs::remove_file(dir.join("listing")).unwrap();
+    let result = detach_node(&dir, &program);
+    assert_eq!(args_of(&dir), NO_DETACH);
+    let error = result.expect_err("an unread listing is an error");
+    assert!(error.contains("hdiutil info failed"), "reported: {error:?}");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_detach_by_mount_point_runs_nothing_when_the_image_is_not_listed() {
+    let _serial = serial();
+    let dir = scratch("first-mount-left");
+    let (program, _count) = stand_in(&dir, "", 0);
+    fs::write(dir.join("listing"), listing(&[])).unwrap();
+    let result = image_detach::detach_attached(
+        program.as_os_str(),
+        &own_image(&dir),
+        None,
+        dir.join("mount").as_os_str(),
+    );
+    assert_eq!(args_of(&dir), NO_DETACH);
+    assert!(
+        result.is_ok(),
+        "the image is no longer attached: {result:?}"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_drop_whose_image_already_left_its_node_runs_no_detach() {
+    let _serial = serial();
+    let dir = scratch("first-drop-left");
+    let (program, _count) = stand_in(&dir, "", 0);
+    fs::write(dir.join("listing"), listing(&[])).unwrap();
+    let image_root = dir.join("image-root");
+    fs::create_dir_all(&image_root).unwrap();
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut image = AttachedImage::new(program.as_os_str(), image_root.clone());
+        image.attached(
+            own_image(&dir),
+            dir.join("mount"),
+            Some("/dev/disk11".to_owned()),
+        );
+    }));
+    assert_eq!(args_of(&dir), NO_DETACH);
     assert!(
         outcome.is_ok(),
         "nothing stays attached, so the drop succeeds"
