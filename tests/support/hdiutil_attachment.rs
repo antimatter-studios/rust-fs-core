@@ -48,6 +48,12 @@ fn registry() -> MutexGuard<'static, Vec<Record>> {
                                 unlisted = Some(info);
                                 "not listed by hdiutil info, no detach run".to_owned()
                             }
+                            Ok(Teardown::Released(info)) => {
+                                unlisted = Some(info);
+                                "refused as busy, then not listed by hdiutil info, \
+                                 no further detach run"
+                                    .to_owned()
+                            }
                             Err(error) => format!("failed: {error}"),
                         };
                         eprintln!(
@@ -138,10 +144,82 @@ pub fn listing_evidence(device: &str, listing: &str) -> String {
     format!("recorded node {device}: {node}\n{listing}")
 }
 
-enum Teardown {
+/// Whether `info`, an `hdiutil info` text, lists `image`. An image listed on a
+/// node other than `device` is an error.
+fn listed_in(info: &str, image: &Path, device: &str) -> io::Result<bool> {
+    for section in info.split("================================================") {
+        let ours = section.lines().any(|line| {
+            line.strip_prefix("image-path")
+                .and_then(|field| field.split_once(": "))
+                .is_some_and(|(_, path)| Path::new(path.trim()) == image)
+        });
+        if !ours {
+            continue;
+        }
+        let listed = section
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .find(|word| word.starts_with("/dev/disk"));
+        if listed != Some(device) {
+            return Err(invalid(
+                "owned image no longer names its recorded attach node",
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Detaches `device` when `info` lists `image` on it, retrying while `detach`
+/// is refused as busy. `info` gives the current `hdiutil info` text, and
+/// `detach` runs one detach of `device`, forced when its argument is true.
+///
+/// `info` is read again before every retry. The node may have been released and
+/// given to another image since the last read, so a retry runs only while the
+/// new text still lists `image` on `device`.
+pub fn detach_while_owned(
+    image: &Path,
+    device: &str,
+    mut info: impl FnMut() -> io::Result<String>,
+    mut detach: impl FnMut(bool) -> io::Result<Output>,
+) -> io::Result<Teardown> {
+    let listing = info()?;
+    if !listed_in(&listing, image, device)? {
+        return Ok(Teardown::NotListed(listing));
+    }
+    for attempt in 0..=5 {
+        let output = detach(attempt != 0)?;
+        if output.status.success() {
+            break;
+        }
+        if !String::from_utf8_lossy(&output.stderr)
+            .to_ascii_lowercase()
+            .contains("resource busy")
+            || attempt == 5
+        {
+            return Err(invalid(format!("owned hdiutil detach failed: {output:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(200 * (attempt + 1)));
+        let listing = info()?;
+        if !listed_in(&listing, image, device)? {
+            return Ok(Teardown::Released(listing));
+        }
+    }
+    if listed_in(&info()?, image, device)? {
+        return Err(invalid(
+            "owned image remains attached after detach succeeded",
+        ));
+    }
+    Ok(Teardown::Detached)
+}
+
+pub enum Teardown {
     Detached,
     /// No detach ran, because this `hdiutil info` text did not list the image.
     NotListed(String),
+    /// A detach was refused as busy, and no other ran, because this later
+    /// `hdiutil info` text did not list the image.
+    Released(String),
 }
 
 #[derive(Clone)]
@@ -246,31 +324,6 @@ impl Record {
         }
     }
 
-    /// Whether `info`, an `hdiutil info` text, lists this image.
-    fn listed_in(&self, info: &str) -> io::Result<bool> {
-        for section in info.split("================================================") {
-            let ours = section.lines().any(|line| {
-                line.strip_prefix("image-path")
-                    .and_then(|field| field.split_once(": "))
-                    .is_some_and(|(_, path)| Path::new(path.trim()) == self.image)
-            });
-            if !ours {
-                continue;
-            }
-            let device = section
-                .lines()
-                .filter_map(|line| line.split_whitespace().next())
-                .find(|word| word.starts_with("/dev/disk"));
-            if device != Some(self.device.as_str()) {
-                return Err(invalid(
-                    "owned image no longer names its recorded attach node",
-                ));
-            }
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
     /// What the detach did; see `detach_locked`.
     fn cleanup(&self) -> io::Result<Teardown> {
         let _lock = scope_lock(self.dir.parent().unwrap())?;
@@ -308,36 +361,14 @@ impl Record {
         if !whole_device(&self.device) || !self.same_image()? {
             return Err(invalid("owned image identity changed; refusing teardown"));
         }
-        let info = hdiutil_info()?;
-        if self.listed_in(&info)? {
-            for attempt in 0..=5 {
-                let mut command = Command::new("/usr/bin/hdiutil");
-                command.arg("detach");
-                if attempt != 0 {
-                    command.arg("-force");
-                }
-                let output = command.arg(&self.device).output()?;
-                if output.status.success() {
-                    break;
-                }
-                if !String::from_utf8_lossy(&output.stderr)
-                    .to_ascii_lowercase()
-                    .contains("resource busy")
-                    || attempt == 5
-                {
-                    return Err(invalid(format!("owned hdiutil detach failed: {output:?}")));
-                }
-                std::thread::sleep(Duration::from_millis(200 * (attempt + 1)));
+        detach_while_owned(&self.image, &self.device, hdiutil_info, |force| {
+            let mut command = Command::new("/usr/bin/hdiutil");
+            command.arg("detach");
+            if force {
+                command.arg("-force");
             }
-            if self.listed_in(&hdiutil_info()?)? {
-                return Err(invalid(
-                    "owned image remains attached after detach succeeded",
-                ));
-            }
-            Ok(Teardown::Detached)
-        } else {
-            Ok(Teardown::NotListed(info))
-        }
+            command.arg(&self.device).output()
+        })
     }
 }
 

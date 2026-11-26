@@ -1,9 +1,12 @@
 mod lifecycle {
     use super::attach;
-    use crate::hdiutil_attachment::{hdiutil_info, listing_evidence};
+    use crate::hdiutil_attachment::{detach_while_owned, hdiutil_info, listing_evidence, Teardown};
+    use std::cell::RefCell;
     use std::fs::{self, File};
+    use std::io;
+    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Command, ExitStatus, Output, Stdio};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const CHILD_TEST: &str = "macos::lifecycle::attachment_child";
@@ -254,6 +257,138 @@ mod lifecycle {
         assert!(status.success());
         assert_eq!(fs::read_to_string(&log).unwrap(), "reason\nlater\n");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    const OWN_IMAGE: &str = "/nowhere/raw.img";
+    // A node no system has: these tests run no tool.
+    const OWN_NODE: &str = "/dev/disk999999999";
+
+    /// An `hdiutil info` text that lists each of `images` on its node.
+    fn listing(images: &[(&str, &str)]) -> String {
+        let separator = "================================================";
+        let mut text = "framework       : 1\n".to_owned();
+        for (image, node) in images {
+            text.push_str(&format!(
+                "{separator}\nimage-path      : {image}\n{node}\t\n"
+            ));
+        }
+        text
+    }
+
+    /// Tears down `OWN_IMAGE` on `OWN_NODE` against a fake `hdiutil`. `info`
+    /// answers from the number of detaches run so far; each detach gets the next
+    /// of `answers` (true succeeds, false is refused as busy), and any detach
+    /// after the last of them is refused as busy. Returns the outcome and the
+    /// calls made, in order.
+    fn teardown_against(
+        info: impl Fn(usize) -> io::Result<String>,
+        answers: &[bool],
+    ) -> (io::Result<Teardown>, Vec<&'static str>) {
+        let calls = RefCell::new(Vec::new());
+        let detaches = || {
+            calls
+                .borrow()
+                .iter()
+                .filter(|call| **call != "info")
+                .count()
+        };
+        let outcome = detach_while_owned(
+            Path::new(OWN_IMAGE),
+            OWN_NODE,
+            || {
+                let run = detaches();
+                calls.borrow_mut().push("info");
+                info(run)
+            },
+            |force| {
+                let succeeds = answers.get(detaches()) == Some(&true);
+                calls
+                    .borrow_mut()
+                    .push(if force { "detach -force" } else { "detach" });
+                Ok(Output {
+                    status: ExitStatus::from_raw(if succeeds { 0 } else { 1 << 8 }),
+                    stdout: Vec::new(),
+                    stderr: if succeeds {
+                        Vec::new()
+                    } else {
+                        b"hdiutil: couldn't eject - Resource busy\n".to_vec()
+                    },
+                })
+            },
+        );
+        (outcome, calls.into_inner())
+    }
+
+    #[test]
+    fn a_refused_detach_stops_when_the_image_leaves_the_listing() {
+        // After the refusal, another image holds the recorded node.
+        let (outcome, calls) = teardown_against(
+            |detaches| {
+                let image = if detaches == 0 {
+                    OWN_IMAGE
+                } else {
+                    "/nowhere/other.img"
+                };
+                Ok(listing(&[(image, OWN_NODE)]))
+            },
+            &[],
+        );
+        assert_eq!(calls, ["info", "detach", "info"]);
+        assert!(
+            !matches!(outcome, Err(_) | Ok(Teardown::Detached)),
+            "an image that left the listing is neither a failure nor a detach"
+        );
+    }
+
+    #[test]
+    fn a_refused_detach_stops_when_the_image_moves_to_another_node() {
+        let (outcome, calls) = teardown_against(
+            |detaches| {
+                let node = if detaches == 0 {
+                    OWN_NODE
+                } else {
+                    "/dev/disk999999998"
+                };
+                Ok(listing(&[(OWN_IMAGE, node)]))
+            },
+            &[],
+        );
+        assert_eq!(calls, ["info", "detach", "info"]);
+        let error = outcome
+            .err()
+            .expect("a moved image is an error")
+            .to_string();
+        assert!(
+            error.contains("no longer names its recorded attach node"),
+            "reported: {error}"
+        );
+    }
+
+    #[test]
+    fn a_refused_detach_stops_when_the_listing_cannot_be_read() {
+        let (outcome, calls) = teardown_against(
+            |detaches| match detaches {
+                0 => Ok(listing(&[(OWN_IMAGE, OWN_NODE)])),
+                _ => Err(io::Error::other("no listing")),
+            },
+            &[],
+        );
+        assert_eq!(calls, ["info", "detach", "info"]);
+        let error = outcome.err().expect("an unread listing is an error");
+        assert_eq!(error.to_string(), "no listing");
+    }
+
+    #[test]
+    fn a_refused_detach_is_retried_while_the_image_stays_on_its_node() {
+        let (outcome, calls) = teardown_against(
+            |detaches| {
+                let own: &[(&str, &str)] = &[(OWN_IMAGE, OWN_NODE)];
+                Ok(listing(if detaches < 2 { own } else { &[] }))
+            },
+            &[false, true],
+        );
+        assert_eq!(calls, ["info", "detach", "info", "detach -force", "info"]);
+        assert!(matches!(outcome, Ok(Teardown::Detached)));
     }
 
     /// Runs itself again as the failing side: a probe that is alive when its
