@@ -12,6 +12,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # KERNEL MODULES (#471): a job that loads one (modprobe, insmod, ZFS), or that
+  # needs KVM, has its gate ask for linux-x64-kvm, never linux-x64. The VPS
+  # runners cannot load modules, and the KVM class never answers one of them:
+  # only a KVM runner, or GitHub's ubuntu-24.04.
+  # tests/module_loading_jobs_hosted.rs holds this.
   test-gate:
     runs-on: antimatter-vps-gate
     timeout-minutes: 1
