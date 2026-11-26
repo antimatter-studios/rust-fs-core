@@ -338,8 +338,13 @@ jobs:
               echo "mismatch in $bin"
               "$llvm_bin/llvm-cov" export -format=text -instr-profile=tmp/coverage-443/merged.profdata "$bin" \
                 > "tmp/coverage-443/export-$name.json" 2>/dev/null || true
-              "$llvm_bin/llvm-profdata" show --all-functions --counts --show-cfg-checksum \
+              # --show-cfg-checksum is not an option of this llvm-profdata (the
+              # run that used it wrote only the usage error), so the names and
+              # hashes come from the text-format profile instead.
+              "$llvm_bin/llvm-profdata" show --all-functions --counts \
                 tmp/coverage-443/merged.profdata > "tmp/coverage-443/profile-$name.txt" 2>&1 || true
+              "$llvm_bin/llvm-profdata" merge -text tmp/coverage-443/merged.profdata \
+                -o "tmp/coverage-443/merged-$name.proftext" 2>&1 || true
             fi
           done < tmp/coverage-443/executables.txt
           tar czf tmp/coverage-443.tgz -C tmp coverage-443
