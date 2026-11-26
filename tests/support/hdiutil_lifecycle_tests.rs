@@ -1,5 +1,6 @@
 mod lifecycle {
     use super::attach;
+    use crate::hdiutil_attachment::{hdiutil_info, listing_evidence};
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
@@ -149,6 +150,11 @@ mod lifecycle {
                         println!("child log {} is unreadable: {error}", self.log.display())
                     }
                 }
+                let info = hdiutil_info().unwrap_or_else(|error| error.to_string());
+                println!(
+                    "hdiutil info at failure:\n{}",
+                    listing_evidence(&self.device, &info)
+                );
             }
             if own_info(&self.image).is_some() {
                 let result = Command::new("/usr/bin/hdiutil")
@@ -261,7 +267,8 @@ mod lifecycle {
             let _probe = Probe {
                 child: Command::new("/bin/sleep").arg("60").spawn().unwrap(),
                 image: root.join("never-attached.img"),
-                device: String::new(),
+                // A node no system has, so the report has a known answer.
+                device: "/dev/disk999999999".to_owned(),
                 log,
             };
             panic!("intentional failure while a probe is alive");
@@ -281,6 +288,13 @@ mod lifecycle {
         assert!(
             printed.contains("the child's own reason"),
             "a failing probe did not print its child's log:\n{printed}"
+        );
+        assert!(
+            printed
+                .split_once("hdiutil info at failure:")
+                .is_some_and(|(_, evidence)| evidence.contains("framework")
+                    && evidence.contains("recorded node /dev/disk999999999: absent")),
+            "a failing probe did not print what the system listed:\n{printed}"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -304,6 +318,40 @@ mod lifecycle {
         assert!(
             log.contains(&report),
             "the child did not report what its TERM cleanup did"
+        );
+    }
+
+    /// The image is detached before the signal, so the child's teardown
+    /// decides it is not listed. That decision must be reported with what
+    /// it was decided from.
+    #[test]
+    fn term_reports_the_listing_that_did_not_name_its_image() {
+        let root = root("unlisted");
+        let mut victim = Probe::start(&root, "unlisted", "wait");
+        assert!(snapshot("before own detach", &victim.image));
+        let detach = Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-force", &victim.device])
+            .output()
+            .unwrap();
+        assert!(detach.status.success(), "own detach failed: {detach:?}");
+        signal(&victim.child, "-TERM");
+        assert!(!wait(&mut victim.child).success());
+        let log = fs::read_to_string(&victim.log).unwrap();
+        let report = format!(
+            "owned DiskImages signal 15 cleanup of {}: not listed by hdiutil info, no detach run",
+            victim.device
+        );
+        assert!(
+            log.contains(&report),
+            "the child did not report an unlisted image:\n{log}"
+        );
+        let node = format!("recorded node {}: ", victim.device);
+        assert!(
+            log.split_once("the listing that did not name it:")
+                .is_some_and(
+                    |(_, evidence)| evidence.contains(&node) && evidence.contains("framework")
+                ),
+            "the child did not report the listing it decided from:\n{log}"
         );
     }
 

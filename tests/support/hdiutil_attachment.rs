@@ -41,9 +41,13 @@ fn registry() -> MutexGuard<'static, Vec<Record>> {
                 if number != 0 {
                     let records = registry();
                     for record in records.iter() {
+                        let mut unlisted = None;
                         let outcome = match record.cleanup() {
-                            Ok(true) => "detached".to_owned(),
-                            Ok(false) => "not listed by hdiutil info, no detach run".to_owned(),
+                            Ok(Teardown::Detached) => "detached".to_owned(),
+                            Ok(Teardown::NotListed(info)) => {
+                                unlisted = Some(info);
+                                "not listed by hdiutil info, no detach run".to_owned()
+                            }
                             Err(error) => format!("failed: {error}"),
                         };
                         eprintln!(
@@ -51,6 +55,12 @@ fn registry() -> MutexGuard<'static, Vec<Record>> {
                             record.device,
                             record.image.display()
                         );
+                        if let Some(info) = unlisted {
+                            eprintln!(
+                                "the listing that did not name it:\n{}",
+                                listing_evidence(&record.device, &info)
+                            );
+                        }
                     }
                     std::process::exit(128 + number as i32);
                 }
@@ -107,6 +117,31 @@ fn owner_pid(name: &str) -> Option<u32> {
 
 fn dead(pid: u32) -> bool {
     unsafe { kill(pid as i32, 0) == -1 && io::Error::last_os_error().raw_os_error() == Some(3) }
+}
+
+/// Everything `hdiutil info` lists.
+pub fn hdiutil_info() -> io::Result<String> {
+    let output = Command::new("/usr/bin/hdiutil").arg("info").output()?;
+    if !output.status.success() {
+        return Err(invalid(format!("hdiutil info failed: {output:?}")));
+    }
+    String::from_utf8(output.stdout).map_err(|error| invalid(error.to_string()))
+}
+
+/// A failure report: whether the recorded node exists, then the listing.
+pub fn listing_evidence(device: &str, listing: &str) -> String {
+    let node = match fs::symlink_metadata(device) {
+        Ok(_) => "present".to_owned(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => "absent".to_owned(),
+        Err(error) => format!("unreadable: {error}"),
+    };
+    format!("recorded node {device}: {node}\n{listing}")
+}
+
+enum Teardown {
+    Detached,
+    /// No detach ran, because this `hdiutil info` text did not list the image.
+    NotListed(String),
 }
 
 #[derive(Clone)]
@@ -211,12 +246,8 @@ impl Record {
         }
     }
 
-    fn attached(&self) -> io::Result<bool> {
-        let output = Command::new("/usr/bin/hdiutil").arg("info").output()?;
-        if !output.status.success() {
-            return Err(invalid("hdiutil info failed during owned-image teardown"));
-        }
-        let info = String::from_utf8(output.stdout).map_err(|error| invalid(error.to_string()))?;
+    /// Whether `info`, an `hdiutil info` text, lists this image.
+    fn listed_in(&self, info: &str) -> io::Result<bool> {
         for section in info.split("================================================") {
             let ours = section.lines().any(|line| {
                 line.strip_prefix("image-path")
@@ -240,14 +271,14 @@ impl Record {
         Ok(false)
     }
 
-    /// Whether a detach ran; see `detach_locked`.
-    fn cleanup(&self) -> io::Result<bool> {
+    /// What the detach did; see `detach_locked`.
+    fn cleanup(&self) -> io::Result<Teardown> {
         let _lock = scope_lock(self.dir.parent().unwrap())?;
         self.cleanup_locked()
     }
 
-    fn cleanup_locked(&self) -> io::Result<bool> {
-        let detached = self.detach_locked()?;
+    fn cleanup_locked(&self) -> io::Result<Teardown> {
+        let teardown = self.detach_locked()?;
         match fs::remove_file(&self.image) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -256,12 +287,11 @@ impl Record {
         fs::remove_file(self.dir.join(".attach.stdout"))?;
         fs::remove_file(self.dir.join(".owner"))?;
         fs::remove_dir(&self.dir)?;
-        Ok(detached)
+        Ok(teardown)
     }
 
-    /// `Ok(true)` when the image was listed and is now detached, `Ok(false)`
-    /// when `hdiutil info` did not list it and no detach ran.
-    fn detach_locked(&self) -> io::Result<bool> {
+    /// Detaches the image when `hdiutil info` lists it.
+    fn detach_locked(&self) -> io::Result<Teardown> {
         if self.device.is_empty() {
             let pid = self
                 .dir
@@ -278,8 +308,8 @@ impl Record {
         if !whole_device(&self.device) || !self.same_image()? {
             return Err(invalid("owned image identity changed; refusing teardown"));
         }
-        let listed = self.attached()?;
-        if listed {
+        let info = hdiutil_info()?;
+        if self.listed_in(&info)? {
             for attempt in 0..=5 {
                 let mut command = Command::new("/usr/bin/hdiutil");
                 command.arg("detach");
@@ -299,13 +329,15 @@ impl Record {
                 }
                 std::thread::sleep(Duration::from_millis(200 * (attempt + 1)));
             }
-            if self.attached()? {
+            if self.listed_in(&hdiutil_info()?)? {
                 return Err(invalid(
                     "owned image remains attached after detach succeeded",
                 ));
             }
+            Ok(Teardown::Detached)
+        } else {
+            Ok(Teardown::NotListed(info))
         }
-        Ok(listed)
     }
 }
 
