@@ -26,14 +26,20 @@ fn workflows_dir() -> PathBuf {
         .join("workflows")
 }
 
+/// The panic for a read of `dir` that failed. Generic in its result, so one
+/// handler serves the directory and each of its entries: a closure would be
+/// fixed to the first result type it meets, and fail to compile on the second.
+fn cannot<T>(dir: &Path) -> impl Fn(std::io::Error) -> T + '_ {
+    move |e| panic!("cannot read {}: {e}", dir.display())
+}
+
 /// The names of the workflow files in `dir`, sorted: every `.yml` and `.yaml`,
 /// which is what GitHub reads, so a new workflow is judged without being named
 /// here (#500).
 fn workflow_files(dir: &Path) -> Vec<String> {
-    let cannot = |e| panic!("cannot read {}: {e}", dir.display());
     let mut files: Vec<String> = std::fs::read_dir(dir)
-        .unwrap_or_else(cannot)
-        .map(|entry| entry.unwrap_or_else(cannot).file_name())
+        .unwrap_or_else(cannot(dir))
+        .map(|entry| entry.unwrap_or_else(cannot(dir)).file_name())
         .map(PathBuf::from)
         .filter(|name| {
             name.extension()
