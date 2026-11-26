@@ -2,6 +2,7 @@
 //! that detaches on drop. Each test crate includes this file and uses a subset.
 #![allow(dead_code)]
 use std::ffi::OsStr;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ pub const ATTEMPTS: u32 = 6;
 /// Detach `device`, retrying while it reports "Resource busy" (a scanning app
 /// holds the node for a moment). Any other failure, or a node still busy after
 /// the last attempt, returns the tool's stderr.
-pub fn detach(program: &OsStr, device: &OsStr) -> Result<(), String> {
+pub fn detach(program: &OsStr, _image: &Path, device: &OsStr) -> Result<(), String> {
     for attempt in 1..=ATTEMPTS {
         let mut command = Command::new(program);
         command.arg("detach");
@@ -36,10 +37,15 @@ pub fn detach(program: &OsStr, device: &OsStr) -> Result<(), String> {
 
 /// Detach what one attach reported: its whole-disk `device` node when attach
 /// named one, otherwise the `mount` point, which detaches the same image.
-pub fn detach_attached(program: &OsStr, device: Option<&str>, mount: &OsStr) -> Result<(), String> {
+pub fn detach_attached(
+    program: &OsStr,
+    image: &Path,
+    device: Option<&str>,
+    mount: &OsStr,
+) -> Result<(), String> {
     match device {
-        Some(node) => detach(program, OsStr::new(node)),
-        None => detach(program, mount),
+        Some(node) => detach(program, image, OsStr::new(node)),
+        None => detach(program, image, mount),
     }
 }
 
@@ -52,6 +58,7 @@ pub struct AttachedImage {
     root: std::path::PathBuf,
     // Set once attach has succeeded, so cleanup runs on every later exit.
     mount: Option<std::path::PathBuf>,
+    image: std::path::PathBuf,
     device: Option<String>,
 }
 
@@ -62,12 +69,20 @@ impl AttachedImage {
             program: program.into(),
             root,
             mount: None,
+            image: Default::default(),
             device: None,
         }
     }
 
-    /// Record a successful attach, before anything else can fail.
-    pub fn attached(&mut self, mount: std::path::PathBuf, device: Option<String>) {
+    /// Record a successful attach of `image`, before anything else can fail.
+    /// `image` is the path `hdiutil info` lists it by.
+    pub fn attached(
+        &mut self,
+        image: std::path::PathBuf,
+        mount: std::path::PathBuf,
+        device: Option<String>,
+    ) {
+        self.image = image;
         self.mount = Some(mount);
         self.device = device;
     }
@@ -79,6 +94,7 @@ impl Drop for AttachedImage {
             let device = self.device.take();
             if let Err(error) = detach_attached(
                 self.program.as_os_str(),
+                &self.image,
                 device.as_deref(),
                 mount.as_os_str(),
             ) {
