@@ -71,6 +71,11 @@ mod lifecycle {
         (Stdio::from(stdout), Stdio::from(stderr))
     }
 
+    /// Stands in for the bounded wait: it asks once, whatever the limit.
+    fn await_listing(_limit: Duration, mut listed: impl FnMut() -> bool) -> bool {
+        listed()
+    }
+
     struct Probe {
         child: Child,
         image: PathBuf,
@@ -80,6 +85,17 @@ mod lifecycle {
 
     impl Probe {
         fn start(root: &Path, label: &str, mode: &str) -> Self {
+            Self::start_observing(root, label, mode, |image| own_info(image).is_some())
+        }
+
+        /// `start`, with `listed` answering whether `hdiutil info` lists an
+        /// image.
+        fn start_observing(
+            root: &Path,
+            label: &str,
+            mode: &str,
+            _listed: impl FnMut(&Path) -> bool,
+        ) -> Self {
             let ready = root.join(format!("{label}.ready"));
             let log = root.join(format!("{label}.log"));
             let (stdout, stderr) = child_log(&log);
@@ -432,6 +448,41 @@ mod lifecycle {
             "a failing probe did not print what the system listed:\n{printed}"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A child's attach can return before `hdiutil info` in this process lists
+    /// the image, so a probe that stays attached is handed out only once it is
+    /// listed.
+    #[test]
+    fn a_probe_is_handed_out_only_after_its_image_is_listed() {
+        let root = root("late-listing");
+        let mut asked = Vec::new();
+        let mut victim = Probe::start_observing(&root, "late", "wait", |image| {
+            asked.push(image.to_owned());
+            asked.len() == 3
+        });
+        assert_eq!(asked, vec![victim.image.clone(); 3]);
+        signal(&victim.child, "-TERM");
+        assert!(!wait(&mut victim.child).success());
+        assert!(!snapshot("after TERM", &victim.image));
+    }
+
+    /// An image that is never listed ends the wait, and the answer says so.
+    #[test]
+    fn a_listing_wait_gives_up_at_its_limit() {
+        let limit = Duration::from_millis(200);
+        let started = Instant::now();
+        let mut asked = 0;
+        let listed = await_listing(limit, || {
+            asked += 1;
+            false
+        });
+        assert!(
+            !listed,
+            "an image that was never listed was reported listed"
+        );
+        assert!(started.elapsed() >= limit, "gave up before its limit");
+        assert!(asked > 1, "asked {asked} time(s) within its limit");
     }
 
     #[test]
