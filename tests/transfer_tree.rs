@@ -457,62 +457,242 @@ fn duplicate_source_names_are_refused_even_on_case_sensitive_destinations() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// The case oracle's own mounted image, and what removes it.
 #[cfg(target_os = "macos")]
-#[test]
-fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
+struct CaseVolume {
+    // Held for its drop: it detaches the node attach reported, on every exit.
+    _volume: image_detach::AttachedImage,
+    image: PathBuf,
+    mount: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+fn case_volume(filesystem: &str, root: PathBuf) -> CaseVolume {
     // The whole-disk node `hdiutil attach` reported for this image. Only that
     // node is detached, so no other attached image is touched. `AttachedImage`
     // detaches it on every exit, including an assertion failure below.
+    let mut volume =
+        image_detach::AttachedImage::new(std::ffi::OsStr::new("/usr/bin/hdiutil"), root.clone());
+    let image = root.join("oracle.sparseimage");
+    let mount = root.join("mount");
+    fs::create_dir(&mount).unwrap();
+    let out = Command::new("hdiutil")
+        .args([
+            "create",
+            "-size",
+            "32m",
+            "-type",
+            "SPARSE",
+            "-fs",
+            filesystem,
+            "-volname",
+            "core-case-oracle",
+        ])
+        .arg(&image)
+        .output()
+        .expect("hdiutil create is required for the case oracle");
+    assert!(out.status.success(), "create failed: {out:?}");
+    let out = Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-noautoopen", "-mountpoint"])
+        .arg(&mount)
+        .arg(&image)
+        .output()
+        .expect("hdiutil attach is required for the case oracle");
+    assert!(out.status.success(), "attach failed: {out:?}");
+    let device = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .find(|word| word.starts_with("/dev/disk"))
+        .map(str::to_owned);
+    volume.attached(mount.clone(), device.clone());
+    assert!(device.is_some(), "attach named no device: {out:?}");
+    CaseVolume {
+        _volume: volume,
+        image,
+        mount,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mounted_case_folding_and_sensitive_images_decide_collision_policy() {
     for (filesystem, folding) in [("HFS+", true), ("Case-sensitive HFS+", false)] {
         let (root, _, _) = scratch(if folding {
             "hfs-folding"
         } else {
             "hfs-sensitive"
         });
-        let mut volume = image_detach::AttachedImage::new(
-            std::ffi::OsStr::new("/usr/bin/hdiutil"),
-            root.clone(),
-        );
-        let image = root.join("oracle.sparseimage");
-        let mount = root.join("mount");
-        fs::create_dir(&mount).unwrap();
-        let out = Command::new("hdiutil")
-            .args([
-                "create",
-                "-size",
-                "32m",
-                "-type",
-                "SPARSE",
-                "-fs",
-                filesystem,
-                "-volname",
-                "core-case-oracle",
-            ])
-            .arg(&image)
-            .output()
-            .expect("hdiutil create is required for the case oracle");
-        assert!(out.status.success(), "create failed: {out:?}");
-        let out = Command::new("hdiutil")
-            .args(["attach", "-nobrowse", "-noautoopen", "-mountpoint"])
-            .arg(&mount)
-            .arg(&image)
-            .output()
-            .expect("hdiutil attach is required for the case oracle");
-        assert!(out.status.success(), "attach failed: {out:?}");
-        let device = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| line.split_whitespace().next())
-            .find(|word| word.starts_with("/dev/disk"))
-            .map(str::to_owned);
-        volume.attached(mount.clone(), device.clone());
-        assert!(device.is_some(), "attach named no device: {out:?}");
+        let volume = case_volume(filesystem, root);
+        let mount = &volume.mount;
         for replace in [false, true] {
             check_case_pair(&mount.join(format!("replace-{replace}")), folding, replace);
         }
         assert!(
-            times::check_precision(&mount, &mount.join("times")),
+            times::check_precision(mount, &mount.join("times")),
             "HFS+ must exercise timestamp precision loss"
         );
+    }
+}
+
+/// A run killed while its case image is attached runs no `Drop` (#483). The
+/// next run reclaims that image, and no other.
+#[cfg(target_os = "macos")]
+mod killed_case_oracle {
+    use super::*;
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+
+    const CHILD_TEST: &str = "killed_case_oracle::case_oracle_child";
+    const READY: &str = "FS_CORE_CASE_CHILD_READY";
+    const MODE: &str = "FS_CORE_CASE_CHILD_MODE";
+    const BOUND: Duration = Duration::from_secs(90);
+
+    /// The whole-disk node `hdiutil info` lists for exactly this image.
+    fn attached(image: &Path) -> Option<String> {
+        let output = Command::new("/usr/bin/hdiutil")
+            .arg("info")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "hdiutil info failed: {output:?}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split("================================================")
+            .find(|record| {
+                record.lines().any(|line| {
+                    line.strip_prefix("image-path")
+                        .and_then(|field| field.split_once(": "))
+                        .is_some_and(|(_, path)| Path::new(path.trim()) == image)
+                })
+            })?
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .find(|word| word.starts_with("/dev/disk"))
+            .map(str::to_owned)
+    }
+
+    /// One child run holding one case image. Dropping it ends the child and
+    /// detaches its image if it is still attached, whatever the test found.
+    struct Run {
+        child: Child,
+        image: PathBuf,
+    }
+
+    impl Run {
+        fn start(root: &Path, label: &str, mode: &str) -> Self {
+            let ready = root.join(format!("{label}.ready"));
+            let log = root.join(format!("{label}.log"));
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CHILD_TEST, "--nocapture"])
+                .env("TMPDIR", root)
+                .env(READY, &ready)
+                .env(MODE, mode)
+                .stdout(Stdio::from(fs::File::create(&log).unwrap()))
+                .stderr(Stdio::from(
+                    fs::File::options().append(true).open(&log).unwrap(),
+                ))
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + BOUND;
+            loop {
+                if let Ok(image) = fs::read_to_string(&ready) {
+                    return Self {
+                        child,
+                        image: PathBuf::from(image),
+                    };
+                }
+                let exited = child.try_wait().unwrap();
+                if exited.is_some() || Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "the {label} run attached no image ({exited:?}): {}",
+                        fs::read_to_string(&log).unwrap()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn succeeds(&mut self) {
+            let deadline = Instant::now() + BOUND;
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    assert!(status.success(), "the child run failed: {status}");
+                    return;
+                }
+                assert!(Instant::now() < deadline, "the child run did not exit");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    impl Drop for Run {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(device) = attached(&self.image) {
+                let output = Command::new("/usr/bin/hdiutil")
+                    .args(["detach", "-force", &device])
+                    .output()
+                    .unwrap();
+                if !output.status.success() {
+                    eprintln!("could not detach this test's own image {device}: {output:?}");
+                }
+            }
+        }
+    }
+
+    /// What the runs below execute. Without their environment there is no run
+    /// to be.
+    #[test]
+    fn case_oracle_child() {
+        let Some(ready) = std::env::var_os(READY) else {
+            return;
+        };
+        let mode = std::env::var(MODE).unwrap();
+        let (root, _, _) = scratch("killed-case");
+        let volume = case_volume("HFS+", root);
+        // Renamed into place, so the parent never reads half a path.
+        let partial = PathBuf::from(&ready).with_extension("partial");
+        fs::write(&partial, volume.image.to_str().unwrap()).unwrap();
+        fs::rename(partial, &ready).unwrap();
+        if mode == "wait" {
+            // Bounded, so a child nothing killed ends and detaches by itself.
+            std::thread::sleep(BOUND * 2);
+        }
+    }
+
+    #[test]
+    fn the_next_run_reclaims_a_killed_runs_case_image_and_no_other() {
+        let root = std::env::temp_dir().join(format!("core-case-kill-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let mut killed = Run::start(&root, "killed", "wait");
+        let live = Run::start(&root, "live", "wait");
+        killed.child.kill().expect("SIGKILL the run");
+        assert!(!killed.child.wait().unwrap().success());
+        assert!(
+            attached(&killed.image).is_some(),
+            "the killed run left nothing attached, so this proves nothing"
+        );
+        let mut next = Run::start(&root, "next", "drop");
+        next.succeeds();
+        assert_eq!(
+            attached(&killed.image),
+            None,
+            "the next run left the killed run's image attached"
+        );
+        assert!(
+            attached(&live.image).is_some(),
+            "the next run detached a live run's image"
+        );
+        assert_eq!(
+            attached(&next.image),
+            None,
+            "a finished run stayed attached"
+        );
+        drop((killed, live, next));
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
