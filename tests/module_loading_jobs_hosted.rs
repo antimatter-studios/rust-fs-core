@@ -13,9 +13,6 @@
 use saphyr::{LoadableYamlNode, Yaml};
 use std::path::{Path, PathBuf};
 
-/// The workflows that can run a job which loads kernel modules.
-const WORKFLOWS: &[&str] = &["ci.yml", "release.yml"];
-
 /// The runner a module-loading job may name itself.
 const HOSTED: &str = "ubuntu-24.04";
 
@@ -29,22 +26,36 @@ fn workflows_dir() -> PathBuf {
         .join("workflows")
 }
 
-/// The names of the workflow files in `dir` that the rule judges.
-fn workflow_files(_dir: &Path) -> Vec<String> {
-    WORKFLOWS.iter().map(|name| name.to_string()).collect()
+/// The names of the workflow files in `dir`, sorted: every `.yml` and `.yaml`,
+/// which is what GitHub reads, so a new workflow is judged without being named
+/// here (#500).
+fn workflow_files(dir: &Path) -> Vec<String> {
+    let cannot = |e| panic!("cannot read {}: {e}", dir.display());
+    let mut files: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(cannot)
+        .map(|entry| entry.unwrap_or_else(cannot).file_name())
+        .map(PathBuf::from)
+        .filter(|name| {
+            name.extension()
+                .is_some_and(|ext| ext == "yml" || ext == "yaml")
+        })
+        .map(|name| {
+            name.into_os_string()
+                .into_string()
+                .expect("a UTF-8 workflow file name")
+        })
+        .collect();
+    files.sort();
+    files
 }
 
-/// The module-loading Linux jobs of every judged workflow in `dir`: how many
+/// The module-loading Linux jobs of every workflow in `dir`: how many
 /// there are, and what to say about each one the rule refuses.
 fn judged_in(dir: &Path) -> (usize, Vec<String>) {
     let mut checked = 0;
     let mut offending = Vec::new();
     for file in workflow_files(dir) {
         let path = dir.join(&file);
-        // A listed workflow a directory does not hold has no job to judge.
-        if !path.exists() {
-            continue;
-        }
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         for (job, allowed, why) in judged(&text) {
