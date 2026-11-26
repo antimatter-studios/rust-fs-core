@@ -177,6 +177,7 @@ conformance::check_damaged(&damaged, &Limits::default()).assert_passed();
 | `check_files` | The whole tree walks within the limits; names are valid and unique, and agree with their bytes; metadata matches listings; every path resolves by its bytes, non-UTF-8 names included; every file copies exactly its size, reads exactly at 0 and the middle, and 0 at its end; refusals for absent paths, paths through files, listing a file and reading a directory; and the image holds the `Expected` files, directories and absences. |
 | `check_files_against_candidates` | Opt-in, for formats whose candidates carry names: every file has a live candidate, and where one candidate's complete walk claims the file's size, the bytes its plan rebuilds -- holes, uninitialized and encoded runs included -- equal the file's bytes. |
 | `salvage::run` | The deeper salvage set from rust-fs-exfat, over driver-built images with declared damage, unreadable sectors and strict-API rejection. |
+| `salvage::run_sources` | The same set over sources a driver opens, each damaged case usually a `salvage::Overlay` of its damage on the healthy source, so no image is held in memory. |
 
 The report fails when nothing ran, and a tree larger than the `Limits`
 fails rather than being checked in part: raise `max_nodes` and `max_walks`

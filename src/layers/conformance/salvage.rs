@@ -30,6 +30,14 @@
 //! by extent may fail only over unreadable bytes. Any other refusal is the
 //! salvage path rejecting damage.
 //!
+//! # Two ways to give the images
+//!
+//! [`Driver`] hands each image over as a `Vec<u8>`, and [`run`] checks it. For
+//! images too large to hold several of in memory, [`SourceDriver`] hands over
+//! sources to read instead, and [`run_sources`] checks the same rules: a damaged
+//! case is a source of its own, usually an [`Overlay`] of its damage on the
+//! healthy one, and the strict API is given an owned handle it can mount.
+//!
 //! A rule that ran no checks fails the report: a set that quietly declines to
 //! run reads exactly like one that passes. A driver runs it from a test:
 //!
@@ -56,6 +64,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
 /// Candidates per source whose stops, resumes and own-record scans are checked.
 const SAMPLE: usize = 32;
@@ -146,6 +155,192 @@ impl Damaged {
     pub fn unreadable(mut self, extent: Extent) -> Self {
         self.unreadable.push(extent);
         self
+    }
+}
+
+/// A [`Driver`] whose images are sources to read rather than bytes held in
+/// memory. [`run_sources`] checks it by the same rules as [`run`].
+pub trait SourceDriver {
+    /// As [`Driver::Adapter`].
+    type Adapter: SalvageAdapter<Detail: PartialEq>;
+    /// As [`Driver::StrictError`].
+    type StrictError: fmt::Debug;
+
+    /// As [`Driver::salvage`].
+    fn salvage(&self, source: &dyn BlockRead) -> Self::Adapter;
+
+    /// As [`Driver::strict`], with an owned handle, so that a strict API which
+    /// mounts a device it owns needs no copy of the image.
+    fn strict(&self, source: Arc<dyn BlockRead>) -> Result<(), Self::StrictError>;
+
+    /// As [`Driver::healthy`], as a source: an image file opened read-only, for
+    /// one.
+    fn healthy(&self) -> Arc<dyn BlockRead>;
+
+    /// As [`Driver::damaged`]. `healthy` is the source [`SourceDriver::healthy`]
+    /// returned, for the cases that damage it through an [`Overlay`].
+    fn damaged(&self, healthy: &Arc<dyn BlockRead>) -> Vec<DamagedSource>;
+}
+
+/// One damaged source and the evidence its damage must leave: [`Damaged`]
+/// without the image in memory.
+#[derive(Clone)]
+pub struct DamagedSource {
+    /// Names the case in violations.
+    pub name: String,
+    pub source: Arc<dyn BlockRead>,
+    /// Byte ranges whose reads fail, widened to whole sectors.
+    pub unreadable: Vec<Extent>,
+    pub evidence: Evidence,
+}
+
+impl DamagedSource {
+    pub fn new(name: impl Into<String>, source: Arc<dyn BlockRead>, evidence: Evidence) -> Self {
+        Self {
+            name: name.into(),
+            source,
+            unreadable: Vec::new(),
+            evidence,
+        }
+    }
+
+    /// Makes reads that touch `extent` fail, as on failing media.
+    #[must_use]
+    pub fn unreadable(mut self, extent: Extent) -> Self {
+        self.unreadable.push(extent);
+        self
+    }
+}
+
+impl fmt::Debug for DamagedSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DamagedSource")
+            .field("name", &self.name)
+            .field("size", &self.source.size_bytes())
+            .field("unreadable", &self.unreadable)
+            .field("evidence", &self.evidence)
+            .finish()
+    }
+}
+
+/// A source with some of another's bytes replaced. Only the replacements are
+/// held, so each damaged case over a large image costs the bytes it damages.
+pub struct Overlay {
+    base: Arc<dyn BlockRead>,
+    patches: Vec<(u64, Vec<u8>)>,
+}
+
+impl Overlay {
+    /// `base` with nothing replaced yet.
+    pub fn new(base: Arc<dyn BlockRead>) -> Self {
+        Self {
+            base,
+            patches: Vec::new(),
+        }
+    }
+
+    /// Replaces the bytes from `offset` with `bytes`. Where two patches
+    /// overlap, the later one wins.
+    ///
+    /// # Panics
+    ///
+    /// When the patch runs past the end of the base: a case that damages bytes
+    /// the image does not hold is a mistake in the test that builds it.
+    #[must_use]
+    pub fn patch(mut self, offset: u64, bytes: impl Into<Vec<u8>>) -> Self {
+        let bytes = bytes.into();
+        let size = self.base.size_bytes();
+        assert!(
+            offset
+                .checked_add(bytes.len() as u64)
+                .is_some_and(|end| end <= size),
+            "a patch of {} byte(s) at {offset} runs past the end of a {size}-byte source",
+            bytes.len()
+        );
+        self.patches.push((offset, bytes));
+        self
+    }
+}
+
+impl BlockRead for Overlay {
+    fn read_at(&self, offset: u64, output: &mut [u8]) -> crate::Result<()> {
+        self.base.read_at(offset, output)?;
+        // The base has answered, so the read ends inside it.
+        let end = offset + output.len() as u64;
+        for (at, bytes) in &self.patches {
+            let start = offset.max(*at);
+            let stop = end.min(*at + bytes.len() as u64);
+            if start < stop {
+                output[(start - offset) as usize..(stop - offset) as usize]
+                    .copy_from_slice(&bytes[(start - at) as usize..(stop - at) as usize]);
+            }
+        }
+        Ok(())
+    }
+
+    fn size_bytes(&self) -> u64 {
+        self.base.size_bytes()
+    }
+}
+
+/// A whole image in memory, as a source.
+struct Bytes(Vec<u8>);
+
+impl BlockRead for Bytes {
+    fn read_at(&self, offset: u64, output: &mut [u8]) -> crate::Result<()> {
+        let bytes = usize::try_from(offset)
+            .ok()
+            .and_then(|start| self.0.get(start..start.checked_add(output.len())?));
+        let Some(bytes) = bytes else {
+            return Err(crate::Error::OutOfBounds {
+                offset,
+                len: output.len() as u64,
+                size: self.size_bytes(),
+            });
+        };
+        output.copy_from_slice(bytes);
+        Ok(())
+    }
+
+    fn size_bytes(&self) -> u64 {
+        self.0.len() as u64
+    }
+}
+
+/// A [`Driver`], seen as a [`SourceDriver`].
+struct Whole<'a, D>(&'a D);
+
+impl<D: Driver> SourceDriver for Whole<'_, D> {
+    type Adapter = D::Adapter;
+    type StrictError = D::StrictError;
+
+    fn salvage(&self, source: &dyn BlockRead) -> D::Adapter {
+        self.0.salvage(source)
+    }
+
+    fn strict(&self, source: Arc<dyn BlockRead>) -> Result<(), D::StrictError> {
+        self.0.strict(source.as_ref())
+    }
+
+    fn healthy(&self) -> Arc<dyn BlockRead> {
+        Arc::new(Bytes(self.0.healthy()))
+    }
+
+    fn damaged(&self, _: &Arc<dyn BlockRead>) -> Vec<DamagedSource> {
+        self.0
+            .damaged()
+            .into_iter()
+            .map(|case| {
+                let source = Arc::new(Bytes(case.image));
+                DamagedSource {
+                    name: case.name,
+                    source,
+                    unreadable: case.unreadable,
+                    evidence: case.evidence,
+                }
+            })
+            .collect()
     }
 }
 
@@ -291,6 +486,12 @@ impl fmt::Display for Report {
 
 /// Runs the conformance set against a driver.
 pub fn run<D: Driver>(driver: &D) -> Report {
+    run_sources(&Whole(driver))
+}
+
+/// Runs the conformance set against a driver that gives its images as sources,
+/// holding no image in memory.
+pub fn run_sources<D: SourceDriver>(driver: &D) -> Report {
     let mut run = Run {
         driver,
         report: Report::default(),
@@ -298,15 +499,16 @@ pub fn run<D: Driver>(driver: &D) -> Report {
         probed: HashSet::new(),
     };
     run.types();
-    let healthy = Image::new(driver.healthy(), &[]);
+    let source = driver.healthy();
+    let healthy = Arc::new(Image::new(Arc::clone(&source), &[]));
     let observed = run.examine("healthy", Input::Healthy, &healthy);
     run.healthy(&healthy, &observed);
-    let cases = driver.damaged();
+    let cases = driver.damaged(&source);
     run.check(Rule::Reported, "damaged", !cases.is_empty(), || {
         "the driver supplies no damaged images".into()
     });
     for case in cases {
-        let image = Image::new(case.image, &case.unreadable);
+        let image = Arc::new(Image::new(case.source, &case.unreadable));
         let seen = run.examine(&case.name, Input::Damaged, &image);
         run.damaged(&case.name, &image, case.evidence, &seen);
     }
@@ -315,7 +517,7 @@ pub fn run<D: Driver>(driver: &D) -> Report {
     run.report
 }
 
-type Detail<D> = <<D as Driver>::Adapter as SalvageAdapter>::Detail;
+type Detail<D> = <<D as SourceDriver>::Adapter as SalvageAdapter>::Detail;
 
 /// Whether a source holds damage. Verbs may refuse only damaged input, and
 /// only for the reasons the trait documents.
@@ -363,7 +565,7 @@ struct Run<'d, D> {
     probed: HashSet<Feature>,
 }
 
-impl<D: Driver> Run<'_, D> {
+impl<D: SourceDriver> Run<'_, D> {
     fn check(&mut self, rule: Rule, case: &str, passed: bool, detail: impl FnOnce() -> String) {
         self.report.record(rule, case, passed, detail);
     }
@@ -374,7 +576,7 @@ impl<D: Driver> Run<'_, D> {
     /// deserialize without borrowing anything.
     #[allow(clippy::type_complexity)]
     fn types(&mut self) {
-        type Adapter<D> = <D as Driver>::Adapter;
+        type Adapter<D> = <D as SourceDriver>::Adapter;
         let _: fn(
             &Adapter<D>,
             &dyn BlockRead,
@@ -1108,7 +1310,8 @@ impl<D: Driver> Run<'_, D> {
         let span = Extent::new(extent.offset, length);
         match result {
             Ok(count) => {
-                let same = count == output.len() && subject.image.slice(span) == Some(&output[..]);
+                let same = count == output.len()
+                    && subject.image.slice(span).as_deref() == Some(&output[..]);
                 self.check(Rule::Consistency, case, same, || {
                     format!("reading {span:?} by extent returned {count} byte(s) other than the source holds")
                 });
@@ -1146,8 +1349,8 @@ impl<D: Driver> Run<'_, D> {
         let span = Extent::new(probe.offset + into, count);
         match result {
             Ok(read) => {
-                let same =
-                    read as u64 == count && image.slice(span) == Some(&output[..count as usize]);
+                let same = read as u64 == count
+                    && image.slice(span).as_deref() == Some(&output[..count as usize]);
                 self.check(Rule::Consistency, case, same, || {
                     format!("reading {probe:?} from {into} bytes in, into a short buffer, did not return {span:?}")
                 });
@@ -1481,7 +1684,7 @@ impl<D: Driver> Run<'_, D> {
                 PlanStep::Bytes(bytes) => expected.extend_from_slice(bytes),
                 PlanStep::Zeros(length) => expected.resize(expected.len() + *length as usize, 0),
                 PlanStep::Extent(extent) => {
-                    expected.extend_from_slice(image.slice(*extent).unwrap_or_default())
+                    expected.extend(image.slice(*extent).unwrap_or_default())
                 }
                 // The set's own plans hold no encoded steps; a driver's
                 // decoding is checked where its walks name encoded extents.
@@ -1544,9 +1747,9 @@ impl<D: Driver> Run<'_, D> {
         }
     }
 
-    fn healthy(&mut self, image: &Image, observed: &Observed<Detail<D>>) {
+    fn healthy(&mut self, image: &Arc<Image>, observed: &Observed<Detail<D>>) {
         let case = "healthy";
-        let strict = self.driver.strict(image);
+        let strict = self.driver.strict(image.clone());
         self.check(Rule::StrictRejects, case, strict.is_ok(), || {
             format!("the strict API rejects the healthy image: {strict:?}")
         });
@@ -1579,11 +1782,11 @@ impl<D: Driver> Run<'_, D> {
     fn damaged(
         &mut self,
         case: &str,
-        image: &Image,
+        image: &Arc<Image>,
         evidence: Evidence,
         observed: &Observed<Detail<D>>,
     ) {
-        let strict = self.driver.strict(image);
+        let strict = self.driver.strict(image.clone());
         self.check(Rule::StrictRejects, case, strict.is_err(), || {
             "the strict API accepts the damaged image".into()
         });
@@ -1607,19 +1810,19 @@ impl<D: Driver> Run<'_, D> {
 
     /// Runs the set on two sources derived from the healthy image: one whose
     /// every read fails, and one whose first candidate's record cannot be read.
-    fn unreadable(&mut self, healthy: &Image, observed: &Observed<Detail<D>>) {
+    fn unreadable(&mut self, healthy: &Arc<Image>, observed: &Observed<Detail<D>>) {
         let size = healthy.size();
         let whole = Extent::new(0, size);
-        let dead = Image::new(healthy.bytes.clone(), &[whole]);
+        let dead = Arc::new(Image::new(Arc::clone(&healthy.source), &[whole]));
         let case = "every read fails";
 
         // An adapter keeps format context only, so one built from the healthy
         // image must decode nothing from a source it cannot read.
-        let adapter = self.driver.salvage(healthy);
+        let adapter = self.driver.salvage(healthy.as_ref());
         let capabilities = adapter.capabilities();
         if capabilities.supports(Feature::FindCandidates) {
             let mut found = Vec::new();
-            let result = adapter.find_candidates(&dead, whole, &mut found);
+            let result = adapter.find_candidates(dead.as_ref(), whole, &mut found);
             let blind =
                 matches!(&result, Ok(report) if !report.unreadable.is_empty()) && found.is_empty();
             self.check(Rule::ReadOnly, case, blind, || {
@@ -1629,7 +1832,7 @@ impl<D: Driver> Run<'_, D> {
         if capabilities.supports(Feature::ReadExtent) && size > 0 {
             let mut output = vec![0; size.min(SECTOR) as usize];
             let span = Extent::new(0, output.len() as u64);
-            let result = adapter.read_extent(&dead, span, 0, &mut output);
+            let result = adapter.read_extent(dead.as_ref(), span, 0, &mut output);
             self.check(
                 Rule::ReadOnly,
                 case,
@@ -1639,7 +1842,7 @@ impl<D: Driver> Run<'_, D> {
         }
 
         let seen = self.examine(case, Input::Damaged, &dead);
-        let strict = self.driver.strict(&dead);
+        let strict = self.driver.strict(dead.clone());
         self.check(Rule::StrictRejects, case, strict.is_err(), || {
             "the strict API accepts a source it cannot read".into()
         });
@@ -1658,10 +1861,10 @@ impl<D: Driver> Run<'_, D> {
             return;
         };
         let case = "first record unreadable";
-        let image = Image::new(healthy.bytes.clone(), &[first.location]);
-        let adapter = self.driver.salvage(&image);
+        let image = Arc::new(Image::new(Arc::clone(&healthy.source), &[first.location]));
+        let adapter = self.driver.salvage(image.as_ref());
         let mut found = Vec::new();
-        if let Ok(report) = adapter.find_candidates(&image, whole, &mut found) {
+        if let Ok(report) = adapter.find_candidates(image.as_ref(), whole, &mut found) {
             self.check(
                 Rule::Reported,
                 case,
@@ -1750,16 +1953,16 @@ fn joined(extents: &[Extent]) -> Vec<Extent> {
     joined
 }
 
-/// The source every check reads: an in-memory image with no write path,
-/// whose reads fail wherever they touch an unreadable sector.
+/// The source every check reads: a driver's source behind a view with no write
+/// path, whose reads fail wherever they touch an unreadable sector.
 struct Image {
-    bytes: Vec<u8>,
+    source: Arc<dyn BlockRead>,
     unreadable: Vec<Extent>,
 }
 
 impl Image {
-    fn new(bytes: Vec<u8>, unreadable: &[Extent]) -> Self {
-        let size = bytes.len() as u64;
+    fn new(source: Arc<dyn BlockRead>, unreadable: &[Extent]) -> Self {
+        let size = source.size_bytes();
         let unreadable = unreadable
             .iter()
             .filter(|extent| extent.length > 0 && extent.offset < size)
@@ -1772,39 +1975,50 @@ impl Image {
                 Extent::new(start, end - start)
             })
             .collect();
-        Self { bytes, unreadable }
+        Self { source, unreadable }
     }
 
     fn size(&self) -> u64 {
-        self.bytes.len() as u64
+        self.source.size_bytes()
     }
 
     fn overlaps_unreadable(&self, extent: Extent) -> bool {
         self.unreadable.iter().any(|bad| overlaps(*bad, extent))
     }
 
-    fn slice(&self, extent: Extent) -> Option<&[u8]> {
-        let start = usize::try_from(extent.offset).ok()?;
-        let end = usize::try_from(extent.end()?).ok()?;
-        self.bytes.get(start..end)
+    fn holds(&self, extent: Extent) -> bool {
+        extent.end().is_some_and(|end| end <= self.size())
+    }
+
+    /// The source's own bytes at `extent`, marked unreadable or not. `None`
+    /// past the end, or where the source itself cannot give them. Every caller
+    /// asks for an extent bounded by the set's own read and plan limits.
+    fn slice(&self, extent: Extent) -> Option<Vec<u8>> {
+        if !self.holds(extent) {
+            return None;
+        }
+        let mut bytes = vec![0; usize::try_from(extent.length).ok()?];
+        if !bytes.is_empty() {
+            self.source.read_at(extent.offset, &mut bytes).ok()?;
+        }
+        Some(bytes)
     }
 }
 
 impl BlockRead for Image {
     fn read_at(&self, offset: u64, output: &mut [u8]) -> crate::Result<()> {
         let extent = Extent::new(offset, output.len() as u64);
-        let Some(bytes) = self.slice(extent) else {
+        if !self.holds(extent) {
             return Err(crate::Error::OutOfBounds {
                 offset,
                 len: extent.length,
                 size: self.size(),
             });
-        };
+        }
         if self.overlaps_unreadable(extent) {
             return Err(io::Error::other("unreadable sector").into());
         }
-        output.copy_from_slice(bytes);
-        Ok(())
+        self.source.read_at(offset, output)
     }
 
     fn size_bytes(&self) -> u64 {
@@ -1834,6 +2048,7 @@ mod tests {
     use super::*;
     use crate::layers::salvage::{CandidateKind, Encoding, ParentClaim, TreeNode, WalkExtent};
     use serde::Deserialize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const SLOT: u64 = 64;
     const SIZE: usize = 16 * 1024;
@@ -2309,6 +2524,136 @@ mod tests {
                 "{quirk:?}: {report}"
             );
         }
+    }
+
+    /// A toy driver that gives sources: the same images as [`Toy`], padded to
+    /// `size`, each damage an overlay on the healthy one.
+    struct Sources {
+        quirk: Quirk,
+        size: usize,
+    }
+
+    /// A source that remembers the longest read asked of it.
+    struct Measured {
+        bytes: Bytes,
+        longest: Arc<AtomicUsize>,
+    }
+
+    impl BlockRead for Measured {
+        fn read_at(&self, offset: u64, output: &mut [u8]) -> crate::Result<()> {
+            self.longest.fetch_max(output.len(), Ordering::Relaxed);
+            self.bytes.read_at(offset, output)
+        }
+
+        fn size_bytes(&self) -> u64 {
+            self.bytes.size_bytes()
+        }
+    }
+
+    impl Sources {
+        fn image(&self, longest: &Arc<AtomicUsize>) -> Arc<dyn BlockRead> {
+            let mut image = healthy(self.quirk);
+            image.resize(self.size, 0);
+            Arc::new(Measured {
+                bytes: Bytes(image),
+                longest: Arc::clone(longest),
+            })
+        }
+
+        fn cases(&self, base: &Arc<dyn BlockRead>) -> Vec<DamagedSource> {
+            let over = || Overlay::new(Arc::clone(base));
+            let flipped = |name: &str, evidence, at: u64| {
+                let mut byte = [0];
+                base.read_at(at, &mut byte).expect("inside the image");
+                let source = Arc::new(over().patch(at, [byte[0] ^ 1]));
+                DamagedSource::new(name, source, evidence)
+            };
+            let past = record(b'L', 2048, self.size as u64, "beta");
+            vec![
+                flipped("header checksum", Evidence::Damage(DamageKind::Checksum), 9),
+                flipped("record checksum", Evidence::FailedCandidate, 64 + 20),
+                DamagedSource::new(
+                    "data past the end",
+                    Arc::new(over().patch(2 * SLOT, past)),
+                    Evidence::BrokenWalk,
+                ),
+                DamagedSource::new(
+                    "unreadable header",
+                    Arc::clone(base),
+                    Evidence::Damage(DamageKind::Unreadable),
+                )
+                .unreadable(Extent::new(0, 12)),
+            ]
+        }
+    }
+
+    /// [`Sources`] with the counter its sources report to.
+    struct Counted(Sources, Arc<AtomicUsize>);
+
+    impl SourceDriver for Counted {
+        type Adapter = Adapter;
+        type StrictError = String;
+
+        fn salvage(&self, source: &dyn BlockRead) -> Adapter {
+            Driver::salvage(&Toy(self.0.quirk), source)
+        }
+
+        fn strict(&self, source: Arc<dyn BlockRead>) -> Result<(), String> {
+            Driver::strict(&Toy(self.0.quirk), source.as_ref())
+        }
+
+        fn healthy(&self) -> Arc<dyn BlockRead> {
+            self.0.image(&self.1)
+        }
+
+        fn damaged(&self, healthy: &Arc<dyn BlockRead>) -> Vec<DamagedSource> {
+            self.0.cases(healthy)
+        }
+    }
+
+    fn counted(quirk: Quirk, size: usize) -> Counted {
+        Counted(Sources { quirk, size }, Arc::default())
+    }
+
+    /// Sources and overlays give the verdicts whole images give, the broken
+    /// rules included (rust-fs-core#493).
+    #[test]
+    fn sources_report_as_whole_images_do() {
+        for quirk in [
+            Quirk::None,
+            Quirk::ReadOnlyFormat,
+            Quirk::MiscountedScan,
+            Quirk::KeepsSource,
+            Quirk::LaxStrict,
+        ] {
+            let whole = run(&Toy(quirk));
+            let sources = run_sources(&counted(quirk, SIZE));
+            assert_eq!(sources.violations(), whole.violations(), "{quirk:?}");
+            for rule in Rule::ALL {
+                assert_eq!(sources.checks(rule), whole.checks(rule), "{quirk:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_large_source_is_never_read_whole() {
+        let driver = counted(Quirk::None, 2 << 20);
+        let report = run_sources(&driver);
+        assert!(report.conforms(), "{report}");
+        let longest = driver.1.load(Ordering::Relaxed);
+        assert!(longest <= 1 << 20, "one read asked for {longest} bytes");
+    }
+
+    #[test]
+    fn an_overlay_replaces_only_its_patches() {
+        let base: Arc<dyn BlockRead> = Arc::new(Bytes((0..16).collect()));
+        let overlay = Overlay::new(base).patch(4, [40u8, 50, 60]).patch(5, [99u8]);
+        let mut read = [0; 6];
+        overlay.read_at(3, &mut read).expect("inside");
+        assert_eq!(read, [3, 40, 99, 60, 7, 8]);
+        overlay.read_at(5, &mut read[..1]).expect("inside a patch");
+        assert_eq!(read[0], 99);
+        assert!(overlay.read_at(12, &mut read).is_err(), "past the end");
     }
 
     #[test]
