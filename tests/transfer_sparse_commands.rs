@@ -228,7 +228,8 @@ fn sparse_tree_refusals_name_every_file_and_the_format_before_staging() {
         _ => panic!("{text}"),
     };
     for name in ["a", "b"] {
-        let destination = Path::new("/dest").join(name).to_string_lossy().into_owned();
+        // A path inside the image, joined with `/` on every host (#489).
+        let destination = format!("/dest/{name}");
         assert!(
             items.iter().any(|item| matches!(
                 item.get("destination"),
