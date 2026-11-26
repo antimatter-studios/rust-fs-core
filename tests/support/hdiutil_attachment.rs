@@ -48,6 +48,12 @@ fn registry() -> MutexGuard<'static, Vec<Record>> {
                                 unlisted = Some(info);
                                 "not listed by hdiutil info, no detach run".to_owned()
                             }
+                            Ok(Teardown::Released(info)) => {
+                                unlisted = Some(info);
+                                "refused as busy, then not listed by hdiutil info, \
+                                 no further detach run"
+                                    .to_owned()
+                            }
                             Err(error) => format!("failed: {error}"),
                         };
                         eprintln!(
@@ -167,6 +173,10 @@ fn listed_in(info: &str, image: &Path, device: &str) -> io::Result<bool> {
 /// Detaches `device` when `info` lists `image` on it, retrying while `detach`
 /// is refused as busy. `info` gives the current `hdiutil info` text, and
 /// `detach` runs one detach of `device`, forced when its argument is true.
+///
+/// `info` is read again before every retry. The node may have been released and
+/// given to another image since the last read, so a retry runs only while the
+/// new text still lists `image` on `device`.
 pub fn detach_while_owned(
     image: &Path,
     device: &str,
@@ -190,6 +200,10 @@ pub fn detach_while_owned(
             return Err(invalid(format!("owned hdiutil detach failed: {output:?}")));
         }
         std::thread::sleep(Duration::from_millis(200 * (attempt + 1)));
+        let listing = info()?;
+        if !listed_in(&listing, image, device)? {
+            return Ok(Teardown::Released(listing));
+        }
     }
     if listed_in(&info()?, image, device)? {
         return Err(invalid(
@@ -203,6 +217,9 @@ pub enum Teardown {
     Detached,
     /// No detach ran, because this `hdiutil info` text did not list the image.
     NotListed(String),
+    /// A detach was refused as busy, and no other ran, because this later
+    /// `hdiutil info` text did not list the image.
+    Released(String),
 }
 
 #[derive(Clone)]
