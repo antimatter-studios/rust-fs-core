@@ -16,6 +16,11 @@ use std::process::Command;
 #[path = "support/image_detach.rs"]
 mod image_detach;
 
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "support/hdiutil_attachment.rs"]
+mod hdiutil_attachment;
+
 struct Host {
     root: PathBuf,
     malicious: bool,
@@ -460,20 +465,26 @@ fn duplicate_source_names_are_refused_even_on_case_sensitive_destinations() {
 /// The case oracle's own mounted image, and what removes it.
 #[cfg(target_os = "macos")]
 struct CaseVolume {
-    // Held for its drop: it detaches the node attach reported, on every exit.
+    // Held for their drops, in this order. The first detaches the node attach
+    // reported, on every exit. The second owns the image file and the record
+    // from which a later run reclaims it when this one is killed (#483).
     _volume: image_detach::AttachedImage,
+    _owned: hdiutil_attachment::OwnedImage,
     image: PathBuf,
     mount: PathBuf,
 }
 
 #[cfg(target_os = "macos")]
 fn case_volume(filesystem: &str, root: PathBuf) -> CaseVolume {
+    // Creating the owner first reclaims what a dead run left attached. It is
+    // declared before the volume, so it drops after it.
+    let mut owned = hdiutil_attachment::OwnedImage::new("mounted", "oracle.sparseimage");
     // The whole-disk node `hdiutil attach` reported for this image. Only that
     // node is detached, so no other attached image is touched. `AttachedImage`
     // detaches it on every exit, including an assertion failure below.
     let mut volume =
         image_detach::AttachedImage::new(std::ffi::OsStr::new("/usr/bin/hdiutil"), root.clone());
-    let image = root.join("oracle.sparseimage");
+    let image = owned.path.clone();
     let mount = root.join("mount");
     fs::create_dir(&mount).unwrap();
     let out = Command::new("hdiutil")
@@ -492,12 +503,12 @@ fn case_volume(filesystem: &str, root: PathBuf) -> CaseVolume {
         .output()
         .expect("hdiutil create is required for the case oracle");
     assert!(out.status.success(), "create failed: {out:?}");
-    let out = Command::new("hdiutil")
-        .args(["attach", "-nobrowse", "-noautoopen", "-mountpoint"])
-        .arg(&mount)
-        .arg(&image)
-        .output()
-        .expect("hdiutil attach is required for the case oracle");
+    let out = owned.attach(
+        Command::new("hdiutil")
+            .args(["attach", "-nobrowse", "-noautoopen", "-mountpoint"])
+            .arg(&mount)
+            .arg(&image),
+    );
     assert!(out.status.success(), "attach failed: {out:?}");
     let device = String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -508,6 +519,7 @@ fn case_volume(filesystem: &str, root: PathBuf) -> CaseVolume {
     assert!(device.is_some(), "attach named no device: {out:?}");
     CaseVolume {
         _volume: volume,
+        _owned: owned,
         image,
         mount,
     }

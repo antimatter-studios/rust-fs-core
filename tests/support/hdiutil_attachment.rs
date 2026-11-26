@@ -153,7 +153,7 @@ impl Record {
             || fields[0] != MAGIC
             || fields[1].parse::<u32>().ok() != Some(uid())
             || fields[2].parse::<u32>().ok() != Some(pid)
-            || !matches!(fields[3], "raw.img" | "volume.dmg")
+            || !matches!(fields[3], "raw.img" | "volume.dmg" | "oracle.sparseimage")
         {
             return Ok(None);
         }
@@ -306,7 +306,10 @@ pub struct OwnedImage {
 impl OwnedImage {
     pub fn new(scope: &str, filename: &str) -> Self {
         assert!(matches!(scope, "device-node" | "mounted"));
-        assert!(matches!(filename, "raw.img" | "volume.dmg"));
+        assert!(matches!(
+            filename,
+            "raw.img" | "volume.dmg" | "oracle.sparseimage"
+        ));
         let root = std::env::temp_dir().join(format!("fs_core_attach_{scope}_v1"));
         match DirBuilder::new().mode(0o700).create(&root) {
             Ok(()) => {}
