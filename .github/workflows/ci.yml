@@ -107,7 +107,12 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     # This job loads kernel modules, so its gate asks for a KVM runner.
     runs-on: ${{ needs.test-linux-gate.outputs.runner }}
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/scripts/max-rss.sh
+      MAX_RSS_LOG: ${{ github.workspace }}/tmp/max-rss.log
     steps:
+      - name: GNU time for the peak memory figures
+        run: command -v /usr/bin/time || { sudo apt-get update && sudo apt-get install -y time; }
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
         if: runner.os == 'Linux' && runner.environment == 'self-hosted'
@@ -183,6 +188,9 @@ jobs:
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
           EXPECT_OVERFLOW_CHECKS: "1"
+      - name: Peak memory of the test programs
+        if: always()
+        run: sort -rn "$MAX_RSS_LOG" | head -n 30
       - name: keep the full test transcript
         if: always()
         uses: actions/upload-artifact@v4
