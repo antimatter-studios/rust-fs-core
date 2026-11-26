@@ -819,24 +819,35 @@ mod tests {
         std::fs::write(&path, &bytes).expect("write the image");
 
         let dev = std::sync::Arc::new(FileDevice::open(&path).expect("open"));
-        let mut handles = Vec::new();
-        for page in 0..64u8 {
-            let dev = dev.clone();
-            handles.push(std::thread::spawn(move || {
-                // Several times each, so a thread that raced would have
-                // many chances to read somebody else's page.
-                for _ in 0..50 {
-                    let mut buf = [0u8; 256];
-                    dev.read_at(u64::from(page) * 256, &mut buf).expect("read");
-                    assert!(
-                        buf.iter().all(|b| *b == page),
-                        "page {page} came back holding another page's bytes"
-                    );
-                }
-            }));
-        }
-        for h in handles {
-            h.join().expect("a reader panicked");
+        // IN BATCHES, NOT ALL AT ONCE (#475). The harness's test-thread
+        // limit does not reach the threads a test starts itself, so 64
+        // readers here ran beside every other test. Each batch leaves a
+        // barrier together, so its readers still race one another.
+        const BATCH: u8 = 8;
+        for first in (0..64u8).step_by(usize::from(BATCH)) {
+            let start = std::sync::Arc::new(std::sync::Barrier::new(usize::from(BATCH)));
+            let handles: Vec<_> = (first..first + BATCH)
+                .map(|page| {
+                    let dev = dev.clone();
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        // Several times each, so a thread that raced would
+                        // have many chances to read somebody else's page.
+                        for _ in 0..50 {
+                            let mut buf = [0u8; 256];
+                            dev.read_at(u64::from(page) * 256, &mut buf).expect("read");
+                            assert!(
+                                buf.iter().all(|b| *b == page),
+                                "page {page} came back holding another page's bytes"
+                            );
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().expect("a reader panicked");
+            }
         }
     }
 
