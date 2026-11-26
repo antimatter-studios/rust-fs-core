@@ -364,6 +364,7 @@ jobs:
           tar czf tmp/coverage-443.tgz -C tmp coverage-443
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
+          RUSTFLAGS: "-C link-dead-code"
       - name: keep the coverage mismatch diagnostic (temporary, #443)
         if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
@@ -596,6 +597,11 @@ jobs:
       # tests/device_node_size.rs fails here while `test` passes, which
       # is what happened. `tests/ci_acknowledges_the_privilege_gap.rs`
       # now fails if a job runs the suite without saying this.
+      #
+      # `-C link-dead-code` keeps every function in the library and in every
+      # test binary. Without it llvm-cov warns of mismatched data and leaves
+      # those functions out of the report (#443);
+      # tests/ci_coverage_links_dead_code.rs says why and holds it here.
       - name: coverage (quiet, budgeted, fail under 90%)
         shell: bash
         run: |
@@ -605,6 +611,7 @@ jobs:
           bash scripts/core.sh test-floor --targets .github/transfer-linux-test-floors.txt coverage
         env:
           AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP: "1"
+          RUSTFLAGS: "-C link-dead-code"
       - name: keep the coverage transcript and report
         if: always()
         uses: actions/upload-artifact@v4
