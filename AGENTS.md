@@ -547,6 +547,14 @@ exercising nothing this crate ships, and as a `cargo test` it **counted towards
 the executed-test floor the gate itself enforces**, so the suite could satisfy
 its own floor partly by checking its own CI config.
 
+**A job that loads kernel modules never runs on a self-hosted VPS runner.**
+Those runners have no `modprobe`, and a container runner cannot load a module on
+its host (#471). Its runner gate asks for the `linux-x64-kvm` class, which
+answers only a KVM runner or GitHub's `ubuntu-24.04`, never the `linux-x64`
+pool; or the job names `ubuntu-24.04` itself. The same holds for anything that
+needs KVM or nested virtualisation. `tests/module_loading_jobs_hosted.rs` checks
+`ci.yml` and `release.yml`.
+
 `release.yml` triggers on a `v*.*.*` tag and `fuzz.yml` is dispatch plus a
 nightly cron, so neither ever reports on a pull request and neither may gate.
 

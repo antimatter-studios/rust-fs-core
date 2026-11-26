@@ -90,6 +90,11 @@ jobs:
 
   # The test suite runs once per platform, as three jobs rather than a matrix,
   # so each platform has its own gate and picks its own runner.
+  # KERNEL MODULES (#471): a job that loads one (modprobe, insmod, ZFS), or that
+  # needs KVM, has its gate ask for linux-x64-kvm, never linux-x64. The VPS
+  # runners cannot load modules, and the KVM class never answers one of them:
+  # only a KVM runner, or GitHub's ubuntu-24.04.
+  # tests/module_loading_jobs_hosted.rs holds this.
   test-linux-gate:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
@@ -477,6 +482,11 @@ jobs:
         # executed-test floor.
         shell: bash
         run: for t in tests/scripts/*.sh; do bash "$t" || exit 1; done
+  # KERNEL MODULES (#471): a job that loads one (modprobe, insmod, ZFS), or that
+  # needs KVM, has its gate ask for linux-x64-kvm, never linux-x64. The VPS
+  # runners cannot load modules, and the KVM class never answers one of them:
+  # only a KVM runner, or GitHub's ubuntu-24.04.
+  # tests/module_loading_jobs_hosted.rs holds this.
   coverage-gate:
     needs: changes
     if: needs.changes.outputs.code == 'true'
