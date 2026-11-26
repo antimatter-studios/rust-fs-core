@@ -313,6 +313,31 @@ fn distinct_source_spellings_share_the_sinks_case_key() {
     assert_eq!(sink.files[Path::new("/dest/Name")], b"first");
 }
 
+/// A path inside the image is joined with `/` on every host (#489). The strings
+/// are compared, because two `Path`s that differ only in separator are equal on
+/// Windows.
+#[test]
+fn nested_image_paths_reach_the_sink_and_the_report_with_forward_slashes() {
+    let local = Local::new("image-separators");
+    fs::create_dir_all(local.0.join("d").join("e")).unwrap();
+    fs::write(local.0.join("d").join("e").join("f"), b"abc").unwrap();
+    let mut sink = Sink::default();
+    let out = local.run(&mut sink, 64);
+    let report = out.report.unwrap().to_compact();
+    assert_eq!(out.code, 0, "{report}");
+    let named: Vec<&str> = sink
+        .dirs
+        .iter()
+        .chain(sink.files.keys())
+        .map(|path| path.to_str().unwrap())
+        .collect();
+    assert_eq!(named, ["/dest", "/dest/d", "/dest/d/e", "/dest/d/e/f"]);
+    assert!(
+        report.contains(r#""destination": "/dest/d/e/f""#),
+        "{report}"
+    );
+}
+
 #[test]
 fn exact_existing_directories_merge_without_changing_unrelated_files() {
     let local = Local::new("merge");

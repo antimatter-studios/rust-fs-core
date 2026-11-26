@@ -503,7 +503,7 @@ fn totals(
                 for child in &children {
                     if safe_name(&child.name) {
                         pending.push((
-                            path.join(&child.name),
+                            image_join(&path, &child.name),
                             child.metadata.clone(),
                             depth.saturating_add(1),
                         ));
@@ -826,7 +826,7 @@ pub(super) fn export_tree_recorded(
                             ]));
                         } else {
                             queued.push((
-                                path.join(&child.name),
+                                image_join(&path, &child.name),
                                 local.join(&child.name),
                                 child.metadata,
                                 depth.saturating_add(1),

@@ -327,7 +327,7 @@ pub(super) fn import_tree_recorded(
                     });
                     children.push((
                         entry.path(),
-                        dest.join(name),
+                        image_join(&dest, &name),
                         depth.saturating_add(1),
                         checked,
                     ));
