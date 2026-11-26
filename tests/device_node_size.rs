@@ -203,8 +203,13 @@ mod macos {
         let mut actual = [0u8; 4096];
         device.read_at(0, &mut actual).expect("read the raw device");
         assert_eq!(actual, expected);
-        let backing = std::fs::read(attached.dir.join("raw.img")).expect("read the backing image");
-        assert_eq!(&backing[..expected.len()], &expected);
+        let mut written = [0u8; 4096];
+        std::io::Read::read_exact(
+            &mut std::fs::File::open(attached.dir.join("raw.img")).expect("open the backing image"),
+            &mut written,
+        )
+        .expect("read the backing image");
+        assert_eq!(written, expected);
     }
 
     /// The block size is READ from the device, not assumed to be 512.
@@ -240,17 +245,24 @@ mod macos {
         let a = attach();
         let dev = FileDevice::open(&a.dev).expect("open the block device node");
         let mut streamer = fs_core::BlockReadStreamer::new(dev);
-        let mut got = Vec::new();
-        streamer.read_to_end(&mut got).expect("stream the device");
+        // One chunk at a time, so the test's memory does not grow with the
+        // device (#450).
+        let mut chunk = vec![0u8; 64 << 10];
+        let mut got = 0u64;
+        loop {
+            let n = streamer.read(&mut chunk).expect("stream the device");
+            if n == 0 {
+                break;
+            }
+            assert!(
+                chunk[..n].iter().all(|b| *b == 0xAB),
+                "the bytes streamed off the device are not the bytes written to it"
+            );
+            got += n as u64;
+        }
         assert_eq!(
-            got.len() as u64,
-            IMAGE_BYTES,
-            "read_to_end over a raw device returned {} bytes",
-            got.len()
-        );
-        assert!(
-            got.iter().all(|b| *b == 0xAB),
-            "the bytes streamed off the device are not the bytes written to it"
+            got, IMAGE_BYTES,
+            "streaming a raw device returned {got} bytes"
         );
     }
 }

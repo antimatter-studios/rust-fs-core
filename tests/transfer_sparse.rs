@@ -1,5 +1,8 @@
 //! Host allocation and host SHA-256 independently grade sparse transfers.
 #![cfg(feature = "cli")]
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use fs_core::cli::clap::Command;
 use fs_core::cli::transfer::{
     self, Destination, ExportOptions, FileSink, FileSource, SparseOptions, CHUNK,
@@ -170,7 +173,7 @@ fn sparse_import_skips_zero_chunks_and_finishes_the_trailing_hole() {
     assert_eq!(sink.written, (2 * CHUNK) as u64);
     assert_eq!(sink.length, Some(copied.bytes));
     assert!(sink.published && !sink.aborted);
-    assert_eq!(fs::read(p).unwrap(), data());
+    crate::bounded::assert_holds(p, &data());
 }
 #[test]
 fn dense_import_writes_every_byte_without_sparse_capability() {
@@ -227,7 +230,7 @@ fn empty_and_all_zero_sparse_files_keep_their_logical_length() {
         let imported = import(&mut sink, vec![0; len], sparse());
         assert_eq!(exported.sha256, imported.sha256);
         assert_eq!(fs::metadata(p).unwrap().len(), len as u64);
-        assert_eq!(fs::read(imported_path).unwrap(), vec![0; len]);
+        crate::bounded::assert_holds(imported_path, &vec![0; len]);
         assert_eq!(sink.written, 0);
     }
 }
@@ -300,7 +303,7 @@ fn sparse_export_uses_fewer_host_blocks_with_the_same_host_digest() {
     // chooses to allocate its unwritten gaps.
     let small = dir.0.join("small");
     let copied = export(&small, data(), sparse());
-    assert_eq!(fs::read(&small).unwrap(), data());
+    crate::bounded::assert_holds(&small, &data());
     assert_eq!(copied.sha256_hex(), digest(&small));
     let native = dir.0.join("native");
     let expected = native_sparse(&native);

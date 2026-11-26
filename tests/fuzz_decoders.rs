@@ -48,6 +48,9 @@
 //! chosen so that bytes a power of two apart differ, which a
 //! shift-based bug would otherwise line up.
 
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,7 +122,7 @@ fn seeds(corpus: &str) -> Vec<(String, Vec<u8>)> {
         .unwrap_or_else(|e| panic!("reading the corpus directory {}: {e}", dir.display()))
         .map(|entry| {
             let path = entry.expect("corpus directory entry").path();
-            let bytes = std::fs::read(&path)
+            let bytes = crate::bounded::small_file(&path)
                 .unwrap_or_else(|e| panic!("reading the seed {}: {e}", path.display()));
             let name = path
                 .file_name()

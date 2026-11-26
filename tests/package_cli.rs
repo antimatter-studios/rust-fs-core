@@ -22,6 +22,9 @@
 
 #![cfg(unix)]
 
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -421,10 +424,10 @@ fn a_good_build_is_exactly_the_install_prefix() {
             .is_symlink(),
         "bin/{REPO} is the real file"
     );
-    assert_eq!(
-        fs::read(&binary).unwrap(),
-        fs::read(built.join(REPO)).unwrap(),
-        "bin/{REPO} is the built binary"
+    crate::bounded::assert_same_files(
+        &binary,
+        built.join(REPO),
+        &format!("bin/{REPO} is the built binary"),
     );
     for name in ["mkfs.example", "fs.example"] {
         assert_eq!(
@@ -443,12 +446,12 @@ fn a_good_build_is_exactly_the_install_prefix() {
         );
     }
     assert_eq!(
-        fs::read(u.join("share").join(REPO).join("CAVEATS")).unwrap(),
-        fs::read(caller.root.join("packaging/CAVEATS")).unwrap()
+        crate::bounded::small_file(u.join("share").join(REPO).join("CAVEATS")).unwrap(),
+        crate::bounded::small_file(caller.root.join("packaging/CAVEATS")).unwrap()
     );
     assert_eq!(
-        fs::read(u.join("LICENSE")).unwrap(),
-        fs::read(caller.root.join("LICENSE")).unwrap()
+        crate::bounded::small_file(u.join("LICENSE")).unwrap(),
+        crate::bounded::small_file(caller.root.join("LICENSE")).unwrap()
     );
 }
 
@@ -503,13 +506,12 @@ fn a_windows_build_is_a_zip_of_copies_not_symlinks() {
             "{label}"
         );
         let u = unzip(&caller, &zip);
-        let binary = fs::read(built.join(&exe)).unwrap();
         for name in [REPO, "mkfs.example", "fs.example"] {
             let path = u.join("bin").join(format!("{name}.exe"));
-            assert_eq!(
-                fs::read(&path).unwrap(),
-                binary,
-                "{label}: bin/{name}.exe is a copy of the built {exe}"
+            crate::bounded::assert_same_files(
+                &path,
+                built.join(&exe),
+                &format!("{label}: bin/{name}.exe is a copy of the built {exe}"),
             );
             let answer = Command::new(&path).arg("--version").output().unwrap();
             assert_eq!(
@@ -533,9 +535,12 @@ fn a_windows_binary_that_needs_the_visual_cpp_runtime_is_refused() {
     let built = caller
         .build("target/release", &exe, &Stub::default())
         .join(&exe);
-    let mut bytes = std::fs::read(&built).unwrap();
-    bytes.extend_from_slice(b"\n# VCRUNTIME140.dll\n");
-    std::fs::write(&built, bytes).unwrap();
+    let mut binary = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&built)
+        .unwrap();
+    std::io::Write::write_all(&mut binary, b"\n# VCRUNTIME140.dll\n").unwrap();
+    drop(binary);
     let run = caller.package(&["9.9.9", "windows-arm64"], "", &[]);
     run.refused("a binary importing VCRUNTIME140.dll", "VCRUNTIME140.dll")
         .unwrap();
@@ -684,7 +689,7 @@ fn what_ships_is_read_from_the_callers_manifest() {
     );
     let u = unpack(&caller, &tarball);
     assert_eq!(
-        fs::read(u.join("share/rust-img-other/CAVEATS")).unwrap(),
+        crate::bounded::small_file(u.join("share/rust-img-other/CAVEATS")).unwrap(),
         b"one line\n"
     );
 }

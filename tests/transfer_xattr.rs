@@ -1,5 +1,8 @@
 //! Extended-attribute exports checked with independent host attribute tools.
 #![cfg(feature = "cli")]
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use fs_core::cli::clap::Command;
 use fs_core::cli::transfer::{
     self, ExportRequest, ExtendedAttribute, ImportRequest, ImportTreeOptions, Input, LinkOptions,
@@ -108,7 +111,7 @@ fn older_argument_sets_default_to_no_xattrs() {
 fn disabled_preservation_does_not_query_the_optional_source() {
     let (dest, result) = run("disabled", &mut Source { attributes: None }, false);
     assert_eq!(count(&result, "completed"), 1);
-    assert_eq!(std::fs::read(&dest).unwrap(), b"data");
+    assert_eq!(crate::bounded::small_file(&dest).unwrap(), b"data");
     std::fs::remove_file(dest).unwrap();
 }
 #[test]
@@ -221,7 +224,10 @@ fn a_directory_refusal_keeps_children_running_without_side_files() {
     .unwrap();
     assert_eq!(count(&result, "refused"), 1);
     assert_eq!(count(&result, "completed"), 1);
-    assert_eq!(std::fs::read(dest.join("child")).unwrap(), b"data");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("child")).unwrap(),
+        b"data"
+    );
     assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 1);
     std::fs::remove_dir_all(dest).unwrap();
 }
@@ -435,7 +441,7 @@ fn host_export_names_the_refused_stream_without_creating_side_files() {
         report.contains("secret") && report.contains("named stream"),
         "{report}"
     );
-    assert_eq!(std::fs::read(&dest).unwrap(), b"data");
+    assert_eq!(crate::bounded::small_file(&dest).unwrap(), b"data");
     let names: Vec<_> = std::fs::read_dir(&root)
         .unwrap()
         .map(|e| e.unwrap().file_name())
@@ -978,7 +984,10 @@ impl transfer::NamedStreamSink for StreamImportSink {
 #[cfg(target_os = "macos")]
 fn set_host_resource_fork(path: &Path, value: &[u8]) {
     set_host_attribute(path, "com.apple.ResourceFork", value);
-    assert_eq!(std::fs::read(path.join("..namedfork/rsrc")).unwrap(), value);
+    assert_eq!(
+        crate::bounded::small_file(path.join("..namedfork/rsrc")).unwrap(),
+        value
+    );
 }
 #[cfg(target_os = "macos")]
 #[test]

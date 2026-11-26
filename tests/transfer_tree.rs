@@ -1,5 +1,8 @@
 //! Tree transfers checked against real host files and the platform SHA-256 tool.
 #![cfg(feature = "cli")]
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use fs_core::cli::clap::Command as Cmd;
 use fs_core::cli::transfer::{
     self, ExportRequest, Output, TreeEntry, TreeKind, TreeMetadata, TreeOptions, TreeSource,
@@ -197,7 +200,10 @@ fn unsafe_names_and_failed_files_leave_completed_siblings_and_a_nonzero_report()
     ] {
         assert!(text.contains(reason), "{text}");
     }
-    assert_eq!(fs::read(dest.join("good")).unwrap(), b"good");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("good")).unwrap(),
+        b"good"
+    );
     assert_eq!(fs::read_dir(&dest).unwrap().count(), 1);
     assert!(!root.join("good").exists());
     fs::remove_dir_all(root).unwrap();
@@ -214,13 +220,22 @@ fn existing_directories_merge_but_files_require_replace() {
     let refused = run(&src, &dest, false);
     assert_eq!(refused.code, 5);
     assert_eq!(count(refused.report.as_ref().unwrap(), "refused"), 1);
-    assert_eq!(fs::read(dest.join("sub/file")).unwrap(), b"old");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("sub/file")).unwrap(),
+        b"old"
+    );
     let replaced = run(&src, &dest, true);
     assert_eq!(replaced.code, 0);
     let report = replaced.report.unwrap();
     assert_eq!(count(&report, "merged_directories"), 2);
-    assert_eq!(fs::read(dest.join("sub/file")).unwrap(), b"new");
-    assert_eq!(fs::read(dest.join("keep")).unwrap(), b"keep");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("sub/file")).unwrap(),
+        b"new"
+    );
+    assert_eq!(
+        crate::bounded::small_file(dest.join("keep")).unwrap(),
+        b"keep"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -356,7 +371,10 @@ fn folds_case(dest: &Path) -> bool {
     fs::write(&name, b"oracle").unwrap();
     let folds = dest.join("cASEoRACLE").try_exists().unwrap();
     if folds {
-        assert_eq!(fs::read(dest.join("cASEoRACLE")).unwrap(), b"oracle");
+        assert_eq!(
+            crate::bounded::small_file(dest.join("cASEoRACLE")).unwrap(),
+            b"oracle"
+        );
     }
     fs::remove_file(name).unwrap();
     folds
@@ -374,7 +392,10 @@ fn check_case_pair(dest: &Path, folding: bool, replace: bool) {
     );
     assert_eq!(count(&report, "refused"), u64::from(folding));
     assert_eq!(count(&report, "failed"), 0);
-    assert_eq!(fs::read(dest.join("README")).unwrap(), b"README");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("README")).unwrap(),
+        b"README"
+    );
     assert_eq!(
         fs::read_dir(dest).unwrap().count(),
         if folding { 1 } else { 2 }
@@ -383,7 +404,10 @@ fn check_case_pair(dest: &Path, folding: bool, replace: bool) {
         assert!(report.to_compact().contains("collides with README"));
         assert_eq!(tree.reads, [PathBuf::from("README")]);
     } else {
-        assert_eq!(fs::read(dest.join("readme")).unwrap(), b"readme");
+        assert_eq!(
+            crate::bounded::small_file(dest.join("readme")).unwrap(),
+            b"readme"
+        );
     }
 }
 #[test]
@@ -408,8 +432,14 @@ fn every_later_collision_names_the_first_source_entry() {
     let out = tree.export(&dest, true);
     let report = out.report.unwrap();
     assert_eq!(count(&report, "refused"), if folding { 2 } else { 0 });
-    assert_eq!(fs::read(dest.join("README")).unwrap(), b"README");
-    assert_eq!(fs::read(dest.join("sibling")).unwrap(), b"sibling");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("README")).unwrap(),
+        b"README"
+    );
+    assert_eq!(
+        crate::bounded::small_file(dest.join("sibling")).unwrap(),
+        b"sibling"
+    );
     if folding {
         assert_eq!(
             report.to_compact().matches("collides with README").count(),
@@ -433,7 +463,10 @@ fn colliding_directories_are_refused_before_their_children_are_listed() {
         count(out.report.as_ref().unwrap(), "refused"),
         u64::from(folding)
     );
-    assert_eq!(fs::read(dest.join("DIR/first")).unwrap(), b"DIR/first");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("DIR/first")).unwrap(),
+        b"DIR/first"
+    );
     assert_eq!(tree.listings.contains(&PathBuf::from("dir")), !folding);
     assert_eq!(dest.join("dir/second").exists(), !folding);
     fs::remove_dir_all(root).unwrap();
@@ -448,8 +481,14 @@ fn collisions_are_scoped_to_each_destination_directory() {
         ("two/readme", TreeKind::File),
     ]);
     assert_eq!(tree.export(&dest, true).code, 0);
-    assert_eq!(fs::read(dest.join("one/README")).unwrap(), b"one/README");
-    assert_eq!(fs::read(dest.join("two/readme")).unwrap(), b"two/readme");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("one/README")).unwrap(),
+        b"one/README"
+    );
+    assert_eq!(
+        crate::bounded::small_file(dest.join("two/readme")).unwrap(),
+        b"two/readme"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -462,7 +501,10 @@ fn duplicate_source_names_are_refused_even_on_case_sensitive_destinations() {
     assert_eq!(count(&report, "refused"), 1);
     assert!(report.to_compact().contains("collides with same"));
     assert_eq!(tree.reads, [PathBuf::from("same")]);
-    assert_eq!(fs::read(dest.join("same")).unwrap(), b"same");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("same")).unwrap(),
+        b"same"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1093,7 +1135,10 @@ mod links {
         for name in ["a", "b", "sub/c"] {
             let m = fs::metadata(dest.join(name)).unwrap();
             assert_eq!((m.dev(), m.ino()), (first.dev(), first.ino()));
-            assert_eq!(fs::read(dest.join(name)).unwrap(), b"shared data");
+            assert_eq!(
+                crate::bounded::small_file(dest.join(name)).unwrap(),
+                b"shared data"
+            );
         }
         assert!(out
             .report
@@ -1189,7 +1234,7 @@ mod links {
         fs::create_dir(dest.join("symbolic")).unwrap();
         let out = export(&mut source(&src), &dest, false);
         assert_eq!(count(out.report.as_ref().unwrap(), "refused"), 2);
-        assert_eq!(fs::read(dest.join("b")).unwrap(), b"keep");
+        assert_eq!(crate::bounded::small_file(dest.join("b")).unwrap(), b"keep");
         fs::remove_file(dest.join("b")).unwrap();
         symlink(root.join("outside"), dest.join("b")).unwrap();
         let out = export(&mut source(&src), &dest, true);
@@ -1211,7 +1256,10 @@ mod links {
         assert_eq!(host.reads, 2);
         assert!(!dest.join("broken").exists());
         assert_eq!(fs::metadata(dest.join("good")).unwrap().nlink(), 2);
-        assert_eq!(fs::read(dest.join("last")).unwrap(), b"shared data");
+        assert_eq!(
+            crate::bounded::small_file(dest.join("last")).unwrap(),
+            b"shared data"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

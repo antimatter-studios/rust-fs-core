@@ -1,5 +1,8 @@
 //! Progress is checked against captured process streams and real host metadata.
 #![cfg(feature = "cli")]
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use fs_core::cli::clap::Command;
 use fs_core::cli::transfer::{
     self, Destination, ExportOptions, FileSource, Progress, ProgressOptions,
@@ -258,7 +261,7 @@ fn tree_totals_are_known_before_first_read_and_match_host_sizes() {
                 self.1, 2,
                 "all listings must precede content and occur once"
             );
-            let bytes = std::fs::read(self.0.join(p)).unwrap();
+            let bytes = crate::bounded::small_file(self.0.join(p)).unwrap();
             let bytes = &bytes[offset as usize..];
             let n = b.len().min(bytes.len());
             b[..n].copy_from_slice(&bytes[..n]);

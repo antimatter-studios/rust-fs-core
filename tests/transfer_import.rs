@@ -1,5 +1,8 @@
 //! Import publication is transactional; the standard SHA-256 vector grades bytes.
 #![cfg(feature = "cli")]
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use fs_core::cli::clap::Command;
 use fs_core::cli::transfer::{self, FileSink, ImportRequest, Input, CHUNK};
 use fs_core::cli::CliError;
@@ -511,10 +514,13 @@ fn an_unchanged_local_source_reports_the_digest_of_the_read_bytes() {
             .unwrap();
     assert_eq!(copied.bytes, (2 * CHUNK) as u64);
     // Compare with an uninterrupted import of the bytes the host exposes.
-    let bytes = std::fs::read(&source.path).unwrap();
-    let expected = copy(&mut bytes.as_slice(), Some(&mut Sink::default()), false).unwrap();
+    let mut host = std::fs::File::open(&source.path).unwrap();
+    let expected = copy(&mut host, Some(&mut Sink::default()), false).unwrap();
     assert_eq!(copied.sha256, expected.sha256);
-    assert_eq!(sink.old.as_deref(), Some(bytes.as_slice()));
+    crate::bounded::assert_holds(
+        &source.path,
+        sink.old.as_deref().expect("the sink holds the import"),
+    );
 }
 #[test]
 fn a_local_source_changed_during_persistence_is_not_published() {

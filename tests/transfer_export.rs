@@ -11,6 +11,9 @@
 
 #![cfg(feature = "cli")]
 
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -196,7 +199,7 @@ fn digest_matches_the_platform_sha256_tool_across_chunk_boundaries() {
             .unwrap_or_else(|e| panic!("export of {size} bytes: {}", e.message));
         assert_eq!(copied.bytes, size as u64);
         assert!(!copied.replaced);
-        assert_eq!(std::fs::read(&dest).unwrap(), data, "{size} bytes");
+        crate::bounded::assert_holds(&dest, &data);
         published.push(dest);
         ours.push(copied.sha256_hex());
     }
@@ -251,7 +254,7 @@ fn an_existing_destination_is_refused_without_replace_before_any_read() {
         source.reads, 0,
         "the image was read for a copy that could not publish"
     );
-    assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+    assert_eq!(crate::bounded::small_file(&dest).unwrap(), b"old");
     assert_eq!(names(&dir), ["out"]);
 }
 
@@ -263,7 +266,7 @@ fn replace_swaps_in_the_new_file_and_says_so() {
     let data = pattern(CHUNK + 3);
     let copied = transfer::export_file(&mut Source::new(data.clone()), file(&dest, true)).unwrap();
     assert!(copied.replaced);
-    assert_eq!(std::fs::read(&dest).unwrap(), data);
+    crate::bounded::assert_holds(&dest, &data);
     assert_eq!(names(&dir), ["out"]);
 }
 
@@ -276,7 +279,7 @@ fn a_source_failing_mid_copy_keeps_the_old_file_and_leaves_no_staging_name() {
     source.fail_from = Some(2 * CHUNK as u64 + 5);
     let err = transfer::export_file(&mut source, file(&dest, true)).unwrap_err();
     assert!(err.message.contains("unreadable"), "{}", err.message);
-    assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+    assert_eq!(crate::bounded::small_file(&dest).unwrap(), b"old");
     assert_eq!(names(&dir), ["out"]);
 
     // And with nothing there before, nothing is there after.
@@ -349,7 +352,10 @@ fn a_directory_destination_is_refused_even_with_replace() {
     std::fs::write(dest.join("keep"), b"kept").unwrap();
     let err = transfer::export_file(&mut Source::new(pattern(10)), file(&dest, true)).unwrap_err();
     assert!(err.message.contains("directory"), "{}", err.message);
-    assert_eq!(std::fs::read(dest.join("keep")).unwrap(), b"kept");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("keep")).unwrap(),
+        b"kept"
+    );
     assert_eq!(names(&dir), ["sub"]);
 }
 
@@ -409,7 +415,7 @@ fn a_file_export_reports_its_bytes_and_digest() {
     assert_eq!(report.get("replaced"), Some(&Json::from(false)));
     let digest = platform_sha256(std::slice::from_ref(&dest)).remove(0);
     assert_eq!(report.get("sha256"), Some(&Json::from(digest)));
-    assert_eq!(std::fs::read(&dest).unwrap(), data);
+    crate::bounded::assert_holds(&dest, &data);
 }
 
 #[test]
@@ -432,7 +438,7 @@ fn verified_exports_match_the_platform_digest_including_empty_and_multichunk_fil
         let report = outcome.report.unwrap();
         assert_eq!(report.get("verified"), Some(&Json::from(true)));
         assert_eq!(report.get("bytes"), Some(&Json::from(size as u64)));
-        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        crate::bounded::assert_holds(&dest, &data);
         let digest = platform_sha256(std::slice::from_ref(&dest)).remove(0);
         assert_eq!(report.get("sha256"), Some(&Json::from(digest)));
     }

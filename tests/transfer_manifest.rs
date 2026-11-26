@@ -1,6 +1,9 @@
 //! Durable records use Python's JSON reader as an independent serialization oracle.
 #![cfg(feature = "cli")]
 
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use fs_core::cli::transfer::manifest::{
     Identity, LocalIdentity, Manifest, ManifestEntry, ManifestRead, ResumeDecision, Timestamp,
 };
@@ -58,7 +61,7 @@ fn export_manifest_opens_outside_existing_and_missing_destination_trees() {
         assert!(!read.torn_tail);
         drop(ledger);
         assert_eq!(dest.exists(), existing);
-        assert!(fs::read(&manifest).unwrap().is_empty());
+        assert!(crate::bounded::small_file(&manifest).unwrap().is_empty());
     }
 }
 
@@ -68,7 +71,10 @@ fn export_manifest_refuses_image_names_and_hard_links_without_recovery() {
     fs::hard_link(&image, &manifest).unwrap();
     for alias in [&image, &manifest] {
         assert!(Manifest::open_for_export(alias, &image, &dest, true).is_err());
-        assert_eq!(fs::read(alias).unwrap(), b"image must remain intact");
+        assert_eq!(
+            crate::bounded::small_file(alias).unwrap(),
+            b"image must remain intact"
+        );
     }
     assert!(!dest.exists());
 }
@@ -81,7 +87,10 @@ fn export_manifest_refuses_single_destination_names_and_hard_links() {
     fs::write(&dest, b"published contents").unwrap();
     fs::hard_link(&dest, &manifest).unwrap();
     assert!(Manifest::open_for_export(&manifest, &image, &dest, false).is_err());
-    assert_eq!(fs::read(&dest).unwrap(), b"published contents");
+    assert_eq!(
+        crate::bounded::small_file(&dest).unwrap(),
+        b"published contents"
+    );
 }
 
 #[test]
@@ -108,7 +117,10 @@ fn export_manifest_refuses_hard_links_to_nested_destination_files() {
     fs::write(&published, b"earlier export").unwrap();
     fs::hard_link(&published, &manifest).unwrap();
     assert!(Manifest::open_for_export(&manifest, &image, &dest, true).is_err());
-    assert_eq!(fs::read(&published).unwrap(), b"earlier export");
+    assert_eq!(
+        crate::bounded::small_file(&published).unwrap(),
+        b"earlier export"
+    );
 }
 
 #[test]
@@ -143,9 +155,9 @@ fn export_manifest_refuses_symlink_image_and_tree_file_aliases() {
             image.clone()
         };
         symlink(&target, &manifest).unwrap();
-        let before = fs::read(&target).unwrap();
+        let before = crate::bounded::small_file(&target).unwrap();
         assert!(Manifest::open_for_export(&manifest, &image, &dest, true).is_err());
-        assert_eq!(fs::read(&target).unwrap(), before);
+        assert_eq!(crate::bounded::small_file(&target).unwrap(), before);
     }
 }
 
@@ -180,7 +192,7 @@ fn export_manifest_refuses_destination_symlinks_to_an_external_ledger() {
     symlink(&manifest, dest.join("file")).unwrap();
     assert!(Manifest::open_for_export(&manifest, &image, &dest, true).is_err());
     assert_eq!(
-        fs::read(&manifest).unwrap(),
+        crate::bounded::small_file(&manifest).unwrap(),
         b"not a record; must not recover"
     );
 }
@@ -214,10 +226,16 @@ fn import_manifest_opens_external_ledgers_and_reports_recovery() {
         let (ledger, read) = Manifest::open_for_import(&manifest, &image, &source, tree).unwrap();
         assert!(read.torn_tail);
         drop(ledger);
-        assert!(fs::read(&manifest).unwrap().is_empty());
+        assert!(crate::bounded::small_file(&manifest).unwrap().is_empty());
         let file = if tree { source.join("file") } else { source };
-        assert_eq!(fs::read(file).unwrap(), b"source must remain intact");
-        assert_eq!(fs::read(image).unwrap(), b"image must remain intact");
+        assert_eq!(
+            crate::bounded::small_file(file).unwrap(),
+            b"source must remain intact"
+        );
+        assert_eq!(
+            crate::bounded::small_file(image).unwrap(),
+            b"image must remain intact"
+        );
     }
 }
 
@@ -227,9 +245,15 @@ fn import_manifest_refuses_image_names_and_hard_links_without_recovery() {
     fs::hard_link(&image, &manifest).unwrap();
     for alias in [&image, &manifest] {
         assert!(Manifest::open_for_import(alias, &image, &source, false).is_err());
-        assert_eq!(fs::read(alias).unwrap(), b"image must remain intact");
+        assert_eq!(
+            crate::bounded::small_file(alias).unwrap(),
+            b"image must remain intact"
+        );
     }
-    assert_eq!(fs::read(source).unwrap(), b"source must remain intact");
+    assert_eq!(
+        crate::bounded::small_file(source).unwrap(),
+        b"source must remain intact"
+    );
 }
 
 #[test]
@@ -238,9 +262,15 @@ fn import_manifest_refuses_single_source_names_and_hard_links() {
     fs::hard_link(&source, &manifest).unwrap();
     for alias in [&source, &manifest] {
         assert!(Manifest::open_for_import(alias, &image, &source, false).is_err());
-        assert_eq!(fs::read(alias).unwrap(), b"source must remain intact");
+        assert_eq!(
+            crate::bounded::small_file(alias).unwrap(),
+            b"source must remain intact"
+        );
     }
-    assert_eq!(fs::read(image).unwrap(), b"image must remain intact");
+    assert_eq!(
+        crate::bounded::small_file(image).unwrap(),
+        b"image must remain intact"
+    );
 }
 
 #[test]
@@ -256,7 +286,7 @@ fn import_manifest_refuses_source_tree_containment_before_creation() {
     assert!(!source.join("ledger").exists());
     assert!(!source.join("new").exists());
     assert_eq!(
-        fs::read(source.join("file")).unwrap(),
+        crate::bounded::small_file(source.join("file")).unwrap(),
         b"source must remain intact"
     );
 }
@@ -269,7 +299,10 @@ fn import_manifest_refuses_hard_links_to_nested_source_files() {
     fs::write(&file, b"nested source must remain intact").unwrap();
     fs::hard_link(&file, &manifest).unwrap();
     assert!(Manifest::open_for_import(&manifest, &image, &source, true).is_err());
-    assert_eq!(fs::read(file).unwrap(), b"nested source must remain intact");
+    assert_eq!(
+        crate::bounded::small_file(file).unwrap(),
+        b"nested source must remain intact"
+    );
 }
 
 #[test]
@@ -287,7 +320,10 @@ fn import_manifest_identity_errors_and_nonregular_ledgers_fail_before_creation()
     assert!(!manifest.exists());
     fs::create_dir(&manifest).unwrap();
     assert!(Manifest::open_for_import(&manifest, &image, &source, false).is_err());
-    assert_eq!(fs::read(source).unwrap(), b"source must remain intact");
+    assert_eq!(
+        crate::bounded::small_file(source).unwrap(),
+        b"source must remain intact"
+    );
 }
 
 #[cfg(unix)]
@@ -303,9 +339,9 @@ fn import_manifest_refuses_symlinks_to_image_and_source_files() {
             _ => source.join("file"),
         };
         symlink(&target, &manifest).unwrap();
-        let before = fs::read(&target).unwrap();
+        let before = crate::bounded::small_file(&target).unwrap();
         assert!(Manifest::open_for_import(&manifest, &image, &source, target_kind == 2).is_err());
-        assert_eq!(fs::read(target).unwrap(), before);
+        assert_eq!(crate::bounded::small_file(target).unwrap(), before);
     }
 }
 
@@ -330,7 +366,7 @@ fn import_manifest_refuses_source_symlinks_to_external_ledgers_and_dangling_path
     symlink(&manifest, source.join("alias")).unwrap();
     assert!(Manifest::open_for_import(&manifest, &image, &source, true).is_err());
     assert_eq!(
-        fs::read(&manifest).unwrap(),
+        crate::bounded::small_file(&manifest).unwrap(),
         b"torn record must remain intact"
     );
     let dangling = manifest.with_file_name("dangling");
@@ -374,7 +410,7 @@ fn only_verified_completions_are_appended_and_reopened_in_order() {
     assert!(read.entries.is_empty());
     assert!(!read.torn_tail);
     assert!(!manifest.append(&entry(), false).unwrap());
-    assert!(fs::read(&file).unwrap().is_empty());
+    assert!(crate::bounded::small_file(&file).unwrap().is_empty());
     assert!(manifest.append(&entry(), true).unwrap());
     let mut second = entry();
     second.bytes = 0;
@@ -424,7 +460,7 @@ fn a_torn_tail_is_reported_and_removed_before_the_next_append() {
     let (mut manifest, _) = Manifest::open(&file).unwrap();
     manifest.append(&entry(), true).unwrap();
     drop(manifest);
-    let complete = fs::read(&file).unwrap();
+    let complete = crate::bounded::small_file(&file).unwrap();
     OpenOptions::new()
         .append(true)
         .open(&file)
@@ -434,7 +470,7 @@ fn a_torn_tail_is_reported_and_removed_before_the_next_append() {
     let (mut manifest, read) = Manifest::open(&file).unwrap();
     assert!(read.torn_tail);
     assert_eq!(read.entries, [entry()]);
-    assert_eq!(fs::read(&file).unwrap(), complete);
+    assert_eq!(crate::bounded::small_file(&file).unwrap(), complete);
     manifest.append(&entry(), true).unwrap();
     drop(manifest);
     let (_, read) = Manifest::open(&file).unwrap();
@@ -447,13 +483,13 @@ fn a_complete_json_record_without_its_newline_is_still_a_torn_tail() {
     let (mut manifest, _) = Manifest::open(&file).unwrap();
     manifest.append(&entry(), true).unwrap();
     drop(manifest);
-    let mut bytes = fs::read(&file).unwrap();
+    let mut bytes = crate::bounded::small_file(&file).unwrap();
     bytes.pop();
     fs::write(&file, bytes).unwrap();
     let (_, read) = Manifest::open(&file).unwrap();
     assert!(read.torn_tail);
     assert!(read.entries.is_empty());
-    assert!(fs::read(&file).unwrap().is_empty());
+    assert!(crate::bounded::small_file(&file).unwrap().is_empty());
 }
 #[test]
 fn malformed_complete_records_fail_without_truncating_anything() {
@@ -461,7 +497,7 @@ fn malformed_complete_records_fail_without_truncating_anything() {
     for bytes in [b"not json\n".as_slice(), b"{}\n", b"\n"] {
         fs::write(&file, bytes).unwrap();
         assert!(Manifest::open(&file).is_err());
-        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert_eq!(crate::bounded::small_file(&file).unwrap(), bytes);
     }
     let mut invalid = entry();
     invalid.sha256 = "x".repeat(64);
@@ -472,7 +508,7 @@ fn malformed_complete_records_fail_without_truncating_anything() {
     let oversized = vec![b'x'; 64 * 1024 + 1];
     fs::write(&file, &oversized).unwrap();
     assert!(Manifest::open(&file).is_err());
-    assert_eq!(fs::read(&file).unwrap(), oversized);
+    assert_eq!(crate::bounded::small_file(&file).unwrap(), oversized);
 }
 #[test]
 fn concurrent_manifest_writers_are_refused_without_touching_the_file() {
@@ -506,7 +542,7 @@ fn invalid_digest_and_timestamp_entries_are_refused_before_writing() {
     };
     *path = PathBuf::from("x".repeat(64 * 1024));
     assert!(manifest.append(&invalid, true).is_err());
-    assert!(fs::read(&file).unwrap().is_empty());
+    assert!(crate::bounded::small_file(&file).unwrap().is_empty());
 }
 #[test]
 fn nonexistent_parent_is_an_error_without_creating_directories() {
@@ -732,9 +768,9 @@ fn unverified_file_and_tree_exports_append_no_evidence() {
             false,
             tree,
         );
-        assert!(fs::read(ledger).unwrap().is_empty());
+        assert!(crate::bounded::small_file(ledger).unwrap().is_empty());
         assert_eq!(
-            fs::read(if tree { dest.join("first") } else { dest }).unwrap(),
+            crate::bounded::small_file(if tree { dest.join("first") } else { dest }).unwrap(),
             b"abc"
         );
     }
@@ -751,7 +787,10 @@ fn tree_exports_persist_each_verified_file_before_a_later_failure() {
         panic!("image source")
     };
     assert_eq!(path, &PathBuf::from("/image/file/first"));
-    assert_eq!(fs::read(dest.join("first")).unwrap(), b"abc");
+    assert_eq!(
+        crate::bounded::small_file(dest.join("first")).unwrap(),
+        b"abc"
+    );
     assert!(!dest.join("later").exists());
 }
 
@@ -1378,7 +1417,10 @@ fn assert_recopied(
     let report = outcome.report.as_ref().unwrap();
     assert_eq!(report.get("skipped"), None);
     assert_eq!(report.get("verified"), Some(&Json::Bool(true)));
-    assert_eq!(fs::read(&source.dest).unwrap(), source.content);
+    assert_eq!(
+        crate::bounded::small_file(&source.dest).unwrap(),
+        source.content
+    );
     assert_eq!(records(ledger), entries);
     let (_, read) = Manifest::open(ledger).unwrap();
     assert_eq!(
@@ -1391,7 +1433,7 @@ fn assert_recopied(
 fn resume_skips_an_unchanged_single_file_with_the_exact_earlier_time() {
     use fs_core::cli::Json;
     let (ledger, mut source) = resumable("resume-skip", true);
-    let before = fs::read(&ledger).unwrap();
+    let before = crate::bounded::small_file(&ledger).unwrap();
     let modified = fs::metadata(&source.dest).unwrap().modified().unwrap();
     OpenOptions::new()
         .append(true)
@@ -1406,7 +1448,11 @@ fn resume_skips_an_unchanged_single_file_with_the_exact_earlier_time() {
     assert_eq!(report.get("skipped"), Some(&Json::from("verified earlier")));
     assert_eq!(report.get("verified"), Some(&Json::Bool(false)));
     assert_eq!(report.get("manifest_torn_tail"), Some(&Json::Bool(true)));
-    assert_eq!(fs::read(&ledger).unwrap(), before, "a skip appends nothing");
+    assert_eq!(
+        crate::bounded::small_file(&ledger).unwrap(),
+        before,
+        "a skip appends nothing"
+    );
     assert_eq!(
         fs::metadata(&source.dest).unwrap().modified().unwrap(),
         modified
@@ -1740,7 +1786,7 @@ fn recursive_resume_mixes_earlier_skips_with_full_restarts_and_reports_original_
     );
     for (name, bytes) in &source.files {
         let local = dest.join("nested").join(name);
-        assert_eq!(&fs::read(&local).unwrap(), bytes);
+        assert_eq!(&crate::bounded::small_file(&local).unwrap(), bytes);
         assert!(source
             .reads
             .contains(&(PathBuf::from("/tree/nested").join(name), 0)));
@@ -1766,7 +1812,7 @@ fn recursive_resume_skips_without_replace_but_refuses_unproven_existing_files() 
     assert_eq!(report.get("skipped"), Some(&Json::UInt(4)));
     assert_eq!(report.get("refused"), Some(&Json::UInt(1)));
     assert_eq!(
-        fs::read(dest.join("nested/rewrite")).unwrap(),
+        crate::bounded::small_file(dest.join("nested/rewrite")).unwrap(),
         b"original bytes"
     );
     assert_eq!(records(&ledger), 5);
@@ -1807,7 +1853,7 @@ fn recursive_resume_cancellation_during_digest_keeps_destinations_and_pending_it
         return;
     }
     let (ledger, dest, mut source) = resumable_tree("tree-resume-cancel");
-    let before = fs::read(&ledger).unwrap();
+    let before = crate::bounded::small_file(&ledger).unwrap();
     source.signal_during_read = true;
     let outcome = tree_resume_export(&ledger, &dest, &mut source, true, true);
     assert_eq!(outcome.code, 143);
@@ -1822,9 +1868,12 @@ fn recursive_resume_cancellation_during_digest_keeps_destinations_and_pending_it
         panic!("pending")
     };
     assert_eq!(pending.len(), 4);
-    assert_eq!(fs::read(&ledger).unwrap(), before);
+    assert_eq!(crate::bounded::small_file(&ledger).unwrap(), before);
     for (name, bytes) in &source.files {
-        assert_eq!(&fs::read(dest.join("nested").join(name)).unwrap(), bytes);
+        assert_eq!(
+            &crate::bounded::small_file(dest.join("nested").join(name)).unwrap(),
+            bytes
+        );
     }
     assert_eq!(
         source.reads.len(),
@@ -1837,7 +1886,7 @@ fn recursive_resume_cancellation_during_digest_keeps_destinations_and_pending_it
 fn recursive_resume_alias_preflight_precedes_all_source_reads() {
     use fs_core::cli::transfer::{self, ExportManifestOptions, ExportRequest, Output, TreeOptions};
     let (ledger, dest, mut source) = resumable_tree("tree-resume-alias");
-    let before = fs::read(dest.join("nested/untouched")).unwrap();
+    let before = crate::bounded::small_file(dest.join("nested/untouched")).unwrap();
     let alias = ledger.with_file_name("destination-alias");
     fs::hard_link(dest.join("nested/untouched"), &alias).unwrap();
     for unsafe_path in [source.image.clone(), dest.join("ledger"), alias] {
@@ -1860,7 +1909,10 @@ fn recursive_resume_alias_preflight_precedes_all_source_reads() {
         );
         assert!(result.is_err());
         assert!(source.reads.is_empty());
-        assert_eq!(fs::read(dest.join("nested/untouched")).unwrap(), before);
+        assert_eq!(
+            crate::bounded::small_file(dest.join("nested/untouched")).unwrap(),
+            before
+        );
     }
 }
 
@@ -2178,7 +2230,10 @@ fn file_import_manifest_aliasing_the_source_is_refused_before_staging() {
     let (sink, outcome) = import_run(&source, &image, &source, true);
     assert!(outcome.is_err());
     assert_eq!(sink.stages, 0, "preflight runs before any staged write");
-    assert_eq!(fs::read(&source).unwrap(), b"source must remain intact");
+    assert_eq!(
+        crate::bounded::small_file(&source).unwrap(),
+        b"source must remain intact"
+    );
 }
 
 // Resume reruns a verified import with a driver identity changed by `tweak`.
@@ -2245,7 +2300,7 @@ fn assert_import_recopied(
         Some(&0),
         "a restart begins at byte zero"
     );
-    assert_eq!(sink.staged, fs::read(source).unwrap());
+    assert_eq!(sink.staged, crate::bounded::small_file(source).unwrap());
     assert_eq!(records(ledger), entries);
     let (_, read) = Manifest::open(ledger).unwrap();
     assert_eq!(read.entries.last().unwrap().sha256, host_sha256(source));
@@ -2255,7 +2310,7 @@ fn assert_import_recopied(
 fn import_resume_skips_an_unchanged_verified_file_with_the_earlier_time() {
     use fs_core::cli::Json;
     let (ledger, image, source) = imported_once("import-resume-skip");
-    let before = fs::read(&ledger).unwrap();
+    let before = crate::bounded::small_file(&ledger).unwrap();
     let (sink, outcome) = import_resume(&ledger, &image, &source, |_| {});
     let outcome = outcome.unwrap();
     assert_eq!(outcome.code, 0);
@@ -2268,7 +2323,11 @@ fn import_resume_skips_an_unchanged_verified_file_with_the_earlier_time() {
         report.get("sha256"),
         Some(&Json::from(host_sha256(&source).as_str()))
     );
-    assert_eq!(fs::read(&ledger).unwrap(), before, "a skip appends nothing");
+    assert_eq!(
+        crate::bounded::small_file(&ledger).unwrap(),
+        before,
+        "a skip appends nothing"
+    );
     // The earlier completion time comes from the ledger through Python's JSON reader.
     let script = "import json,sys;t=json.loads(open(sys.argv[1]).read().splitlines()[-1])['completed_at'];print(t['seconds'],t['nanoseconds'])";
     let result = Command::new(if cfg!(windows) { "python" } else { "python3" })
@@ -2666,7 +2725,7 @@ fn tree_import_resume_skips_only_unchanged_verified_files() {
     ] {
         assert_eq!(
             sink.published[&PathBuf::from(name)],
-            fs::read(&local).unwrap()
+            crate::bounded::small_file(&local).unwrap()
         );
     }
     assert_eq!(
