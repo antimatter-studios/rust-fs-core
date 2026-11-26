@@ -66,6 +66,43 @@ fn ci_yml() -> PathBuf {
         .join("ci.yml")
 }
 
+/// The line and byte budgets of every debug tier `text` runs.
+///
+/// Comment lines are skipped: a budget that is only quoted runs nothing.
+fn debug_tier_budgets(text: &str) -> Vec<(u64, u64)> {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| line.split_once("scripts/tier.sh \"test (debug)\" debug "))
+        .map(|(_, rest)| {
+            let mut words = rest.split_whitespace();
+            let mut number = || {
+                words
+                    .next()
+                    .and_then(|word| word.parse().ok())
+                    .unwrap_or_else(|| panic!("the debug tier states no numeric budget: {rest}"))
+            };
+            (number(), number())
+        })
+        .collect()
+}
+
+/// `chore test:debug` accepts exactly what the CI debug tier accepts (#512).
+///
+/// With a smaller local budget, a run that passes in CI exits 65 locally.
+#[test]
+fn the_local_debug_tier_has_the_budget_ci_has() {
+    let local = debug_tier_budgets(&read_or_panic(&manifest_dir().join("chores.yml")));
+    let ci = debug_tier_budgets(&read_or_panic(&ci_yml()));
+    assert_eq!(local.len(), 1, "chores.yml runs one debug tier");
+    assert!(!ci.is_empty(), "ci.yml runs no debug tier");
+    for budget in ci {
+        assert_eq!(
+            local[0], budget,
+            "(lines, bytes): chores.yml on the left, ci.yml on the right"
+        );
+    }
+}
+
 /// Read a file the guards depend on, or fail.
 ///
 /// It panics rather than returning `None` on purpose. An
