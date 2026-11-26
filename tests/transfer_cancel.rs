@@ -1,5 +1,8 @@
 //! Real child processes and the kernel's signals grade cancellation and cleanup.
 #![cfg(feature = "cli")]
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use fs_core::cli::transfer::{self, Destination, FileSource};
 use fs_core::cli::CliError;
 
@@ -231,12 +234,15 @@ mod unix {
             "{report}"
         );
         if replace {
-            assert_eq!(fs::read(dest).unwrap(), b"old");
+            assert_eq!(crate::bounded::small_file(dest).unwrap(), b"old");
         } else {
             assert!(!dest.exists());
         }
         if tree {
-            assert_eq!(fs::read(root.join("dest/a-complete")).unwrap(), b"aaa");
+            assert_eq!(
+                crate::bounded::small_file(root.join("dest/a-complete")).unwrap(),
+                b"aaa"
+            );
             assert!(!root.join("dest/c-pending").exists());
             assert!(
                 report.contains("a-complete") && report.contains("c-pending"),

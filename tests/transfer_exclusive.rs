@@ -1,6 +1,9 @@
 //! The operating system's locks, held by another process, are the oracle.
 #![cfg(feature = "cli")]
 
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use std::fs::{self, File};
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
@@ -143,7 +146,10 @@ fn another_process_refuses_import_before_reading_its_input() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("lock"));
     assert_eq!(input.stream_position().unwrap(), 0, "producer was drained");
     drop(held);
-    assert_eq!(fs::read(dir.image()).unwrap(), b"image bytes");
+    assert_eq!(
+        crate::bounded::small_file(dir.image()).unwrap(),
+        b"image bytes"
+    );
 }
 
 #[test]
@@ -305,7 +311,10 @@ fn an_import_guard_allows_the_drivers_separate_handle_to_write() {
         .unwrap();
     target.write_all(b"new").unwrap();
     target.sync_all().unwrap();
-    assert_eq!(fs::read(dir.image()).unwrap(), b"newge bytes");
+    assert_eq!(
+        crate::bounded::small_file(dir.image()).unwrap(),
+        b"newge bytes"
+    );
     assert!(matches!(
         target.try_lock(),
         Err(std::fs::TryLockError::WouldBlock)

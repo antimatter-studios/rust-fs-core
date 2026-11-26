@@ -1,5 +1,8 @@
 //! Host files and the platform SHA-256 tool independently grade tree imports.
 #![cfg(feature = "cli")]
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use fs_core::cli::clap::Command;
 use fs_core::cli::transfer::{self, FileSink, ImportRequest, ImportTreeOptions, Input, TreeSink};
 use fs_core::cli::{CliError, Json, Outcome};
@@ -176,7 +179,7 @@ fn a_deep_tree_imports_host_bytes_and_independent_digests() {
     let report = out.report.unwrap().to_compact();
     for (path, data) in &sink.files {
         let host = local.0.join(path.strip_prefix("/dest").unwrap());
-        assert_eq!(*data, fs::read(&host).unwrap());
+        crate::bounded::assert_holds(&host, data);
         assert!(report.contains(&digest(&host)));
     }
 }
@@ -480,7 +483,7 @@ fn capable_sinks_receive_times_hard_links_and_symbolic_links() {
     assert_eq!(count(&out, "completed"), 6);
     assert_eq!(
         sink.inner.files[Path::new("/dest/a")],
-        fs::read(local.0.join("a")).unwrap()
+        crate::bounded::small_file(local.0.join("a")).unwrap()
     );
     assert!(!sink.inner.files.contains_key(Path::new("/dest/b")));
     assert_eq!(sink.hard_links[Path::new("/dest/b")], Path::new("/dest/a"));

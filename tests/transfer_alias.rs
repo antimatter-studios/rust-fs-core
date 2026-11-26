@@ -3,6 +3,9 @@
 
 #![cfg(feature = "cli")]
 
+#[path = "support/bounded.rs"]
+mod bounded;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -66,7 +69,7 @@ fn names(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn refused(dir: &Scratch, image: &Path, dest: &Path, offset: u64) {
-    let original = fs::read(dir.image()).unwrap();
+    let original = crate::bounded::small_file(dir.image()).unwrap();
     let before = names(&dir.0);
     for replace in [false, true] {
         let mut source = Source {
@@ -88,7 +91,7 @@ fn refused(dir: &Scratch, image: &Path, dest: &Path, offset: u64) {
         assert!(err.message.contains(&image.display().to_string()));
         assert!(err.message.contains(&dest.display().to_string()));
         assert_eq!(source.reads, 0);
-        assert_eq!(fs::read(dir.image()).unwrap(), original);
+        assert_eq!(crate::bounded::small_file(dir.image()).unwrap(), original);
         assert_eq!(names(&dir.0), before, "nothing, including staging, created");
     }
 }
@@ -160,7 +163,7 @@ fn the_same_guard_refuses_a_local_import_source() {
 #[test]
 fn unrelated_existing_and_new_destinations_are_accepted() {
     let dir = Scratch::new("unrelated");
-    let original = fs::read(dir.image()).unwrap();
+    let original = crate::bounded::small_file(dir.image()).unwrap();
     for replace in [false, true] {
         let dest = dir.0.join(format!("output-{replace}"));
         if replace {
@@ -179,8 +182,8 @@ fn unrelated_existing_and_new_destinations_are_accepted() {
             },
         )
         .unwrap();
-        assert_eq!(fs::read(dest).unwrap(), b"abc");
-        assert_eq!(fs::read(dir.image()).unwrap(), original);
+        assert_eq!(crate::bounded::small_file(dest).unwrap(), b"abc");
+        assert_eq!(crate::bounded::small_file(dir.image()).unwrap(), original);
     }
 }
 
