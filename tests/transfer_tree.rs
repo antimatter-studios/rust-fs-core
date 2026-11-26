@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(target_os = "macos")]
+#[path = "support/image_create.rs"]
+mod image_create;
+
+#[cfg(target_os = "macos")]
 #[path = "support/image_detach.rs"]
 mod image_detach;
 
@@ -487,22 +491,20 @@ fn case_volume(filesystem: &str, root: PathBuf) -> CaseVolume {
     let image = owned.path.clone();
     let mount = root.join("mount");
     fs::create_dir(&mount).unwrap();
-    let out = Command::new("hdiutil")
-        .args([
-            "create",
-            "-size",
-            "32m",
-            "-type",
-            "SPARSE",
-            "-fs",
-            filesystem,
-            "-volname",
-            "core-case-oracle",
-        ])
-        .arg(&image)
-        .output()
-        .expect("hdiutil create is required for the case oracle");
-    assert!(out.status.success(), "create failed: {out:?}");
+    let create = [
+        "create",
+        "-size",
+        "32m",
+        "-type",
+        "SPARSE",
+        "-fs",
+        filesystem,
+        "-volname",
+        "core-case-oracle",
+    ]
+    .map(std::ffi::OsStr::new);
+    image_create::create(std::ffi::OsStr::new("/usr/bin/hdiutil"), &create, &image)
+        .unwrap_or_else(|error| panic!("hdiutil create is required for the case oracle: {error}"));
     let out = owned.attach(
         Command::new("hdiutil")
             .args(["attach", "-nobrowse", "-noautoopen", "-mountpoint"])
