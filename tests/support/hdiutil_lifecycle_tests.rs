@@ -61,9 +61,10 @@ mod lifecycle {
 
     /// The two handles that give a child's stdout and stderr one log file.
     fn child_log(log: &Path) -> (Stdio, Stdio) {
-        let stdout = Stdio::from(File::create(log).unwrap());
-        let stderr = Stdio::from(File::options().append(true).open(log).unwrap());
-        (stdout, stderr)
+        // One open file, so both streams advance the same offset.
+        let stdout = File::create(log).unwrap();
+        let stderr = stdout.try_clone().unwrap();
+        (Stdio::from(stdout), Stdio::from(stderr))
     }
 
     struct Probe {
@@ -105,7 +106,7 @@ mod lifecycle {
                     wait(&mut child);
                     panic!(
                         "own child did not publish its attachment: {}",
-                        log.display()
+                        fs::read_to_string(&log).unwrap()
                     );
                 }
                 std::thread::sleep(Duration::from_millis(20));
@@ -139,6 +140,15 @@ mod lifecycle {
             if self.child.try_wait().ok().flatten().is_none() {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
+            }
+            // Before the cleanup below, which can itself fail.
+            if std::thread::panicking() {
+                match fs::read_to_string(&self.log) {
+                    Ok(log) => println!("child log {}:\n{log}", self.log.display()),
+                    Err(error) => {
+                        println!("child log {} is unreadable: {error}", self.log.display())
+                    }
+                }
             }
             if own_info(&self.image).is_some() {
                 let result = Command::new("/usr/bin/hdiutil")

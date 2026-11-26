@@ -41,9 +41,16 @@ fn registry() -> MutexGuard<'static, Vec<Record>> {
                 if number != 0 {
                     let records = registry();
                     for record in records.iter() {
-                        if let Err(error) = record.cleanup() {
-                            eprintln!("owned DiskImages signal cleanup failed: {error}");
-                        }
+                        let outcome = match record.cleanup() {
+                            Ok(true) => "detached".to_owned(),
+                            Ok(false) => "not listed by hdiutil info, no detach run".to_owned(),
+                            Err(error) => format!("failed: {error}"),
+                        };
+                        eprintln!(
+                            "owned DiskImages signal {number} cleanup of {}: {outcome} ({})",
+                            record.device,
+                            record.image.display()
+                        );
                     }
                     std::process::exit(128 + number as i32);
                 }
@@ -233,13 +240,14 @@ impl Record {
         Ok(false)
     }
 
-    fn cleanup(&self) -> io::Result<()> {
+    /// Whether a detach ran; see `detach_locked`.
+    fn cleanup(&self) -> io::Result<bool> {
         let _lock = scope_lock(self.dir.parent().unwrap())?;
         self.cleanup_locked()
     }
 
-    fn cleanup_locked(&self) -> io::Result<()> {
-        self.detach_locked()?;
+    fn cleanup_locked(&self) -> io::Result<bool> {
+        let detached = self.detach_locked()?;
         match fs::remove_file(&self.image) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -247,10 +255,13 @@ impl Record {
         }
         fs::remove_file(self.dir.join(".attach.stdout"))?;
         fs::remove_file(self.dir.join(".owner"))?;
-        fs::remove_dir(&self.dir)
+        fs::remove_dir(&self.dir)?;
+        Ok(detached)
     }
 
-    fn detach_locked(&self) -> io::Result<()> {
+    /// `Ok(true)` when the image was listed and is now detached, `Ok(false)`
+    /// when `hdiutil info` did not list it and no detach ran.
+    fn detach_locked(&self) -> io::Result<bool> {
         if self.device.is_empty() {
             let pid = self
                 .dir
@@ -267,7 +278,8 @@ impl Record {
         if !whole_device(&self.device) || !self.same_image()? {
             return Err(invalid("owned image identity changed; refusing teardown"));
         }
-        if self.attached()? {
+        let listed = self.attached()?;
+        if listed {
             for attempt in 0..=5 {
                 let mut command = Command::new("/usr/bin/hdiutil");
                 command.arg("detach");
@@ -293,7 +305,7 @@ impl Record {
                 ));
             }
         }
-        Ok(())
+        Ok(listed)
     }
 }
 
