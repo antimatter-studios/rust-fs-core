@@ -492,7 +492,7 @@ or bump it and every consumer's `core.sh` in the same pass.
 
 | tier | measured | budget | floor |
 |---|---|---|---|
-| debug | 1187 lines / 71,046 bytes (CI run 45857521244) | 1200 / 80,000 | 488 |
+| debug | 1187 lines / 71,046 bytes before `--quiet` (CI run 45857521244) | 1200 / 80,000 | 488 |
 | release | 377 lines / 15,291 bytes (CI run 44789488568, v0.5.1) | 1000 / 60,000 | 488 |
 | coverage | 411 lines / 17,462 bytes (CI run 45857521244) | 1200 / 70,000 | 488 |
 
@@ -501,6 +501,12 @@ floor per tier, and `tests/ci_profile.rs` fails if any of them differs. `ci.yml`
 runs no release tier, and `release.yml` no coverage tier. Every tier also checks
 the common per-target transfer floors and the host OS's
 (`.github/transfer-*-floors.txt`).
+
+Every tier runs libtest with `--quiet`, which prints a dot per test instead of a
+line, so a log does not gain a line for each added test. The debug row was
+measured while that tier still listed every test. That log without its 843
+per-test lines, with libtest's progress rows added, comes to 403 lines: a
+calculation, not a run.
 
 Exit **65** is a passing run that printed more than its budget.
 `AM_FS_CORE_VERBOSE=1`, or `chore test -- --verbose`, streams a run as well as

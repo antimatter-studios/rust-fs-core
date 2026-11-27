@@ -172,8 +172,8 @@ jobs:
       - name: test (quiet, budgeted, with an executed-test floor)
         shell: bash
         run: |
-          # Run 45821414604 measured 70076 bytes, inside 1200 lines (the budget grows with the tests); leave 14% headroom.
-          bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers
+          # --quiet prints a dot per test, so the log no longer gains a line per test (#518).
+          bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers -- --quiet
           bash scripts/core.sh test-floor debug 488
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug
           if [ "$RUNNER_OS" = Linux ]; then
@@ -286,8 +286,8 @@ jobs:
       - name: test (quiet, budgeted, with an executed-test floor)
         shell: bash
         run: |
-          # Run 45821414604 measured 70076 bytes, inside 1200 lines (the budget grows with the tests); leave 14% headroom.
-          bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers
+          # --quiet prints a dot per test, so the log no longer gains a line per test (#518).
+          bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers -- --quiet
           bash scripts/core.sh test-floor debug 488
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug
           if [ "$RUNNER_OS" = Linux ]; then
@@ -400,8 +400,8 @@ jobs:
       - name: test (quiet, budgeted, with an executed-test floor)
         shell: bash
         run: |
-          # Run 45821414604 measured 70076 bytes, inside 1200 lines (the budget grows with the tests); leave 14% headroom.
-          bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers
+          # --quiet prints a dot per test, so the log no longer gains a line per test (#518).
+          bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers -- --quiet
           bash scripts/core.sh test-floor debug 488
           bash scripts/core.sh test-floor --targets .github/transfer-test-floors.txt debug
           if [ "$RUNNER_OS" = Linux ]; then

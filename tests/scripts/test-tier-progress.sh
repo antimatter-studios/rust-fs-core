@@ -115,6 +115,19 @@ progress nosuch > "$SANDBOX/out" 2>&1
 same "$?" 1 "a tier with no record fails"
 contains "$(cat "$SANDBOX/out")" "nosuch" "and names what it looked for"
 
+# --- a tier that runs libtest with --quiet ----------------------------------------
+
+# Such a log has a dot per passing test and `NAME --- FAILED` per failing one.
+record quiet 10 10 0
+printf '%s\n' \
+    '....... 7/10' \
+    'caching::tests::first --- FAILED' \
+    '.' \
+    'caching::tests::second --- FAILED' \
+    'prose that quotes --- FAILED and goes on' \
+    'test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured' > "$LOGS/quiet.log"
+contains "$(progress quiet)" "2 failed" "a quiet tier's failed tests are counted, and its summary line is not one"
+
 rm -f "$LOGS"/*.meta "$LOGS"/*.log
 out="$(progress 2>&1)"
 same "$?" 0 "no tiers at all is not a failure"

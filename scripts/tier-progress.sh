@@ -44,7 +44,9 @@ report() {
     failed=0
     if [ -f "$log" ]; then
         lines="$(wc -l < "$log" | tr -d ' ')"
-        failed="$(grep -ac '^test .* FAILED' "$log")"
+        # A failed test is `test NAME ... FAILED`, or `NAME --- FAILED` under
+        # libtest's --quiet. A binary's `test result: FAILED.` line is neither.
+        failed="$(grep -aEc '^test .* \.\.\. FAILED|^.+ --- FAILED$' "$log")"
     fi
     if [ "$max" -gt 0 ]; then p=$((lines * 100 / max)); else p=99; fi
     [ "$p" -le 99 ] || p=99

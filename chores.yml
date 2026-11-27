@@ -109,6 +109,14 @@ chore_min_version: 0.6.0
 # tests/ci_profile.rs fails if a tier's budget or floor differs between
 # chores.yml, ci.yml, release.yml and the table in AGENTS.md.
 #
+# THE DEBUG TIER RUNS LIBTEST WITH --quiet SINCE 2026-11-26 (#518): test /
+# ubuntu-latest printed 1187 lines / 71,046 bytes against 1200 / 80,000 (run
+# 45857521244), 843 of them one line per test. The same log without those
+# lines, with libtest's progress rows added, is 403 lines and about 13,700
+# bytes: calculated from that log, not measured on a run. The coverage tier,
+# already quiet, printed 411 lines / 17,462 bytes in the same run. The
+# 1200 / 80,000 budget stays as it was.
+#
 # THE RELEASE TIER RUNS LIBTEST WITH --quiet SINCE 2026-10-19: the v0.3.16
 # release's test (release) tier printed 1014 lines / 58,026 bytes on CI with
 # a cold cache (run 39203088290), 657 of them one `... ok` line per test, so
@@ -249,7 +257,7 @@ tasks:
   test:debug:
     desc: Debug-profile suite, including every target
     cmds:
-      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers'
+      - 'AM_FS_CORE_ALLOW_UNPRIVILEGED_SKIP=1 EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 1200 80000 -- cargo test --locked --all-targets --features cli,layers -- --quiet'
       - 'bash scripts/core.sh test-floor debug 488'
       - 'bash scripts/transfer-floors.sh debug'
 
