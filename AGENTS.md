@@ -445,6 +445,11 @@ runs it against the calling repository:
   family-check would take it for a copy. `tests/scripts/test-stage-siblings.sh`
   and `tests/scripts/test-guest-rust-run.sh` drive both (#195).
 
+- `scripts/tier.sh progress [LOG-NAME]`, run from a repository, prints how far
+  each of its tiers has got from `tmp/logs`: build or test phase, crates or
+  tests done, failures, percentage and ETA. A passing tier leaves
+  `tmp/logs/<log>.history`, which the next run's ETA uses.
+  `tests/scripts/test-tier-progress.sh` drives it.
 - `scripts/stack-base.sh`, run in place from the branch a pull request is
   made from, prints the branch to base it on. It reads the open pull requests
   and answers from the ones it keeps and their `stack` field. A pull request
