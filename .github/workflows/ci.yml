@@ -123,17 +123,9 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: verify the packaged family scripts
-        # A consumer with no checkout of this repository gets these from the
-        # published crate, through cargo, so the package must carry them.
+        # `chore check:package` runs the same script.
         shell: bash
-        run: |
-          files="$(cargo package --locked --list)"
-          for script in core.sh output-budget.sh test-floor.sh semver-check.sh family-check.sh guest-rust-toolchain.sh stage-siblings.sh guest-rust-run.sh ci-gate.sh package-cli.sh; do
-            grep -Fqx "scripts/$script" <<<"$files" || {
-              echo "package omits scripts/$script" >&2
-              exit 1
-            }
-          done
+        run: bash scripts/package-contents.sh
       - run: cargo build --locked --all-targets
       - name: Linux mounted-transfer oracle prerequisites
         if: runner.os == 'Linux'
@@ -237,17 +229,9 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: verify the packaged family scripts
-        # A consumer with no checkout of this repository gets these from the
-        # published crate, through cargo, so the package must carry them.
+        # `chore check:package` runs the same script.
         shell: bash
-        run: |
-          files="$(cargo package --locked --list)"
-          for script in core.sh output-budget.sh test-floor.sh semver-check.sh family-check.sh guest-rust-toolchain.sh stage-siblings.sh guest-rust-run.sh ci-gate.sh package-cli.sh; do
-            grep -Fqx "scripts/$script" <<<"$files" || {
-              echo "package omits scripts/$script" >&2
-              exit 1
-            }
-          done
+        run: bash scripts/package-contents.sh
       - run: cargo build --locked --all-targets
       - name: Linux mounted-transfer oracle prerequisites
         if: runner.os == 'Linux'
@@ -351,17 +335,9 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: verify the packaged family scripts
-        # A consumer with no checkout of this repository gets these from the
-        # published crate, through cargo, so the package must carry them.
+        # `chore check:package` runs the same script.
         shell: bash
-        run: |
-          files="$(cargo package --locked --list)"
-          for script in core.sh output-budget.sh test-floor.sh semver-check.sh family-check.sh guest-rust-toolchain.sh stage-siblings.sh guest-rust-run.sh ci-gate.sh package-cli.sh; do
-            grep -Fqx "scripts/$script" <<<"$files" || {
-              echo "package omits scripts/$script" >&2
-              exit 1
-            }
-          done
+        run: bash scripts/package-contents.sh
       - run: cargo build --locked --all-targets
       - name: Linux mounted-transfer oracle prerequisites
         if: runner.os == 'Linux'
