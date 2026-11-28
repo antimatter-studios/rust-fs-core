@@ -133,6 +133,95 @@ out="$(progress 2>&1)"
 same "$?" 0 "no tiers at all is not a failure"
 contains "$out" "no tier" "and it says so"
 
+# --- a cargo tier: its phase, and tests done against the total -------------------
+
+printf '[[package]]\nname = "%s"\n\n' a b c d > "$FS_CORE_CALLER/Cargo.lock"
+cargo_log() { # cargo_log <name> <seconds ago> <line>...
+    local name="$1"
+    record "$name" "$2" 10 0
+    shift 2
+    printf '%s\n' "$@" > "$LOGS/$name.log"
+}
+ran_a='     Running tests/a.rs (target/debug/deps/a-0123456789abcdef)'
+ran_b='     Running tests/b.rs (target/debug/deps/b-fedcba9876543210)'
+result_a='test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s'
+
+# CI sets CARGO_TERM_COLOR=always, so cargo's own lines carry colour codes.
+cargo_log building 10 \
+    "$(printf '\033[1m\033[32m   Compiling\033[0m a v1.0.0')" \
+    '   Compiling b v1.0.0'
+line="$(progress building)"
+contains "$line" "  build  " "a tier that is compiling is in the build phase"
+contains "$line" "2/4 crates" "with crates compiled against those in Cargo.lock"
+contains "$line" "50%" "as a percentage"
+contains "$line" "eta unknown" "and a first run has no ETA while it builds"
+
+cargo_log testing 60 \
+    '   Compiling a v1.0.0' "$ran_a" 'running 3 tests' '...' "$result_a" \
+    "$ran_b" 'running 100 tests' '..... 5/100' 'b::bad --- FAILED'
+printf '...' >> "$LOGS/testing.log"
+line="$(progress testing)"
+contains "$line" "  test  " "a tier that is running tests is in the test phase"
+contains "$line" "12/103 tests" "counting quiet rows, failures and the unfinished row"
+contains "$line" "11%" "against the total known so far"
+contains "$line" "1 failed" "with its failures"
+matches "$line" 'eta 7m[0-9]+s \(rate alone\)' "and a first run says its ETA comes from the rate alone"
+
+# libtest's default format, with the line endings Windows writes.
+cargo_log listed 10 "$ran_a" 'running 4 tests'
+printf 'test one ... ok\r\ntest two ... FAILED\r\ntest three ... ignored\r\n' >> "$LOGS/listed.log"
+line="$(progress listed)"
+contains "$line" "3/4 tests" "a tier that lists its tests is counted too"
+contains "$line" "75%" "as a percentage"
+contains "$line" "1 failed" "with its failure"
+
+# --- the last run's durations ------------------------------------------------------
+
+# 100s last time: 20s of build, 20s in a and 60s in b. This run is half way through
+# b after 140s, where the last one had taken 70s: it is twice as slow, so the 30s
+# that were left then are 60s now.
+cargo_log again 140 "$ran_a" 'running 3 tests' '...' "$result_a" "$ran_b" 'running 10 tests'
+printf '.....' >> "$LOGS/again.log"
+printf '%s\n' 'duration=100' 'compiled=4' \
+    'binary 20.00 3 tests/a.rs (a)' 'binary 60.00 10 tests/b.rs (b)' > "$LOGS/again.history"
+line="$(progress again)"
+contains "$line" "8/13 tests" "tests are still counted when there is a last run"
+contains "$line" "70%" "the percentage is the last run's time so far over its whole"
+matches "$line" 'eta 1m[0-3]s \(from last run\)' "and the ETA is what was left then, scaled by this run"
+
+cargo_log rebuilding 30 '   Compiling a v1.0.0'
+cp "$LOGS/again.history" "$LOGS/rebuilding.history"
+line="$(progress rebuilding)"
+matches "$line" 'eta 1m(10|[6-9])s \(from last run\)' "a build takes its ETA from the last run's duration"
+
+# --- what a tier records when it ends ------------------------------------------------
+
+cat > "$SANDBOX/cargo.sh" <<WORK
+echo '   Compiling a v1.0.0'
+echo '$ran_a'
+echo 'running 2 tests'
+echo '..'
+echo 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s'
+WORK
+bash "$TIER" real real 100 100000 -- bash "$SANDBOX/cargo.sh" > "$SANDBOX/verdict" 2>&1
+history="$(cat "$LOGS/real.history" 2>/dev/null)"
+matches "$history" '^duration=[0-9]+$' "an ended tier records its duration"
+contains "$history" "compiled=1" "how many crates it compiled"
+contains "$history" "binary 1.50 2 tests/a.rs (a)" "and each test binary's duration"
+same "$(wc -l < "$SANDBOX/verdict" | tr -d ' ')" 1 "it still prints one verdict line"
+same "$(wc -l < "$LOGS/real.log" | tr -d ' ')" 5 "and its log holds only what the command printed"
+bash "$TIER" real real 100 100000 -- bash -c 'exit 3' > /dev/null 2>&1
+same "$(cat "$LOGS/real.history" 2>/dev/null)" "$history" "a failed run does not replace the last good one's record"
+
+# --- asked through tier.sh ------------------------------------------------------------
+
+out="$(bash "$TIER" progress again 2>&1)"
+same "$?" 0 "tier.sh progress NAME succeeds"
+contains "$out" "8/13 tests" "and prints that tier's line"
+out="$(bash "$TIER" progress 2>&1)"
+contains "$out" "building" "tier.sh progress lists every tier"
+contains "$out" "testing" "one line each"
+
 if [ "$fails" -gt 0 ]; then
     echo "test-tier-progress: $fails check(s) failed" >&2
     exit 1
