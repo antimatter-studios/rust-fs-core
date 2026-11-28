@@ -291,10 +291,21 @@ chore test:debug      # the whole suite, debug, overflow checks armed, budgeted,
 chore test:release    # the same selection, optimized (test-opt profile), budgeted, floor 488
 chore test            # both tiers
 chore test:scripts    # the shell tests (tests/scripts/*.sh)
+chore prove           # what every Linux job in ci.yml runs, one after another, with a summary
 chore coverage        # the suite under llvm-cov with the same 90% line floor CI uses
 chore staticlib       # libfs_core.a + include/fs_core.h into dist/
 chore artifact        # print the absolute path of dist/ — a DIRECTORY, not a file
 ```
+
+**`chore prove`** goes on after a failure, fails if any task failed, and ends
+with one line per task naming its logs. It needs what the tasks need:
+`cargo-llvm-cov`, `cargo-semver-checks`, PyYAML and `rustup`. It runs natively:
+this crate has no VM harness, so on a Mac the summary says the Linux behaviour
+is not covered, and lists the CI jobs for other platforms. A new command in a
+Linux job of `ci.yml` needs a task in `prove`:
+`tests/scripts/test-prove-covers-ci.sh` fails until it has one. A sibling runs
+the same script in place, with its own tasks:
+`bash ../rust-fs-core/scripts/prove.sh [--not-covered JOB]... TASK...`.
 
 Two environment variables are part of the contract rather than conveniences:
 
@@ -518,10 +529,11 @@ Exit **65** is a passing run that printed more than its budget.
 logging it and does **not** lift the budget. CI keeps `tmp/logs/` as an
 artifact, so the detail is always retrievable.
 
-One step in the `test` job asserts that `cargo package --locked --list` still
-contains `scripts/output-budget.sh`. A consumer that cannot find the sibling
-falls back to the packaged crate, so dropping that file from the package is a
-silent break in ten repositories rather than a failure here.
+One step in each `test` job (`scripts/package-contents.sh`) asserts that the
+packaged file list still contains `scripts/output-budget.sh`. A consumer that
+cannot find the sibling falls back to the packaged crate, so dropping that file
+from the package is a silent break in ten repositories rather than a failure
+here.
 
 ## What gates a merge
 

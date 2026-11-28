@@ -275,9 +275,39 @@ tasks:
       - task: test:release
 
   prove:
-    desc: Run lint and every Linux CI tier, reporting all results
+    desc: Run what every Linux CI job runs, reporting all results
+    # tests/scripts/test-prove-covers-ci.sh fails when a Linux job in ci.yml
+    # runs a command none of these tasks runs, or when a job on another
+    # platform is not listed here as not covered.
     cmds:
-      - bash scripts/prove.sh lint test:debug coverage
+      - >-
+        bash scripts/prove.sh
+        --not-covered "test / macos-latest"
+        --not-covered "test / windows-latest"
+        lint check:ci-gate test:scripts check:build check:package test:debug
+        check:doc coverage check:msrv check:semver
+
+  check:build:
+    desc: Build every target with the default features, as CI's test jobs do
+    cmds:
+      - cargo build --locked --all-targets
+
+  check:package:
+    desc: The published crate carries the family scripts
+    cmds:
+      - bash scripts/package-contents.sh
+
+  check:doc:
+    desc: Rustdoc with warnings denied (cargo doc exits 0 on warnings)
+    cmds:
+      - 'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --features cli,layers'
+
+  check:msrv:
+    desc: Every feature builds on the oldest toolchain Cargo.toml declares
+    cmds:
+      # Idempotent: rustup installs the toolchain only when it is missing.
+      - rustup toolchain install 1.89.0 --profile minimal
+      - cargo +1.89.0 check --locked --all-features
 
   coverage:
     desc: Instrumented suite with the same 90% line-coverage gate as CI
