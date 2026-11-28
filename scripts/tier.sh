@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tier.sh [--refuse-skips] [--refuse-ignored] LABEL LOG-NAME MAX-LINES MAX-BYTES -- COMMAND [ARG...]
 # tier.sh [--refuse-skips] [--refuse-ignored] TIER -- COMMAND [ARG...]
+# tier.sh progress [LOG-NAME]
 #
 # The family's tier runner: one quiet, budgeted test tier around
 # output-budget.sh, writing tmp/logs/LOG-NAME.log in the repository it is run
@@ -12,6 +13,13 @@ set -euo pipefail
 # caller's, and the budget wrapper is the one beside this file.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CALLER="${FS_CORE_CALLER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+
+# `progress` asks about the tiers instead of running one. With `--` after it, it
+# is a tier's name like any other.
+if [ "${1:-}" = progress ] && [ $# -le 2 ] && [ "${2:-}" != "--" ]; then
+    shift
+    FS_CORE_CALLER="$CALLER" exec bash "$HERE/tier-progress.sh" "$@"
+fi
 
 # A skipped test reads exactly like a passing one, and three repositories had
 # grown these checks in their own copies of this file. Each fails (exit 66) a
@@ -75,6 +83,9 @@ META="$CALLER/tmp/logs/$LOG_NAME.meta"
 # shellcheck disable=SC2329  # called by the trap below
 tier_ended() {
     { printf 'ended=%s\nstatus=%s\n' "$(date +%s)" "$1" >> "$META"; } 2>/dev/null || true
+    # A passing run's durations are the next run's ETA (tmp/logs/LOG-NAME.history).
+    [ "$1" = 0 ] || return 0
+    FS_CORE_CALLER="$CALLER" bash "$HERE/tier-progress.sh" --record "$LOG_NAME" >/dev/null 2>&1 || true
 }
 trap 'tier_ended "$?"' EXIT
 
